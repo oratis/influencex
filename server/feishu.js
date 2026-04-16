@@ -17,12 +17,12 @@ const FEISHU_APP_ID = process.env.FEISHU_APP_ID;
 const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
 
 // Published content spreadsheet
-const CONTENT_SHEET_TOKEN = 'KApys1IPshRGSYtw3XvcDip0n2e';
-const CONTENT_SHEET_ID = 'd6ef2b';
+const CONTENT_SHEET_TOKEN = process.env.FEISHU_CONTENT_SHEET_TOKEN || 'KApys1IPshRGSYtw3XvcDip0n2e';
+const CONTENT_SHEET_ID = process.env.FEISHU_CONTENT_SHEET_ID || 'd6ef2b';
 
 // Registration data spreadsheet
-const REG_SHEET_TOKEN = 'MBZTsFIjbhB8qjtHwMRc8gRFnkD';
-const REG_SHEET_ID = '550c58';
+const REG_SHEET_TOKEN = process.env.FEISHU_REG_SHEET_TOKEN || 'MBZTsFIjbhB8qjtHwMRc8gRFnkD';
+const REG_SHEET_ID = process.env.FEISHU_REG_SHEET_ID || '550c58';
 
 let cachedToken = null;
 let tokenExpiry = 0;

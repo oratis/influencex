@@ -17,7 +17,21 @@ const PORT = process.env.PORT || 8080;
 const BASE_PATH = process.env.BASE_PATH || '/InfluenceX';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
-app.use(cors());
+const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
+  : ['http://localhost:3000', 'http://localhost:8080', 'http://localhost:5173'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (server-to-server, curl, mobile apps)
+    if (!origin || ALLOWED_ORIGINS.includes(origin) || process.env.NODE_ENV !== 'production') {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
 
 // Resend webhook needs raw body for signature verification
 const crypto = require('crypto');
@@ -1772,14 +1786,19 @@ app.use(BASE_PATH, (req, res, next) => {
 
 // ==================== Auto-setup on startup ====================
 async function initializeDefaultData() {
-  // Create default admin account if not exists
-  const existing = await queryOne('SELECT id FROM users WHERE email = ?', ['oratis@hakko.ai']);
-  if (!existing) {
-    await registerUser('oratis@hakko.ai', 'hakko2026', 'Oratis');
-    console.log('Default admin account created: oratis@hakko.ai');
+  // Create default admin account from env vars (skip if not configured)
+  const adminEmail = process.env.ADMIN_EMAIL;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  const adminName = process.env.ADMIN_NAME || 'Admin';
+  if (adminEmail && adminPassword) {
+    const existing = await queryOne('SELECT id FROM users WHERE email = ?', [adminEmail]);
+    if (!existing) {
+      await registerUser(adminEmail, adminPassword, adminName);
+      console.log(`Default admin account created: ${adminEmail}`);
+    }
   }
 
-  // Seed HakkoAI_Q1_All campaign if no campaigns exist
+  // Seed demo campaign if no campaigns exist
   const campaignCount = await queryOne('SELECT COUNT(*) as count FROM campaigns');
   if (parseInt(campaignCount.count) === 0) {
     await seedDemoData();
@@ -1913,13 +1932,13 @@ function calculateAIScore(kol, criteria, campaignDesc) {
   else if (viewRatio > 0.05) { score += 5; }
 
   // Clamp score
-  score = Math.min(99, Math.max(10, score + Math.floor(Math.random() * 8 - 4)));
+  score = Math.min(99, Math.max(10, score));
 
   // Estimate CPM based on platform and followers
   const baseCpm = { tiktok: 8, youtube: 15, instagram: 10, twitch: 12, x: 6 };
   const platformCpm = baseCpm[kol.platform] || 10;
   const followerMultiplier = kol.followers > 500000 ? 1.8 : kol.followers > 100000 ? 1.3 : 1.0;
-  const estimatedCpm = +(platformCpm * followerMultiplier * (0.8 + Math.random() * 0.4)).toFixed(2);
+  const estimatedCpm = +(platformCpm * followerMultiplier).toFixed(2);
 
   return {
     score,

@@ -3,6 +3,19 @@
  * Also supports legacy SMTP via nodemailer as fallback
  */
 
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function textToHtml(text) {
+  return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
 function isConfigured() {
   return !!(process.env.RESEND_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS));
 }
@@ -40,7 +53,7 @@ async function sendViaResend({ to, subject, body, fromName }) {
       reply_to: replyTo,
       subject,
       text: body,
-      html: body.replace(/\n/g, '<br>'),
+      html: textToHtml(body),
     });
 
     if (error) {
@@ -77,7 +90,7 @@ async function sendViaSMTP({ to, subject, body, fromName }) {
       to,
       subject,
       text: body,
-      html: body.replace(/\n/g, '<br>'),
+      html: textToHtml(body),
     });
 
     return {

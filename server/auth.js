@@ -5,6 +5,45 @@ const { v4: uuidv4 } = require('uuid');
 
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Rate limiting for login attempts
+const loginAttempts = new Map(); // email -> { count, resetAt }
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
+
+function checkLoginRateLimit(email) {
+  const now = Date.now();
+  const record = loginAttempts.get(email);
+  if (!record || now > record.resetAt) {
+    return { allowed: true };
+  }
+  if (record.count >= MAX_LOGIN_ATTEMPTS) {
+    const remainingMs = record.resetAt - now;
+    const remainingMin = Math.ceil(remainingMs / 60000);
+    return { allowed: false, remainingMin };
+  }
+  return { allowed: true };
+}
+
+function recordLoginAttempt(email, success) {
+  const now = Date.now();
+  if (success) {
+    loginAttempts.delete(email);
+    return;
+  }
+  const record = loginAttempts.get(email) || { count: 0, resetAt: now + LOCKOUT_DURATION };
+  record.count += 1;
+  record.resetAt = now + LOCKOUT_DURATION;
+  loginAttempts.set(email, record);
+}
+
+// Cleanup stale entries every 30 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, record] of loginAttempts) {
+    if (now > record.resetAt) loginAttempts.delete(email);
+  }
+}, 30 * 60 * 1000);
+
 function hashPassword(password) {
   return bcrypt.hashSync(password, 10);
 }
@@ -66,9 +105,22 @@ async function registerUser(email, password, name) {
 }
 
 async function loginUser(email, password) {
+  // Check rate limit
+  const rateCheck = checkLoginRateLimit(email);
+  if (!rateCheck.allowed) {
+    return { error: `Too many login attempts. Please try again in ${rateCheck.remainingMin} minutes.` };
+  }
+
   const user = await queryOne('SELECT * FROM users WHERE email = ?', [email]);
-  if (!user) return { error: 'Invalid email or password' };
-  if (!verifyPassword(password, user.password_hash)) return { error: 'Invalid email or password' };
+  if (!user) {
+    recordLoginAttempt(email, false);
+    return { error: 'Invalid email or password' };
+  }
+  if (!verifyPassword(password, user.password_hash)) {
+    recordLoginAttempt(email, false);
+    return { error: 'Invalid email or password' };
+  }
+  recordLoginAttempt(email, true);
   const session = await createSession(user.id);
   return {
     token: session.token,
@@ -77,4 +129,15 @@ async function loginUser(email, password) {
   };
 }
 
-module.exports = { authMiddleware, registerUser, loginUser, destroySession, getSession };
+async function cleanupExpiredSessions() {
+  try {
+    await exec('DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP');
+  } catch (e) {
+    console.error('Session cleanup error:', e.message);
+  }
+}
+
+// Run cleanup every hour
+setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
+
+module.exports = { authMiddleware, registerUser, loginUser, destroySession, getSession, cleanupExpiredSessions };

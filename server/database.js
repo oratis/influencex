@@ -273,6 +273,23 @@ const PG_SCHEMA = `
     received_at TIMESTAMP DEFAULT NOW(),
     created_at TIMESTAMP DEFAULT NOW()
   );
+
+  CREATE INDEX IF NOT EXISTS idx_kols_campaign_id ON kols(campaign_id);
+  CREATE INDEX IF NOT EXISTS idx_kols_status ON kols(status);
+  CREATE INDEX IF NOT EXISTS idx_contacts_kol_id ON contacts(kol_id);
+  CREATE INDEX IF NOT EXISTS idx_contacts_campaign_id ON contacts(campaign_id);
+  CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_stage ON pipeline_jobs(stage);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_email_to ON pipeline_jobs(email_to);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_campaign_id ON pipeline_jobs(campaign_id);
+  CREATE INDEX IF NOT EXISTS idx_kol_database_platform ON kol_database(platform);
+  CREATE INDEX IF NOT EXISTS idx_kol_database_email ON kol_database(email);
+  CREATE INDEX IF NOT EXISTS idx_kol_database_scrape_status ON kol_database(scrape_status);
+  CREATE INDEX IF NOT EXISTS idx_email_replies_pipeline_job_id ON email_replies(pipeline_job_id);
+  CREATE INDEX IF NOT EXISTS idx_email_replies_contact_id ON email_replies(contact_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_content_daily_stats_url ON content_daily_stats(content_url);
+  CREATE INDEX IF NOT EXISTS idx_discovery_results_job_id ON discovery_results(job_id);
 `;
 
 const SQLITE_SCHEMA = `
@@ -506,6 +523,23 @@ const SQLITE_SCHEMA = `
     received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE INDEX IF NOT EXISTS idx_kols_campaign_id ON kols(campaign_id);
+  CREATE INDEX IF NOT EXISTS idx_kols_status ON kols(status);
+  CREATE INDEX IF NOT EXISTS idx_contacts_kol_id ON contacts(kol_id);
+  CREATE INDEX IF NOT EXISTS idx_contacts_campaign_id ON contacts(campaign_id);
+  CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_stage ON pipeline_jobs(stage);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_email_to ON pipeline_jobs(email_to);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_campaign_id ON pipeline_jobs(campaign_id);
+  CREATE INDEX IF NOT EXISTS idx_kol_database_platform ON kol_database(platform);
+  CREATE INDEX IF NOT EXISTS idx_kol_database_email ON kol_database(email);
+  CREATE INDEX IF NOT EXISTS idx_kol_database_scrape_status ON kol_database(scrape_status);
+  CREATE INDEX IF NOT EXISTS idx_email_replies_pipeline_job_id ON email_replies(pipeline_job_id);
+  CREATE INDEX IF NOT EXISTS idx_email_replies_contact_id ON email_replies(contact_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_content_daily_stats_url ON content_daily_stats(content_url);
+  CREATE INDEX IF NOT EXISTS idx_discovery_results_job_id ON discovery_results(job_id);
 `;
 
 // ==================== Initialize ====================
