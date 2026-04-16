@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
+import { useToast } from '../components/Toast';
+import { useConfirm } from '../components/ConfirmDialog';
 
 const STAGES = [
   { key: 'scrape', label: 'Scrape', icon: '🔍', desc: 'AI scraping profile data' },
@@ -40,6 +42,8 @@ function StageProgress({ currentStage }) {
 
 export default function PipelinePage() {
   const { selectedCampaignId } = useCampaign();
+  const toast = useToast();
+  const { confirm, prompt } = useConfirm();
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [url, setUrl] = useState('');
@@ -86,20 +90,23 @@ export default function PipelinePage() {
       await api.startPipeline({ profile_url: url.trim(), campaign_id: selectedCampaignId });
       setUrl('');
       loadJobs();
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast.error(e.message); }
     setSubmitting(false);
   };
 
   const handleApprove = async (job) => {
-    const emailTo = job.email_to || job.kol_email || prompt('Enter KOL email address:');
+    let emailTo = job.email_to || job.kol_email;
+    if (!emailTo) {
+      emailTo = await prompt('Enter KOL email address:', { title: 'Email Address', placeholder: 'creator@email.com' });
+    }
     if (!emailTo) return;
     setLoading(true);
     try {
       const result = await api.approvePipelineEmail(job.id, { email_to: emailTo });
-      if (!result.success) alert(result.error || 'Failed to send');
+      if (!result.success) toast.error(result.error || 'Failed to send');
       loadJobs();
       setSelectedJob(null);
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast.error(e.message); }
     setLoading(false);
   };
 
@@ -109,7 +116,7 @@ export default function PipelinePage() {
       await api.rejectPipelineEmail(job.id);
       loadJobs();
       setSelectedJob(null);
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast.error(e.message); }
     setLoading(false);
   };
 
@@ -123,7 +130,7 @@ export default function PipelinePage() {
         max_results: 50,
       });
       loadDiscoveryJobs();
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast.error(e.message); }
     setDiscovering(false);
   };
 
@@ -138,17 +145,17 @@ export default function PipelinePage() {
     try {
       const data = await api.getDiscoveryJob(job.id);
       setSelectedDiscovery(data);
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast.error(e.message); }
   };
 
   const handleProcessDiscovery = async (jobId) => {
     setLoading(true);
     try {
       const result = await api.processDiscoveryResults(jobId, { min_relevance: 30, max_process: 10 });
-      alert(`Processing ${result.processed} KOLs through pipeline`);
+      toast.success(`Processing ${result.processed} KOLs through pipeline`);
       loadJobs();
       loadDiscoveryJobs();
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast.error(e.message); }
     setLoading(false);
   };
 
@@ -286,7 +293,7 @@ export default function PipelinePage() {
       {tab === 'discovery' && (
         <>
           <div className="card" style={{ marginBottom: '20px' }}>
-            <h3 style={{ marginBottom: '12px', fontSize: '15px' }}>KOL Discovery - HakkoAI Campaign</h3>
+            <h3 style={{ marginBottom: '12px', fontSize: '15px' }}>KOL Discovery</h3>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
               Automatically discover Gaming + AI Roleplay creators on YouTube using AI search
             </p>

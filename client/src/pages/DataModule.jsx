@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ComposedChart, PieChart, Pie, Cell, ReferenceLine } from 'recharts';
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
+import { useToast } from '../components/Toast';
 
 const TRAFFIC_COLORS = ['#6c5ce7', '#00d2a0', '#ff6b6b', '#feca57', '#48dbfb', '#ff9ff3', '#54a0ff', '#5f27cd'];
 const PLATFORM_COLORS = { youtube: '#ff4444', tiktok: '#00f2ea', instagram: '#e1306c', other: '#888' };
@@ -31,6 +32,7 @@ export default function DataModule() {
   // Daily stats drawer
   const [dailyStatsItem, setDailyStatsItem] = useState(null);
   const [dailyStats, setDailyStats] = useState([]);
+  const toast = useToast();
 
   const loadData = async () => {
     // Helper: wrap each API call so failures don't block others
@@ -113,9 +115,10 @@ export default function DataModule() {
     try {
       await api.updateContentStats(editItem.id, editForm);
       setEditItem(null);
+      toast.success('Stats updated');
       await loadData();
       await loadDashboard();
-    } catch (e) { console.error('Save error:', e); }
+    } catch (e) { toast.error('Failed to save: ' + e.message); }
     setSaving(false);
   };
 
@@ -423,7 +426,15 @@ export default function DataModule() {
           )}
 
           {/* ==================== Website Analytics (GA4) ==================== */}
-          {tab === 'analytics' && gaMetrics && (
+          {tab === 'analytics' && (
+            <>
+              {!gaMetrics ? (
+                <div className="empty-state">
+                  <h4>Analytics Unavailable</h4>
+                  <p>GA4 Data API is not responding. Check your GA4_PROPERTY_ID and service account configuration.</p>
+                  <button className="btn btn-secondary" onClick={loadData}>Retry</button>
+                </div>
+              ) : (
             <div>
               {!gaMetrics.configured && (
                 <div className="card" style={{ marginBottom: '16px', padding: '12px 16px', borderLeft: '3px solid var(--info)' }}>
@@ -535,8 +546,10 @@ export default function DataModule() {
               </div>
             </div>
           )}
-        </>
-      )}
+          </>
+        )}
+      </>
+    )}
 
       {/* ==================== Data Sources Panel ==================== */}
       <div className="card" style={{ marginTop: '20px' }}>

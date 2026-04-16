@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
+import { useToast } from '../components/Toast';
+import { useConfirm } from '../components/ConfirmDialog';
 
 const WORKFLOW_STEPS = [
   { key: 'email', label: 'Outreach', icon: '📧' },
@@ -33,6 +35,8 @@ const PAYMENT_OPTIONS = [
 
 export default function ContactModule() {
   const { selectedCampaignId } = useCampaign();
+  const toast = useToast();
+  const { confirm: confirmDialog, prompt: promptDialog } = useConfirm();
   const [contacts, setContacts] = useState([]);
   const [tab, setTab] = useState('pipeline');
   const [loading, setLoading] = useState(false);
@@ -56,34 +60,43 @@ export default function ContactModule() {
     setGenerating(true);
     try {
       const result = await api.batchGenerateEmails(selectedCampaignId, { cooperation_type: 'affiliate' });
-      alert(`Generated ${result.generated} emails!`);
+      toast.success(`Generated ${result.generated} emails`);
       loadContacts();
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { toast.error(e.message); }
     setGenerating(false);
   };
 
   const handleSend = async (contactId) => {
-    if (!confirm('Mark this email as sent?')) return;
-    await api.sendEmail(contactId);
-    loadContacts();
+    const ok = await confirmDialog('Mark this email as sent?', { title: 'Send Email' });
+    if (!ok) return;
+    try {
+      await api.sendEmail(contactId);
+      toast.success('Email marked as sent');
+      loadContacts();
+    } catch (e) { toast.error(e.message); }
   };
 
   const handleWorkflowUpdate = async (contactId, field, value) => {
-    await api.updateWorkflow(contactId, { [field]: value });
-    loadContacts();
+    try {
+      await api.updateWorkflow(contactId, { [field]: value });
+      loadContacts();
+    } catch (e) { toast.error(e.message); }
   };
 
   const handleSaveEdit = async () => {
     if (!editContact) return;
-    await api.updateContact(editContact.id, {
-      email_subject: editContact.email_subject,
-      email_body: editContact.email_body,
-      cooperation_type: editContact.cooperation_type,
-      price_quote: editContact.price_quote,
-      notes: editContact.notes,
-    });
-    setEditContact(null);
-    loadContacts();
+    try {
+      await api.updateContact(editContact.id, {
+        email_subject: editContact.email_subject,
+        email_body: editContact.email_body,
+        cooperation_type: editContact.cooperation_type,
+        price_quote: editContact.price_quote,
+        notes: editContact.notes,
+      });
+      toast.success('Contact updated');
+      setEditContact(null);
+      loadContacts();
+    } catch (e) { toast.error(e.message); }
   };
 
   const handleViewThread = async (contact) => {
@@ -253,24 +266,26 @@ export default function ContactModule() {
                   <>
                     <button className="btn btn-sm btn-secondary" onClick={() => handleViewThread(contact)}>📧 View Thread</button>
                     {contact.status === 'sent' && (
-                      <button className="btn btn-sm btn-primary" onClick={() => {
-                        const reply = prompt('Enter reply content:');
-                        if (reply) api.recordReply(contact.id, reply).then(loadContacts);
+                      <button className="btn btn-sm btn-primary" onClick={async () => {
+                        const reply = await promptDialog('Enter reply content:', { title: 'Record Reply', placeholder: 'Paste the reply text here...' });
+                        if (reply) { await api.recordReply(contact.id, reply); toast.success('Reply recorded'); loadContacts(); }
                       }}>💬 Record Reply</button>
                     )}
                   </>
                 )}
                 {contact.content_status === 'not_started' && contact.contract_status === 'signed' && (
-                  <button className="btn btn-sm btn-secondary" onClick={() => {
-                    const url = prompt('Enter content URL:');
+                  <button className="btn btn-sm btn-secondary" onClick={async () => {
+                    const url = await promptDialog('Enter content URL:', { title: 'Content URL', placeholder: 'https://...' });
                     if (url) handleWorkflowUpdate(contact.id, 'content_url', url);
                   }}>🔗 Add Content URL</button>
                 )}
                 {contact.payment_status === 'unpaid' && contact.content_status === 'approved' && (
-                  <button className="btn btn-sm btn-success" onClick={() => {
-                    const amount = prompt('Payment amount ($):', contact.price_quote || '0');
+                  <button className="btn btn-sm btn-success" onClick={async () => {
+                    const amount = await promptDialog('Payment amount ($):', { title: 'Process Payment', defaultValue: contact.price_quote || '0' });
                     if (amount) {
-                      api.updateWorkflow(contact.id, { payment_amount: parseFloat(amount), payment_status: 'pending' }).then(loadContacts);
+                      await api.updateWorkflow(contact.id, { payment_amount: parseFloat(amount), payment_status: 'pending' });
+                      toast.success('Payment processed');
+                      loadContacts();
                     }
                   }}>💰 Process Payment</button>
                 )}

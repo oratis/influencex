@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { CampaignProvider, useCampaign } from './CampaignContext';
+import { ToastProvider } from './components/Toast';
+import { ConfirmProvider } from './components/ConfirmDialog';
 import AuthPage from './pages/AuthPage';
 import CampaignList from './pages/CampaignList';
 import CampaignDetail from './pages/CampaignDetail';
@@ -9,6 +11,7 @@ import ContactModule from './pages/ContactModule';
 import DataModule from './pages/DataModule';
 import KolDatabase from './pages/KolDatabase';
 import PipelinePage from './pages/PipelinePage';
+import NotFoundPage from './components/NotFoundPage';
 
 const navItems = [
   { path: '/pipeline', label: 'Pipeline', icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> },
@@ -99,6 +102,7 @@ function AppContent() {
               <Route path="/contacts" element={<ContactModule />} />
               <Route path="/data" element={<DataModule />} />
               <Route path="/kol-database" element={<KolDatabase />} />
+              <Route path="*" element={<NotFoundPage />} />
             </Routes>
           </main>
         </div>
@@ -119,6 +123,7 @@ function GlobalHeader() {
           value={selectedCampaignId}
           onChange={e => selectCampaign(e.target.value)}
         >
+          {campaigns.length === 0 && <option value="">No campaigns</option>}
           {campaigns.map(c => (
             <option key={c.id} value={c.id}>{c.name}</option>
           ))}
@@ -139,5 +144,11 @@ function GlobalHeader() {
 }
 
 export default function App() {
-  return <AppContent />;
+  return (
+    <ToastProvider>
+      <ConfirmProvider>
+        <AppContent />
+      </ConfirmProvider>
+    </ToastProvider>
+  );
 }

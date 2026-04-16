@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useToast } from '../components/Toast';
 
 const PLATFORM_OPTIONS = [
   { id: 'tiktok', label: 'TikTok', color: '#ff0050' },
@@ -93,6 +94,7 @@ function CreateCampaignModal({ onClose, onCreated }) {
     filter_criteria: { min_followers: 10000, min_engagement: 1, categories: '' }
   });
   const [saving, setSaving] = useState(false);
+  const toast = useToast();
 
   const togglePlatform = (id) => {
     setForm(f => ({
@@ -108,7 +110,7 @@ function CreateCampaignModal({ onClose, onCreated }) {
     try {
       await api.createCampaign(form);
       onCreated();
-    } catch (e) { console.error(e); }
+    } catch (e) { toast.error(e.message); }
     setSaving(false);
   };
 

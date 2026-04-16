@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
+import { useToast } from '../components/Toast';
+import { useConfirm } from '../components/ConfirmDialog';
 
 const PLATFORM_COLORS = {
   tiktok: '#ff0050', youtube: '#ff0000', instagram: '#e1306c',
@@ -19,6 +21,8 @@ export default function KolDatabase() {
   const [selectedKol, setSelectedKol] = useState(null);
   const [apiStatus, setApiStatus] = useState(null);
   const pollRef = useRef(null);
+  const toast = useToast();
+  const { confirm: confirmDialog } = useConfirm();
 
   const loadKols = async () => {
     try {
@@ -56,16 +60,20 @@ export default function KolDatabase() {
     setImporting(true);
     try {
       const result = await api.importCampaignKols(selectedCampaignId);
-      alert(`Imported ${result.imported} KOLs (${result.skipped} already existed)`);
+      toast.success(`Imported ${result.imported} KOLs (${result.skipped} already existed)`);
       loadKols();
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { toast.error(e.message); }
     setImporting(false);
   };
 
   const handleDelete = async (id) => {
-    if (!confirm('Remove this KOL from the database?')) return;
-    await api.deleteKolDatabaseEntry(id);
-    loadKols();
+    const ok = await confirmDialog('Remove this KOL from the database?', { title: 'Delete KOL', danger: true, confirmText: 'Delete' });
+    if (!ok) return;
+    try {
+      await api.deleteKolDatabaseEntry(id);
+      toast.success('KOL removed');
+      loadKols();
+    } catch (e) { toast.error(e.message); }
   };
 
   const scrapingCount = kols.filter(k => k.scrape_status === 'scraping').length;

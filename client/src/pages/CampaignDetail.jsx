@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { useToast } from '../components/Toast';
 
 function ScoreBadge({ score }) {
   const color = score >= 80 ? 'var(--success)' : score >= 60 ? 'var(--warning)' : 'var(--danger)';
@@ -24,6 +25,7 @@ export default function CampaignDetail() {
   const [collecting, setCollecting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState('ai_score');
+  const toast = useToast();
 
   const loadData = async () => {
     try {
@@ -49,9 +51,9 @@ export default function CampaignDetail() {
     setCollecting(true);
     try {
       const result = await api.collectKols(id);
-      alert(`Successfully collected ${result.collected} KOLs with AI scoring!`);
+      toast.success(`Collected ${result.collected} KOLs with AI scoring`);
       loadData();
-    } catch (e) { console.error(e); }
+    } catch (e) { toast.error(e.message); }
     setCollecting(false);
   };
 
@@ -117,7 +119,7 @@ export default function CampaignDetail() {
           <button className="btn btn-primary" onClick={handleCollect} disabled={collecting}>
             {collecting ? '⏳ AI Collecting...' : '🤖 AI Collect KOLs'}
           </button>
-          <button className="btn btn-success" onClick={() => navigate(`/contacts/${id}`)}>
+          <button className="btn btn-success" onClick={() => navigate('/contacts')}>
             📧 Go to Contact
           </button>
         </div>
@@ -210,7 +212,7 @@ export default function CampaignDetail() {
                     </td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <div className="kol-avatar"><img src={kol.avatar_url} alt="" /></div>
+                        <div className="kol-avatar"><img src={kol.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${kol.username}`} alt="" /></div>
                         <div>
                           <div className="kol-name">{kol.display_name || kol.username}</div>
                           <div style={{ fontSize: '11px', color: 'var(--text-muted)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={kol.ai_reason}>
@@ -252,6 +254,7 @@ export default function CampaignDetail() {
 }
 
 function formatNumber(n) {
+  if (!n && n !== 0) return '0';
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return String(n);
