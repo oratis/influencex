@@ -1,0 +1,29 @@
+{
+  "name": "influencex",
+  "version": "1.0.0",
+  "description": "InfluenceX - KOL Marketing Automation Agent",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "build": "cd client && npm install && npx vite build",
+    "dev:client": "cd client && npx vite"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google-analytics/data": "^5.2.1",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.8.0",
+    "pg": "^8.13.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1",
+    "nodemailer": "^8.0.4",
+    "resend": "^6.10.0",
+    "undici": "^8.0.0",
+    "uuid": "^13.0.0"
+  }
+}
