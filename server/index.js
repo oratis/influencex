@@ -11,6 +11,9 @@ const scraper = require('./scraper');
 const mailAgent = require('./agents/mail-agent');
 const dataAgent = require('./agents/data-agent');
 const discoveryAgent = require('./agents/discovery-agent');
+const youtubeQuota = require('./youtube-quota');
+const { runPendingMigrations } = require('./migrations');
+const emailTemplates = require('./email-templates');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -215,35 +218,77 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
   }
 });
 
-// Batch add KOLs (simulate collection)
+// Collect KOLs for a campaign — uses real YouTube Discovery API if configured,
+// falls back to demo sample generator if no API keys are set
 app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, async (req, res) => {
   try {
     const campaign = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.campaignId]);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
     const platforms = JSON.parse(campaign.platforms || '[]');
-    const target = campaign.daily_target || 10;
+    const target = Math.min(campaign.daily_target || 10, 50);
     const criteria = JSON.parse(campaign.filter_criteria || '{}');
+    const keywords = req.body.keywords || criteria.categories || campaign.description || 'gaming';
 
-    // Simulate KOL collection with realistic demo data + AI scoring
-    const sampleKols = generateSampleKols(platforms, target, criteria);
-    sampleKols.forEach(k => {
+    const useRealAPI = !!YOUTUBE_API_KEY && (platforms.length === 0 || platforms.includes('youtube'));
+    let collectedKols = [];
+    let source = 'demo';
+
+    if (useRealAPI) {
+      // Real collection via YouTube Discovery agent
+      source = 'youtube-api';
+      const discoveryResult = await discoveryAgent.searchYouTubeChannels({
+        keywords: Array.isArray(keywords) ? keywords.join(', ') : keywords,
+        minSubscribers: criteria.min_followers || 5000,
+        maxResults: target,
+      }).catch(err => {
+        console.error('[collect] Discovery failed, falling back to demo:', err.message);
+        return null;
+      });
+
+      if (discoveryResult?.success && discoveryResult.channels?.length) {
+        collectedKols = discoveryResult.channels.slice(0, target).map(ch => ({
+          id: uuidv4(),
+          platform: 'youtube',
+          username: ch.channelId,
+          display_name: ch.channel_name,
+          avatar_url: ch.avatar_url || '',
+          followers: ch.subscribers || 0,
+          engagement_rate: 0,
+          avg_views: 0,
+          category: ch.category || 'Unknown',
+          email: null,
+          contact_info: {},
+          profile_url: ch.channel_url,
+          bio: ch.description || '',
+        }));
+      }
+    }
+
+    // Fallback to demo data if no API or no results
+    if (collectedKols.length === 0) {
+      source = useRealAPI ? 'demo-fallback' : 'demo';
+      collectedKols = generateSampleKols(platforms, target, criteria);
+    }
+
+    // Apply AI scoring (deterministic)
+    collectedKols.forEach(k => {
       const score = calculateAIScore(k, criteria, campaign.description || '');
       k.ai_score = score.score;
       k.ai_reason = score.reason;
       k.estimated_cpm = score.estimatedCpm;
     });
-    sampleKols.sort((a, b) => b.ai_score - a.ai_score);
+    collectedKols.sort((a, b) => b.ai_score - a.ai_score);
 
     await transaction(async (tx) => {
-      for (const k of sampleKols) {
+      for (const k of collectedKols) {
         await tx.exec(
           'INSERT INTO kols (id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio, ai_score, ai_reason, estimated_cpm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [k.id, req.params.campaignId, k.platform, k.username, k.display_name, k.avatar_url, k.followers, k.engagement_rate, k.avg_views, k.category, k.email, JSON.stringify(k.contact_info || {}), k.profile_url, k.bio, k.ai_score, k.ai_reason, k.estimated_cpm]
         );
       }
     });
-    res.json({ collected: sampleKols.length, kols: sampleKols });
+    res.json({ collected: collectedKols.length, source, kols: collectedKols });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -354,11 +399,55 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
   }
 });
 
-// Send email (mark as sent)
+// Send email (actually send via Resend/SMTP)
 app.post(`${BASE_PATH}/api/contacts/:id/send`, async (req, res) => {
   try {
+    // Load contact + KOL email address
+    const contact = await queryOne(
+      `SELECT c.*, k.email as kol_email, k.display_name, k.username
+       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ?`,
+      [req.params.id]
+    );
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+    const emailTo = req.body.email_to || contact.kol_email;
+    if (!emailTo) {
+      return res.status(400).json({ error: 'No recipient email address found for this KOL' });
+    }
+    if (!contact.email_subject || !contact.email_body) {
+      return res.status(400).json({ error: 'Email subject/body is empty — generate or edit first' });
+    }
+
+    // If email provider not configured, fall back to marking as sent (dev mode)
+    if (!mailAgent.isConfigured()) {
+      await exec("UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=?", [req.params.id]);
+      return res.json({
+        success: true,
+        message: 'Email marked as sent (email provider not configured — no actual send)',
+        dryRun: true,
+      });
+    }
+
+    // Actually send
+    const sendResult = await mailAgent.sendEmail({
+      to: emailTo,
+      subject: contact.email_subject,
+      body: contact.email_body,
+    });
+
+    if (!sendResult.success) {
+      return res.status(502).json({ error: sendResult.error || 'Email provider rejected the send' });
+    }
+
+    // Update contact + record outbound email in thread
     await exec("UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=?", [req.params.id]);
-    res.json({ success: true, message: 'Email marked as sent' });
+    const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.SMTP_USER || 'noreply@localhost';
+    await exec(
+      "INSERT INTO email_replies (id, contact_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+      [uuidv4(), req.params.id, fromEmail, emailTo, contact.email_subject, contact.email_body, sendResult.messageId]
+    );
+
+    res.json({ success: true, messageId: sendResult.messageId, provider: sendResult.provider });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -829,6 +918,64 @@ app.post(`${BASE_PATH}/api/data/seed-demo`, async (req, res) => {
 // KOL scraper API status (must be before /:id route)
 app.get(`${BASE_PATH}/api/kol-database/api-status`, (req, res) => {
   res.json(scraper.getApiStatus());
+});
+
+// YouTube API daily quota status
+app.get(`${BASE_PATH}/api/quota/youtube`, (req, res) => {
+  res.json(youtubeQuota.status());
+});
+
+// ==================== Email Templates ====================
+
+// List available templates
+app.get(`${BASE_PATH}/api/email-templates`, (req, res) => {
+  res.json(emailTemplates.listTemplates());
+});
+
+// Render a template with variables (preview)
+app.post(`${BASE_PATH}/api/email-templates/:id/render`, (req, res) => {
+  try {
+    const rendered = emailTemplates.renderEmail(req.params.id, req.body.variables || {});
+    res.json(rendered);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+// Render a template for a specific KOL contact
+app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
+  try {
+    const templateId = req.body.template_id;
+    if (!templateId) return res.status(400).json({ error: 'template_id required' });
+
+    const contact = await queryOne(
+      `SELECT c.*, k.display_name, k.username, k.platform, k.followers, k.category, k.email as kol_email
+       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ?`,
+      [req.params.id]
+    );
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+    const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [contact.campaign_id]);
+
+    const variables = {
+      kol_name: contact.display_name || contact.username,
+      kol_handle: contact.username,
+      platform: contact.platform,
+      followers: emailTemplates.formatFollowers(contact.followers),
+      category: contact.category || 'content creation',
+      campaign_name: campaign?.name || '',
+      sender_name: req.body.sender_name || process.env.SENDER_NAME || 'The Team',
+      product_name: req.body.product_name || process.env.PRODUCT_NAME || campaign?.name || '',
+      cooperation_type: contact.cooperation_type,
+      price_quote: contact.price_quote || '',
+      ...req.body.extra_variables,
+    };
+
+    const rendered = emailTemplates.renderEmail(templateId, variables);
+    res.json({ ...rendered, variables });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // List all KOLs in the global database
@@ -1810,6 +1957,10 @@ async function initializeDefaultData() {
 (async () => {
   try {
     await initializeDatabase();
+    const migrationResult = await runPendingMigrations({ query, exec });
+    if (migrationResult.applied > 0) {
+      console.log(`[migrations] Applied ${migrationResult.applied} migration(s), total ${migrationResult.total}`);
+    }
     await initializeDefaultData();
     app.listen(PORT, () => {
       console.log(`InfluenceX server running on port ${PORT} (${usePostgres ? 'PostgreSQL' : 'SQLite'})`);

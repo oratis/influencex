@@ -4,6 +4,7 @@
  */
 
 const fetch = require('../proxy-fetch');
+const quota = require('../youtube-quota');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 function detectCategory(text) {
@@ -52,10 +53,18 @@ async function searchYouTubeChannels({ keywords, maxResults = 50, minSubscribers
 
   for (const query of queries) {
     try {
+      // Quota check: search.list is 100 units per call
+      const searchCheck = quota.canCall('search', 1);
+      if (!searchCheck.allowed) {
+        console.warn(`[quota] YouTube search skipped for "${query}" — daily quota exhausted (${searchCheck.used}/${searchCheck.dailyLimit})`);
+        break;
+      }
+
       const searchRes = await fetch(
         `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(query)}&maxResults=${Math.min(maxResults, 50)}&key=${YOUTUBE_API_KEY}`
       );
       const searchData = await searchRes.json();
+      quota.record('search', 1);
 
       if (searchData.error) {
         console.warn(`YouTube search error for "${query}":`, searchData.error.message);
@@ -68,11 +77,18 @@ async function searchYouTubeChannels({ keywords, maxResults = 50, minSubscribers
 
       if (channelIds.length === 0) continue;
 
-      // Get channel statistics in batch
+      // Get channel statistics in batch (channels.list = 1 unit per call)
+      const channelsCheck = quota.canCall('channels', 1);
+      if (!channelsCheck.allowed) {
+        console.warn(`[quota] YouTube channels.list skipped — daily quota exhausted`);
+        break;
+      }
+
       const statsRes = await fetch(
         `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&id=${channelIds.join(',')}&key=${YOUTUBE_API_KEY}`
       );
       const statsData = await statsRes.json();
+      quota.record('channels', 1);
 
       for (const ch of (statsData.items || [])) {
         const subs = parseInt(ch.statistics?.subscriberCount) || 0;

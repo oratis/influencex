@@ -131,4 +131,12 @@ export const api = {
 
   // Stats
   getStats: () => request('/stats'),
+
+  // Email Templates
+  listEmailTemplates: () => request('/email-templates'),
+  renderEmailTemplate: (id, variables) => request(`/email-templates/${id}/render`, { method: 'POST', body: { variables } }),
+  renderContactTemplate: (contactId, data) => request(`/contacts/${contactId}/render-template`, { method: 'POST', body: data }),
+
+  // YouTube quota
+  getYoutubeQuota: () => request('/quota/youtube'),
 };
