@@ -86,6 +86,12 @@ export default function KolDatabase() {
           <p>Global influencer database across all campaigns</p>
         </div>
         <div className="btn-group">
+          <button className="btn btn-secondary" onClick={async () => {
+            try { await api.downloadCsv('/kol-database/export', 'kol-database.csv'); toast.success('Exported KOL database'); }
+            catch (e) { toast.error(e.message); }
+          }} disabled={kols.length === 0}>
+            📤 Export CSV
+          </button>
           {selectedCampaign && (
             <button className="btn btn-secondary" onClick={handleImportCampaign} disabled={importing}>
               {importing ? '⏳ Importing...' : `📥 Import from ${selectedCampaign.name}`}

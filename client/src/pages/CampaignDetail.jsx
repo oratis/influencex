@@ -116,6 +116,12 @@ export default function CampaignDetail() {
           </p>
         </div>
         <div className="btn-group">
+          <button className="btn btn-secondary" onClick={async () => {
+            try { await api.downloadCsv(`/campaigns/${id}/kols/export`, `kols-${campaign?.name || 'campaign'}.csv`); toast.success('Exported campaign KOLs'); }
+            catch (e) { toast.error(e.message); }
+          }} disabled={kols.length === 0}>
+            📤 Export CSV
+          </button>
           <button className="btn btn-primary" onClick={handleCollect} disabled={collecting}>
             {collecting ? '⏳ AI Collecting...' : '🤖 AI Collect KOLs'}
           </button>

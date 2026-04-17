@@ -14,6 +14,10 @@ const discoveryAgent = require('./agents/discovery-agent');
 const youtubeQuota = require('./youtube-quota');
 const { runPendingMigrations } = require('./migrations');
 const emailTemplates = require('./email-templates');
+const csvExport = require('./csv-export');
+const rbac = require('./rbac');
+const notifications = require('./notifications');
+const scheduler = require('./scheduler');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -542,6 +546,14 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
     );
 
     console.log(`[Inbound Email] Saved. contact_id=${contactId}, pipeline_job_id=${pipelineJobId}`);
+
+    // Fire notification (fire-and-forget)
+    notifications.events.emailReply({
+      kolName: fromEmail,
+      subject: subject || '(no subject)',
+      preview: bodyText,
+    });
+
     res.json({ success: true, contactId, pipelineJobId });
   } catch (e) {
     console.error('[Inbound Email] Error:', e.message);
@@ -923,6 +935,122 @@ app.get(`${BASE_PATH}/api/kol-database/api-status`, (req, res) => {
 // YouTube API daily quota status
 app.get(`${BASE_PATH}/api/quota/youtube`, (req, res) => {
   res.json(youtubeQuota.status());
+});
+
+// ==================== RBAC ====================
+
+// Return current user's effective permissions (for UI gating)
+app.get(`${BASE_PATH}/api/auth/permissions`, authMiddleware, (req, res) => {
+  const role = req.user?.role || 'viewer';
+  res.json({ role, permissions: rbac.getRolePermissions(role) });
+});
+
+// List all roles (for admin UI)
+app.get(`${BASE_PATH}/api/auth/roles`, (req, res) => {
+  res.json({ roles: rbac.ROLES });
+});
+
+// ==================== CSV Export ====================
+
+function sendCsv(res, rows, columns, filename) {
+  const csv = csvExport.toCsv(rows, columns);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+}
+
+// Export campaign KOLs to CSV
+app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, async (req, res) => {
+  try {
+    const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [req.params.id]);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const result = await query('SELECT * FROM kols WHERE campaign_id = ? ORDER BY ai_score DESC', [req.params.id]);
+    const safeName = (campaign.name || 'campaign').replace(/[^a-z0-9_-]/gi, '_');
+    sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kols-${safeName}.csv`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Export campaign contacts to CSV
+app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, async (req, res) => {
+  try {
+    const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [req.params.id]);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const result = await query(
+      `SELECT c.*, k.display_name, k.username, k.platform, k.email as kol_email
+       FROM contacts c JOIN kols k ON c.kol_id = k.id
+       WHERE c.campaign_id = ?
+       ORDER BY c.created_at DESC`,
+      [req.params.id]
+    );
+    const safeName = (campaign.name || 'campaign').replace(/[^a-z0-9_-]/gi, '_');
+    sendCsv(res, result.rows || [], csvExport.COLUMNS.contacts, `contacts-${safeName}.csv`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Export the global KOL database to CSV
+app.get(`${BASE_PATH}/api/kol-database/export`, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM kol_database ORDER BY ai_score DESC, followers DESC');
+    sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kol-database.csv`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Export all content data to CSV
+app.get(`${BASE_PATH}/api/data/content/export`, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM content_data ORDER BY publish_date DESC');
+    sendCsv(res, result.rows || [], csvExport.COLUMNS.content, 'content-data.csv');
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Scheduler ====================
+
+// Schedule a contact email for future send
+app.post(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
+  try {
+    const { scheduled_send_at } = req.body;
+    if (!scheduled_send_at) return res.status(400).json({ error: 'scheduled_send_at required (ISO 8601)' });
+    const when = new Date(scheduled_send_at);
+    if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid date format' });
+    if (when < new Date()) return res.status(400).json({ error: 'Scheduled time must be in the future' });
+    await exec('UPDATE contacts SET scheduled_send_at = ? WHERE id = ?', [when.toISOString(), req.params.id]);
+    res.json({ success: true, scheduled_send_at: when.toISOString() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cancel a scheduled send
+app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
+  try {
+    await exec('UPDATE contacts SET scheduled_send_at = NULL WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manually trigger a scheduler tick (useful for testing / admin)
+app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermission('system.manage'), async (req, res) => {
+  try {
+    const result = await scheduler.tick({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Notification sinks status
+app.get(`${BASE_PATH}/api/notifications/status`, (req, res) => {
+  res.json({ enabled_sinks: notifications.getEnabledSinks() });
 });
 
 // ==================== Email Templates ====================
@@ -1965,6 +2093,9 @@ async function initializeDefaultData() {
     app.listen(PORT, () => {
       console.log(`InfluenceX server running on port ${PORT} (${usePostgres ? 'PostgreSQL' : 'SQLite'})`);
       console.log(`Access at: http://localhost:${PORT}${BASE_PATH}/`);
+      const sinks = notifications.getEnabledSinks();
+      if (sinks.length) console.log(`[notifications] Active sinks: ${sinks.join(', ')}`);
+      scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
     });
   } catch (e) {
     console.error('Failed to initialize database:', e);

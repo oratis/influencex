@@ -11,14 +11,22 @@
  */
 
 const MIGRATIONS = [
-  // Example seed — future migrations follow this pattern.
-  // {
-  //   id: '2026-05-01-add-kol-notes',
-  //   description: 'Add notes column to kols table',
-  //   up: async ({ exec }) => {
-  //     await exec('ALTER TABLE kols ADD COLUMN notes TEXT');
-  //   },
-  // },
+  {
+    id: '2026-04-18-scheduler-fields',
+    description: 'Add scheduled_send_at and follow_up_count to contacts',
+    up: async ({ exec, query }) => {
+      // Both PG and SQLite: IF NOT EXISTS isn't universally supported on ALTER,
+      // so we check the info schema. Fall back to try/catch for simplicity.
+      for (const stmt of [
+        'ALTER TABLE contacts ADD COLUMN scheduled_send_at TIMESTAMP',
+        'ALTER TABLE contacts ADD COLUMN follow_up_count INTEGER DEFAULT 0',
+      ]) {
+        try { await exec(stmt); } catch (e) {
+          if (!/duplicate|already exists/i.test(e.message)) throw e;
+        }
+      }
+    },
+  },
 ];
 
 async function ensureMigrationsTable({ query, exec }) {

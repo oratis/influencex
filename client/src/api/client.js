@@ -139,4 +139,40 @@ export const api = {
 
   // YouTube quota
   getYoutubeQuota: () => request('/quota/youtube'),
+
+  // Permissions (RBAC)
+  getMyPermissions: () => request('/auth/permissions'),
+  getRoles: () => request('/auth/roles'),
+
+  // CSV Export URLs (use window.open or fetch with auth header)
+  exportCampaignKolsUrl: (campaignId) => `${BASE}/campaigns/${campaignId}/kols/export`,
+  exportCampaignContactsUrl: (campaignId) => `${BASE}/campaigns/${campaignId}/contacts/export`,
+  exportKolDatabaseUrl: () => `${BASE}/kol-database/export`,
+  exportContentDataUrl: () => `${BASE}/data/content/export`,
+
+  // Download CSV with auth (for buttons in UI)
+  downloadCsv: async (path, filename) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}${path}`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'export.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+
+  // Scheduler
+  scheduleContact: (id, scheduled_send_at) => request(`/contacts/${id}/schedule`, { method: 'POST', body: { scheduled_send_at } }),
+  cancelScheduledContact: (id) => request(`/contacts/${id}/schedule`, { method: 'DELETE' }),
+  triggerSchedulerTick: () => request('/scheduler/tick', { method: 'POST' }),
+
+  // Notifications
+  getNotificationStatus: () => request('/notifications/status'),
 };
