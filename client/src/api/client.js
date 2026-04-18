@@ -224,4 +224,18 @@ export const api = {
   // Conductor
   conductorPlan: (goal) => request('/conductor/plan', { method: 'POST', body: { goal } }),
   conductorRun: (planId) => request(`/conductor/plans/${planId}/run`, { method: 'POST' }),
+
+  // Content pieces (saved agent outputs)
+  listContentPieces: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/content/pieces${q ? '?' + q : ''}`);
+  },
+  createContentPiece: (data) => request('/content/pieces', { method: 'POST', body: data }),
+  updateContentPiece: (id, data) => request(`/content/pieces/${id}`, { method: 'PATCH', body: data }),
+  deleteContentPiece: (id) => request(`/content/pieces/${id}`, { method: 'DELETE' }),
+
+  // Brand voices
+  listBrandVoices: () => request('/brand-voices'),
+  createBrandVoice: (data) => request('/brand-voices', { method: 'POST', body: data }),
+  deleteBrandVoice: (id) => request(`/brand-voices/${id}`, { method: 'DELETE' }),
 };

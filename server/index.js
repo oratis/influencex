@@ -1682,6 +1682,137 @@ app.get(`${BASE_PATH}/api/agents/runs/:runId/stream`, async (req, res) => {
 
 // (duplicate handlers removed — see reordered block above)
 
+// ==================== Content Pieces (saved agent outputs) ====================
+
+app.get(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
+  try {
+    const { type, status, limit } = req.query;
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT * FROM content_pieces WHERE workspace_id = ?';
+    const params = [req.workspace.id];
+    if (type) { sql += ' AND type = ?'; params.push(type); }
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    sql += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(Math.min(parseInt(limit) || 50, 200));
+    const result = await s.query(sql, params);
+    const pieces = (result.rows || []).map(p => ({
+      ...p,
+      metadata: p.metadata ? JSON.parse(p.metadata) : {},
+    }));
+    res.json({ pieces });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
+  try {
+    const { type, title, body, metadata, status, created_by_agent_run_id } = req.body;
+    if (!title && !body) return res.status(400).json({ error: 'title or body required' });
+    const id = uuidv4();
+    const s = scoped(req.workspace.id);
+    await s.exec(
+      'INSERT INTO content_pieces (id, workspace_id, type, title, body, metadata, status, created_by_agent_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, type || 'text', title || '', body || '', JSON.stringify(metadata || {}), status || 'draft', created_by_agent_run_id || null]
+    );
+    res.json({ id, type, title, body, status: status || 'draft' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const updates = [];
+    const params = [];
+    for (const field of ['title', 'body', 'status', 'type']) {
+      if (req.body[field] !== undefined) { updates.push(`${field} = ?`); params.push(req.body[field]); }
+    }
+    if (req.body.metadata !== undefined) { updates.push('metadata = ?'); params.push(JSON.stringify(req.body.metadata)); }
+    if (updates.length === 0) return res.status(400).json({ error: 'nothing to update' });
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(req.params.id, req.workspace.id);
+    const result = await s.exec(
+      `UPDATE content_pieces SET ${updates.join(', ')} WHERE id = ? AND workspace_id = ?`,
+      params
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'DELETE FROM content_pieces WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Brand Voices ====================
+
+app.get(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      'SELECT * FROM brand_voices WHERE workspace_id = ? ORDER BY is_default DESC, created_at DESC',
+      [req.workspace.id]
+    );
+    const voices = (result.rows || []).map(v => ({
+      ...v,
+      tone_words: v.tone_words ? JSON.parse(v.tone_words) : [],
+      do_examples: v.do_examples ? JSON.parse(v.do_examples) : [],
+      dont_examples: v.dont_examples ? JSON.parse(v.dont_examples) : [],
+    }));
+    res.json({ voices });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
+  try {
+    const { name, description, tone_words, do_examples, dont_examples, style_guide, is_default } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const id = uuidv4();
+    const s = scoped(req.workspace.id);
+    // If setting this as default, unset any other defaults first
+    if (is_default) {
+      await s.exec('UPDATE brand_voices SET is_default = 0 WHERE workspace_id = ?', [req.workspace.id]);
+    }
+    await s.exec(
+      'INSERT INTO brand_voices (id, workspace_id, name, description, tone_words, do_examples, dont_examples, style_guide, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, name, description || '', JSON.stringify(tone_words || []), JSON.stringify(do_examples || []), JSON.stringify(dont_examples || []), style_guide || '', is_default ? 1 : 0]
+    );
+    res.json({ id, name });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete(`${BASE_PATH}/api/brand-voices/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'DELETE FROM brand_voices WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Conductor — build a plan from a goal
 app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
   try {
