@@ -12,6 +12,9 @@ function registerAll() {
     require('./research'),
     require('./content-text'),
     require('./content-visual'),
+    require('./content-voice'),
+    require('./content-video'),
+    require('./publisher'),
     require('./discovery'),
   ];
   for (const a of agents) {

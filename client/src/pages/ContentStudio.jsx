@@ -34,6 +34,8 @@ export default function ContentStudio() {
   const srcRef = useRef(null);
   const toast = useToast();
   const { confirm: confirmDialog } = useConfirm();
+  const [publishResults, setPublishResults] = useState(null);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   useEffect(() => {
     loadVoices();
@@ -119,16 +121,30 @@ export default function ContentStudio() {
     if (!currentOutput) return;
     try {
       if (isImage) {
+        // Persist the image now — the source URL expires in 24h.
+        // Fetch via our server (avoids CORS) and store as a data URL.
+        let persistedUrl = currentOutput.url;
+        let persistedBytes = null;
+        try {
+          toast.info('Persisting image (downloading bytes)...', 2000);
+          const r = await api.fetchAsDataUrl(currentOutput.url);
+          persistedUrl = r.data_url;
+          persistedBytes = r.byte_size;
+        } catch (e) {
+          toast.error('Could not persist image bytes — saving URL (will expire): ' + e.message);
+        }
         await api.createContentPiece({
           type: 'image',
           title: currentOutput.original_brief || '',
-          body: currentOutput.url || '',            // body = image URL for image pieces
+          body: persistedUrl,
           status: 'draft',
           metadata: {
             prompt: currentOutput.prompt,
             size: currentOutput.size,
             provider: currentOutput.provider,
             model: currentOutput.model,
+            original_url: currentOutput.url,
+            persisted_bytes: persistedBytes,
           },
           created_by_agent_run_id: activeRunId,
         });
@@ -161,6 +177,40 @@ export default function ContentStudio() {
       : currentOutput.body;
     navigator.clipboard.writeText(text);
     toast.success('Copied to clipboard');
+  }
+
+  async function handlePublish(platforms) {
+    if (!currentOutput) return;
+    setIsPublishing(true);
+    try {
+      const content = isImage
+        ? { title: currentOutput.original_brief || '', body: currentOutput.original_brief || '', image_url: currentOutput.url }
+        : {
+            title: currentOutput.title,
+            body: currentOutput.body,
+            cta: currentOutput.cta,
+            hashtags: currentOutput.hashtags || [],
+          };
+      const r = await api.runAgent('publisher', { content, platforms });
+      // Poll for completion — publisher is synchronous and fast
+      let tries = 0;
+      while (tries < 20) {
+        await new Promise(res => setTimeout(res, 500));
+        const run = await api.getAgentRun(r.runId);
+        if (run.status === 'complete') {
+          setPublishResults(run.output?.results || []);
+          break;
+        }
+        if (run.status === 'error') {
+          throw new Error(run.error || 'Publisher failed');
+        }
+        tries++;
+      }
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setIsPublishing(false);
+    }
   }
 
   async function handleDelete(pieceId) {
@@ -378,6 +428,9 @@ export default function ContentStudio() {
                 <button className="btn btn-primary btn-sm" onClick={handleSave}>💾 Save</button>
                 <button className="btn btn-secondary btn-sm" onClick={handleCopy}>📋 Copy</button>
                 <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>🔄 Regenerate</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => handlePublish(defaultPlatformsFor(format))} disabled={isPublishing}>
+                  {isPublishing ? '...' : '🚀 Publish'}
+                </button>
               </div>
               {currentOutput.word_count && (
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
@@ -388,6 +441,82 @@ export default function ContentStudio() {
           )}
         </div>
       </div>
+
+      {/* Publish results panel */}
+      {publishResults && publishResults.length > 0 && (
+        <div className="card" style={{ marginTop: 20 }}>
+          <div className="card-header">
+            <h3>Publish package ({publishResults.length} platform{publishResults.length > 1 ? 's' : ''})</h3>
+            <button className="btn-icon" onClick={() => setPublishResults(null)} title="Close">✕</button>
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 14px' }}>
+            Each card opens that platform's composer with your text pre-filled. Review + post in the native UI.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 12 }}>
+            {publishResults.map(r => (
+              <div key={r.platform} className="card" style={{ padding: 14, border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 8 }}>
+                  <span className="badge badge-purple" style={{ fontSize: 11, textTransform: 'capitalize' }}>{r.platform}</span>
+                  <span style={{ fontSize: 11, color: r.char_count > (r.char_limit || Infinity) ? 'var(--danger)' : 'var(--text-muted)' }}>
+                    {r.char_count}{r.char_limit ? ` / ${r.char_limit}` : ''}
+                  </span>
+                </div>
+                {r.error ? (
+                  <div style={{ color: 'var(--danger)', fontSize: 12 }}>{r.error}</div>
+                ) : (
+                  <>
+                    <div style={{
+                      fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5,
+                      background: 'var(--bg-input)', padding: 10, borderRadius: 6,
+                      maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap',
+                      marginBottom: 8,
+                    }}>
+                      {r.text}
+                    </div>
+                    {r.tweets && r.tweets.length > 1 && (
+                      <details style={{ marginBottom: 8, fontSize: 11 }}>
+                        <summary style={{ color: 'var(--text-muted)', cursor: 'pointer' }}>
+                          Full thread ({r.tweets.length} tweets)
+                        </summary>
+                        <ol style={{ paddingLeft: 20, marginTop: 6 }}>
+                          {r.tweets.map((t, i) => (
+                            <li key={i} style={{ marginBottom: 6, color: 'var(--text-secondary)' }}>{t}</li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}
+                    {r.warnings && r.warnings.length > 0 && (
+                      <div style={{ fontSize: 11, color: 'var(--warning)', marginBottom: 8 }}>
+                        ⚠ {r.warnings.join(' ')}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <a
+                        className="btn btn-primary btn-sm"
+                        href={r.intent_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ flex: 1, textAlign: 'center', textDecoration: 'none' }}
+                      >
+                        Open in {r.platform}
+                      </a>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => {
+                          navigator.clipboard.writeText(r.text);
+                          toast.success(`Copied ${r.platform} version`);
+                        }}
+                      >
+                        📋
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Recent library */}
       <div className="card" style={{ marginTop: 20 }}>
@@ -437,4 +566,18 @@ export default function ContentStudio() {
       `}</style>
     </div>
   );
+}
+
+function defaultPlatformsFor(format) {
+  // Map Content Studio format → reasonable default publishing targets.
+  const map = {
+    twitter: ['twitter'],
+    linkedin: ['linkedin'],
+    blog: ['linkedin', 'twitter'],
+    email: [],
+    caption: ['twitter', 'bluesky', 'threads'],
+    'youtube-short': ['twitter', 'threads'],
+    image: ['twitter', 'linkedin', 'pinterest', 'bluesky'],
+  };
+  return map[format] || ['twitter', 'linkedin'];
 }

@@ -86,6 +86,7 @@ app.use(compression({
 
 // Resend webhook needs raw body for signature verification
 const crypto = require('crypto');
+const { Buffer } = require('buffer');
 app.use((req, res, next) => {
   if (req.path === `${BASE_PATH}/api/webhooks/resend/inbound`) {
     express.json({
@@ -1758,6 +1759,52 @@ app.delete(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
   }
 });
 
+// Proxy-fetch a remote URL and return its bytes as a data URL. Used by
+// Content Studio to persist generated images before their source URLs
+// expire. Basic SSRF guards: HTTPS only, no private IPs, 10MB cap.
+app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url is required' });
+    if (!/^https:\/\//i.test(url)) return res.status(400).json({ error: 'Only HTTPS URLs accepted' });
+    // Block anything that looks like a private / metadata host
+    try {
+      const host = new URL(url).hostname;
+      if (/^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host === 'localhost' || host.endsWith('.internal')) {
+        return res.status(400).json({ error: 'URL points to a blocked host range' });
+      }
+    } catch { return res.status(400).json({ error: 'Invalid URL' }); }
+
+    const fetch = require('./proxy-fetch');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    let r;
+    try {
+      r = await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r.ok) return res.status(502).json({ error: `Upstream ${r.status}` });
+
+    const contentType = r.headers.get('content-type') || 'application/octet-stream';
+    // 10 MB hard cap
+    const lengthHeader = parseInt(r.headers.get('content-length') || '0');
+    if (lengthHeader > 10 * 1024 * 1024) return res.status(413).json({ error: 'Content too large (>10MB)' });
+
+    const arr = await r.arrayBuffer();
+    if (arr.byteLength > 10 * 1024 * 1024) return res.status(413).json({ error: 'Content too large (>10MB)' });
+
+    const buf = Buffer.from(arr);
+    res.json({
+      data_url: `data:${contentType};base64,${buf.toString('base64')}`,
+      byte_size: buf.length,
+      content_type: contentType,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==================== Brand Voices ====================
 
 app.get(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
@@ -1831,6 +1878,153 @@ app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
     );
     const estimate = conductor.estimatePlanCost(plan);
     res.json({ planId, plan, cost, estimate });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Conductor — list plans in the current workspace
+app.get(`${BASE_PATH}/api/conductor/plans`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      'SELECT id, goal, status, created_at, approved_at, completed_at FROM conductor_plans WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 50',
+      [req.workspace.id]
+    );
+    res.json({ plans: result.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Conductor — get a single plan with step status
+app.get(`${BASE_PATH}/api/conductor/plans/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const plan = await s.queryOne(
+      'SELECT * FROM conductor_plans WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+    plan.plan = JSON.parse(plan.plan || '{}');
+    res.json(plan);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Conductor — approve + kick off execution
+// Runs each step sequentially (DAG support can come later). Each step
+// is dispatched as an agent run; the step stores the resulting runId.
+app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const plan = await s.queryOne(
+      'SELECT * FROM conductor_plans WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+    const planObj = JSON.parse(plan.plan || '{}');
+    if (!Array.isArray(planObj.steps) || planObj.steps.length === 0) {
+      return res.status(400).json({ error: 'Plan has no steps' });
+    }
+
+    await s.exec(
+      "UPDATE conductor_plans SET status='running', approved_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [req.params.id, req.workspace.id]
+    );
+
+    // Kick off steps in sequence. Respond right away with the planId;
+    // client polls /plans/:id for step progress.
+    res.json({ success: true, planId: req.params.id, steps: planObj.steps.length });
+
+    // Run in background
+    (async () => {
+      const stepResults = [];
+      try {
+        for (const step of planObj.steps) {
+          const agent = agentRuntime.getAgent(step.agent);
+          if (!agent) {
+            stepResults.push({ id: step.id, agent: step.agent, status: 'skipped', error: 'Agent not found' });
+            continue;
+          }
+          const { runId, stream } = agentRuntime.createRun(step.agent, step.input, {
+            workspaceId: req.workspace.id,
+            userId: req.user.id,
+          });
+          // Persist an agent_runs row for dashboard visibility
+          await exec(
+            'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status) VALUES (?, ?, ?, ?, ?, ?)',
+            [runId, req.workspace.id, step.agent, req.user.id, JSON.stringify(step.input || {}), 'running']
+          );
+
+          await new Promise((resolve) => {
+            let finalOutput = null;
+            let finalError = null;
+            let finalCost = null;
+            stream.on('event', async (evt) => {
+              try {
+                await exec(
+                  'INSERT INTO agent_traces (id, run_id, event_type, data) VALUES (?, ?, ?, ?)',
+                  [uuidv4(), runId, evt.type, JSON.stringify(evt.data || {})]
+                );
+              } catch {}
+              if (evt.type === 'complete') {
+                finalOutput = evt.data.output;
+                finalCost = evt.data.cost;
+              }
+              if (evt.type === 'error') finalError = evt.data?.message;
+              if (evt.type === 'closed') {
+                try {
+                  await exec(
+                    `UPDATE agent_runs SET status=?, output=?, error=?, cost_usd_cents=?, input_tokens=?, output_tokens=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
+                    [
+                      finalError ? 'error' : 'complete',
+                      finalOutput ? JSON.stringify(finalOutput) : null,
+                      finalError || null,
+                      finalCost?.usdCents || 0,
+                      finalCost?.inputTokens || 0,
+                      finalCost?.outputTokens || 0,
+                      runId,
+                    ]
+                  );
+                } catch {}
+                stepResults.push({
+                  id: step.id, agent: step.agent,
+                  runId, status: finalError ? 'error' : 'complete',
+                  output: finalOutput, error: finalError,
+                });
+                resolve();
+              }
+            });
+          });
+
+          // If a step fails, stop the plan (simple strategy; fine-grained
+          // retry-on-error can be added later).
+          if (stepResults[stepResults.length - 1].status === 'error') break;
+        }
+
+        const allOk = stepResults.every(r => r.status === 'complete');
+        // Persist final plan state with step results
+        const updatedPlan = { ...planObj, stepResults };
+        await exec(
+          `UPDATE conductor_plans SET status=?, plan=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
+          [allOk ? 'complete' : 'error', JSON.stringify(updatedPlan), req.params.id]
+        );
+        notifications.notify({
+          type: 'conductor.complete',
+          level: allOk ? 'success' : 'warning',
+          title: `Plan ${allOk ? 'complete' : 'partial'}`,
+          message: `"${plan.goal.slice(0, 80)}" — ${stepResults.filter(r => r.status === 'complete').length}/${stepResults.length} steps`,
+        });
+      } catch (e) {
+        console.error('[conductor run]', e);
+        await exec(
+          `UPDATE conductor_plans SET status='error' WHERE id=?`,
+          [req.params.id]
+        ).catch(() => {});
+      }
+    })();
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

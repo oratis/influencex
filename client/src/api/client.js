@@ -223,6 +223,8 @@ export const api = {
 
   // Conductor
   conductorPlan: (goal) => request('/conductor/plan', { method: 'POST', body: { goal } }),
+  listConductorPlans: () => request('/conductor/plans'),
+  getConductorPlan: (id) => request(`/conductor/plans/${id}`),
   conductorRun: (planId) => request(`/conductor/plans/${planId}/run`, { method: 'POST' }),
 
   // Content pieces (saved agent outputs)
@@ -233,6 +235,10 @@ export const api = {
   createContentPiece: (data) => request('/content/pieces', { method: 'POST', body: data }),
   updateContentPiece: (id, data) => request(`/content/pieces/${id}`, { method: 'PATCH', body: data }),
   deleteContentPiece: (id) => request(`/content/pieces/${id}`, { method: 'DELETE' }),
+
+  // Fetch a remote URL via our server and return as data URL (for
+  // persisting expiring image URLs like Volcengine's 24h signed ones)
+  fetchAsDataUrl: (url) => request('/util/fetch-as-data-url', { method: 'POST', body: { url } }),
 
   // Brand voices
   listBrandVoices: () => request('/brand-voices'),
