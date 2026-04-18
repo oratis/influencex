@@ -204,16 +204,36 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   authMiddleware(req, res, next);
 });
 
+// ==================== Workspace context ====================
+//
+// Apply lenient workspace context to paths that operate on workspace-scoped
+// data. Lenient = falls back to the user's default workspace if no explicit
+// id is provided (legacy-client support). Strict STRICT_WORKSPACE_SCOPE can
+// be toggled later once every handler is migrated.
+//
+// Paths NOT needing workspace context: auth, user management, webhooks,
+// docs, platform-level stats/quota/queue/cache, global email templates.
+const WORKSPACE_SKIP_PREFIXES = [
+  '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
+  '/notifications/', '/quota/', '/cache/', '/queue/', '/apify/',
+  '/query/', '/scheduler/', '/email-templates', '/stats',
+];
+app.use(`${BASE_PATH}/api`, (req, res, next) => {
+  if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
+    return next();
+  }
+  workspaceContext({ lenient: true })(req, res, next);
+});
+
 // ==================== Campaign API ====================
 //
 // Workspace-scoped. Legacy clients (no X-Workspace-Id header) automatically
-// resolve to the user's default workspace via the lenient context middleware.
-// The SQL uses scoped() which enforces workspace_id presence in every query.
-
-const lenientWorkspace = workspaceContext({ lenient: true });
+// resolve to the user's default workspace via the global lenient context
+// middleware registered above. The SQL uses scoped() which enforces
+// workspace_id presence in every query.
 
 // List campaigns in the current workspace
-app.get(`${BASE_PATH}/api/campaigns`, lenientWorkspace, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -238,7 +258,7 @@ app.get(`${BASE_PATH}/api/campaigns`, lenientWorkspace, async (req, res) => {
 });
 
 // Create campaign in the current workspace
-app.post(`${BASE_PATH}/api/campaigns`, lenientWorkspace, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns`, async (req, res) => {
   try {
     const { name, description, platforms, daily_target, filter_criteria, budget } = req.body;
     const id = uuidv4();
@@ -254,7 +274,7 @@ app.post(`${BASE_PATH}/api/campaigns`, lenientWorkspace, async (req, res) => {
 });
 
 // Get single campaign — scoped so users can only see campaigns in their workspace
-app.get(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const campaign = await s.queryOne(
@@ -271,7 +291,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => 
 });
 
 // Update campaign
-app.put(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => {
+app.put(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
   try {
     const { name, description, platforms, daily_target, filter_criteria, status } = req.body;
     const s = scoped(req.workspace.id);
@@ -287,7 +307,7 @@ app.put(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => 
 });
 
 // Delete campaign
-app.delete(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => {
+app.delete(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -307,13 +327,14 @@ app.delete(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) 
 app.get(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
   try {
     const { status, platform, search } = req.query;
-    let sql = 'SELECT * FROM kols WHERE campaign_id = ?';
-    const params = [req.params.campaignId];
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT * FROM kols WHERE workspace_id = ? AND campaign_id = ?';
+    const params = [req.workspace.id, req.params.campaignId];
     if (status) { sql += ' AND status = ?'; params.push(status); }
     if (platform) { sql += ' AND platform = ?'; params.push(platform); }
     if (search) { sql += ' AND (username LIKE ? OR display_name LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
     sql += ' ORDER BY collected_at DESC';
-    const result = await query(sql, params);
+    const result = await s.query(sql, params);
     const kols = result.rows;
     kols.forEach(k => k.contact_info = JSON.parse(k.contact_info || '{}'));
     res.json(kols);
@@ -326,10 +347,17 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
 app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
   try {
     const { platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio } = req.body;
+    const s = scoped(req.workspace.id);
+    // Verify campaign is in this workspace before attaching KOL
+    const parent = await s.queryOne(
+      'SELECT id FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.campaignId, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Campaign not found' });
     const id = uuidv4();
-    await exec(
-      'INSERT INTO kols (id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, req.params.campaignId, platform, username, display_name || username, avatar_url || '', followers || 0, engagement_rate || 0, avg_views || 0, category || '', email || '', JSON.stringify(contact_info || {}), profile_url || '', bio || '']
+    await s.exec(
+      'INSERT INTO kols (id, workspace_id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, req.params.campaignId, platform, username, display_name || username, avatar_url || '', followers || 0, engagement_rate || 0, avg_views || 0, category || '', email || '', JSON.stringify(contact_info || {}), profile_url || '', bio || '']
     );
     res.json({ id, platform, username, display_name, status: 'pending' });
   } catch (e) {
@@ -341,7 +369,11 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
 // falls back to demo sample generator if no API keys are set
 app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, async (req, res) => {
   try {
-    const campaign = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.campaignId]);
+    const s = scoped(req.workspace.id);
+    const campaign = await s.queryOne(
+      'SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.campaignId, req.workspace.id]
+    );
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
     const platforms = JSON.parse(campaign.platforms || '[]');
@@ -402,8 +434,8 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, async (req, res)
     await transaction(async (tx) => {
       for (const k of collectedKols) {
         await tx.exec(
-          'INSERT INTO kols (id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio, ai_score, ai_reason, estimated_cpm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [k.id, req.params.campaignId, k.platform, k.username, k.display_name, k.avatar_url, k.followers, k.engagement_rate, k.avg_views, k.category, k.email, JSON.stringify(k.contact_info || {}), k.profile_url, k.bio, k.ai_score, k.ai_reason, k.estimated_cpm]
+          'INSERT INTO kols (id, workspace_id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio, ai_score, ai_reason, estimated_cpm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [k.id, req.workspace.id, req.params.campaignId, k.platform, k.username, k.display_name, k.avatar_url, k.followers, k.engagement_rate, k.avg_views, k.category, k.email, JSON.stringify(k.contact_info || {}), k.profile_url, k.bio, k.ai_score, k.ai_reason, k.estimated_cpm]
         );
       }
     });
@@ -419,7 +451,7 @@ app.patch(`${BASE_PATH}/api/kols/batch`, async (req, res) => {
     const { ids, status } = req.body;
     await transaction(async (tx) => {
       for (const id of ids) {
-        await tx.exec('UPDATE kols SET status = ? WHERE id = ?', [status, id]);
+        await tx.exec('UPDATE kols SET status = ? WHERE id = ? AND workspace_id = ?', [status, id, req.workspace.id]);
       }
     });
     res.json({ success: true, updated: ids.length });
@@ -432,7 +464,9 @@ app.patch(`${BASE_PATH}/api/kols/batch`, async (req, res) => {
 app.patch(`${BASE_PATH}/api/kols/:id`, async (req, res) => {
   try {
     const { status } = req.body;
-    await exec('UPDATE kols SET status = ? WHERE id = ?', [status, req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec('UPDATE kols SET status = ? WHERE id = ? AND workspace_id = ?', [status, req.params.id, req.workspace.id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'KOL not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -445,12 +479,13 @@ app.patch(`${BASE_PATH}/api/kols/:id`, async (req, res) => {
 app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, async (req, res) => {
   try {
     const { status } = req.query;
+    const s = scoped(req.workspace.id);
     let sql = `SELECT c.*, k.username, k.display_name, k.platform, k.avatar_url, k.followers, k.email as kol_email
-      FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.campaign_id = ?`;
-    const params = [req.params.campaignId];
+      FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.workspace_id = ? AND c.campaign_id = ?`;
+    const params = [req.workspace.id, req.params.campaignId];
     if (status) { sql += ' AND c.status = ?'; params.push(status); }
     sql += ' ORDER BY c.created_at DESC';
-    const result = await query(sql, params);
+    const result = await s.query(sql, params);
     res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -461,15 +496,16 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, async (req, res) => {
 app.post(`${BASE_PATH}/api/contacts/generate`, async (req, res) => {
   try {
     const { kol_id, campaign_id, cooperation_type, price_quote } = req.body;
-    const kol = await queryOne('SELECT * FROM kols WHERE id = ?', [kol_id]);
-    const campaign = await queryOne('SELECT * FROM campaigns WHERE id = ?', [campaign_id]);
+    const s = scoped(req.workspace.id);
+    const kol = await s.queryOne('SELECT * FROM kols WHERE id = ? AND workspace_id = ?', [kol_id, req.workspace.id]);
+    const campaign = await s.queryOne('SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?', [campaign_id, req.workspace.id]);
     if (!kol || !campaign) return res.status(404).json({ error: 'KOL or Campaign not found' });
 
     const email = generateOutreachEmail(kol, campaign, cooperation_type || 'affiliate', price_quote);
     const id = uuidv4();
-    await exec(
-      'INSERT INTO contacts (id, kol_id, campaign_id, email_subject, email_body, cooperation_type, price_quote, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, kol_id, campaign_id, email.subject, email.body, cooperation_type || 'affiliate', price_quote || '', 'draft']
+    await s.exec(
+      'INSERT INTO contacts (id, workspace_id, kol_id, campaign_id, email_subject, email_body, cooperation_type, price_quote, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, kol_id, campaign_id, email.subject, email.body, cooperation_type || 'affiliate', price_quote || '', 'draft']
     );
     res.json({ id, ...email, status: 'draft' });
   } catch (e) {
@@ -483,17 +519,19 @@ app.put(`${BASE_PATH}/api/contacts/:id`, async (req, res) => {
     const { email_subject, email_body, cooperation_type, price_quote, notes,
             contract_status, contract_url, content_status, content_url, content_due_date,
             payment_amount, payment_status } = req.body;
-    await exec(
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
       `UPDATE contacts SET email_subject=?, email_body=?, cooperation_type=?, price_quote=?, notes=?,
        contract_status=COALESCE(?, contract_status), contract_url=COALESCE(?, contract_url),
        content_status=COALESCE(?, content_status), content_url=COALESCE(?, content_url),
        content_due_date=COALESCE(?, content_due_date),
-       payment_amount=COALESCE(?, payment_amount), payment_status=COALESCE(?, payment_status) WHERE id=?`,
+       payment_amount=COALESCE(?, payment_amount), payment_status=COALESCE(?, payment_status) WHERE id=? AND workspace_id=?`,
       [email_subject, email_body, cooperation_type, price_quote, notes,
         contract_status || null, contract_url || null,
         content_status || null, content_url || null, content_due_date || null,
-        payment_amount || null, payment_status || null, req.params.id]
+        payment_amount || null, payment_status || null, req.params.id, req.workspace.id]
     );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -511,7 +549,13 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
     }
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
     params.push(req.params.id);
-    await exec(`UPDATE contacts SET ${updates.join(', ')} WHERE id=?`, params);
+    params.push(req.workspace.id, req.params.id);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      `UPDATE contacts SET ${updates.join(', ')} WHERE workspace_id=? AND id=?`,
+      params
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -521,11 +565,13 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
 // Send email (actually send via Resend/SMTP)
 app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res) => {
   try {
-    // Load contact + KOL email address
-    const contact = await queryOne(
+    const s = scoped(req.workspace.id);
+    // Load contact + KOL email address (scoped to current workspace)
+    const contact = await s.queryOne(
       `SELECT c.*, k.email as kol_email, k.display_name, k.username
-       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ?`,
-      [req.params.id]
+       FROM contacts c JOIN kols k ON c.kol_id = k.id
+       WHERE c.id = ? AND c.workspace_id = ?`,
+      [req.params.id, req.workspace.id]
     );
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
@@ -539,7 +585,10 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res
 
     // If email provider not configured, fall back to marking as sent (dev mode)
     if (!mailAgent.isConfigured()) {
-      await exec("UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=?", [req.params.id]);
+      await s.exec(
+        "UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+        [req.params.id, req.workspace.id]
+      );
       return res.json({
         success: true,
         message: 'Email marked as sent (email provider not configured — no actual send)',
@@ -559,11 +608,14 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res
     }
 
     // Update contact + record outbound email in thread
-    await exec("UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=?", [req.params.id]);
+    await s.exec(
+      "UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [req.params.id, req.workspace.id]
+    );
     const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.SMTP_USER || 'noreply@localhost';
-    await exec(
-      "INSERT INTO email_replies (id, contact_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-      [uuidv4(), req.params.id, fromEmail, emailTo, contact.email_subject, contact.email_body, sendResult.messageId]
+    await s.exec(
+      "INSERT INTO email_replies (id, workspace_id, contact_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+      [uuidv4(), req.workspace.id, req.params.id, fromEmail, emailTo, contact.email_subject, contact.email_body, sendResult.messageId]
     );
 
     res.json({ success: true, messageId: sendResult.messageId, provider: sendResult.provider });
@@ -576,10 +628,17 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res
 app.post(`${BASE_PATH}/api/contacts/:id/reply`, async (req, res) => {
   try {
     const { reply_content } = req.body;
-    await exec("UPDATE contacts SET status='replied', reply_content=?, reply_at=CURRENT_TIMESTAMP WHERE id=?", [reply_content, req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      "UPDATE contacts SET status='replied', reply_content=?, reply_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [reply_content, req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     // Also save to email_replies table
-    await exec("INSERT INTO email_replies (id, contact_id, direction, body_text, received_at) VALUES (?, ?, 'inbound', ?, CURRENT_TIMESTAMP)",
-      [uuidv4(), req.params.id, reply_content]);
+    await s.exec(
+      "INSERT INTO email_replies (id, workspace_id, contact_id, direction, body_text, received_at) VALUES (?, ?, ?, 'inbound', ?, CURRENT_TIMESTAMP)",
+      [uuidv4(), req.workspace.id, req.params.id, reply_content]
+    );
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -679,11 +738,18 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
 // Get email thread for a contact
 app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
   try {
-    const contact = await queryOne("SELECT c.*, k.name as kol_name, k.email as kol_email FROM contacts c LEFT JOIN kols k ON c.kol_id=k.id WHERE c.id=?", [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const contact = await s.queryOne(
+      "SELECT c.*, k.name as kol_name, k.email as kol_email FROM contacts c LEFT JOIN kols k ON c.kol_id=k.id WHERE c.id=? AND c.workspace_id=?",
+      [req.params.id, req.workspace.id]
+    );
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
     // Get all email exchanges
-    const replies = await query("SELECT * FROM email_replies WHERE contact_id=? ORDER BY received_at ASC", [req.params.id]);
+    const replies = await s.query(
+      "SELECT * FROM email_replies WHERE contact_id=? AND workspace_id=? ORDER BY received_at ASC",
+      [req.params.id, req.workspace.id]
+    );
 
     // Build thread: outbound (our sent email) + inbound replies
     const thread = [];
@@ -723,10 +789,17 @@ app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
 // Get email thread for a pipeline job
 app.get(`${BASE_PATH}/api/pipeline/jobs/:id/thread`, async (req, res) => {
   try {
-    const job = await queryOne("SELECT * FROM pipeline_jobs WHERE id=?", [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const job = await s.queryOne(
+      "SELECT * FROM pipeline_jobs WHERE id=? AND workspace_id=?",
+      [req.params.id, req.workspace.id]
+    );
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
-    const replies = await query("SELECT * FROM email_replies WHERE pipeline_job_id=? ORDER BY received_at ASC", [req.params.id]);
+    const replies = await s.query(
+      "SELECT * FROM email_replies WHERE pipeline_job_id=? AND workspace_id=? ORDER BY received_at ASC",
+      [req.params.id, req.workspace.id]
+    );
 
     const thread = [];
     if (job.email_subject && job.email_sent_at) {
@@ -1138,9 +1211,16 @@ function sendCsv(res, rows, columns, filename) {
 // Export campaign KOLs to CSV
 app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, exportLimiter, async (req, res) => {
   try {
-    const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const campaign = await s.queryOne(
+      'SELECT name FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    const result = await query('SELECT * FROM kols WHERE campaign_id = ? ORDER BY ai_score DESC', [req.params.id]);
+    const result = await s.query(
+      'SELECT * FROM kols WHERE campaign_id = ? AND workspace_id = ? ORDER BY ai_score DESC',
+      [req.params.id, req.workspace.id]
+    );
     const safeName = (campaign.name || 'campaign').replace(/[^a-z0-9_-]/gi, '_');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kols-${safeName}.csv`);
   } catch (e) {
@@ -1151,14 +1231,18 @@ app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, exportLimiter, async (req,
 // Export campaign contacts to CSV
 app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (req, res) => {
   try {
-    const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const campaign = await s.queryOne(
+      'SELECT name FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-    const result = await query(
+    const result = await s.query(
       `SELECT c.*, k.display_name, k.username, k.platform, k.email as kol_email
        FROM contacts c JOIN kols k ON c.kol_id = k.id
-       WHERE c.campaign_id = ?
+       WHERE c.workspace_id = ? AND c.campaign_id = ?
        ORDER BY c.created_at DESC`,
-      [req.params.id]
+      [req.workspace.id, req.params.id]
     );
     const safeName = (campaign.name || 'campaign').replace(/[^a-z0-9_-]/gi, '_');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.contacts, `contacts-${safeName}.csv`);
@@ -1170,7 +1254,11 @@ app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (
 // Export the global KOL database to CSV
 app.get(`${BASE_PATH}/api/kol-database/export`, exportLimiter, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM kol_database ORDER BY ai_score DESC, followers DESC');
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      'SELECT * FROM kol_database WHERE workspace_id = ? ORDER BY ai_score DESC, followers DESC',
+      [req.workspace.id]
+    );
     sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kol-database.csv`);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1197,7 +1285,12 @@ app.post(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
     const when = new Date(scheduled_send_at);
     if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid date format' });
     if (when < new Date()) return res.status(400).json({ error: 'Scheduled time must be in the future' });
-    await exec('UPDATE contacts SET scheduled_send_at = ? WHERE id = ?', [when.toISOString(), req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'UPDATE contacts SET scheduled_send_at = ? WHERE id = ? AND workspace_id = ?',
+      [when.toISOString(), req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true, scheduled_send_at: when.toISOString() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1207,7 +1300,12 @@ app.post(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
 // Cancel a scheduled send
 app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
   try {
-    await exec('UPDATE contacts SET scheduled_send_at = NULL WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'UPDATE contacts SET scheduled_send_at = NULL WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1254,6 +1352,12 @@ app.get(`${BASE_PATH}/api/apify/status`, (req, res) => {
 // Aggregated ROI metrics for a campaign
 app.get(`${BASE_PATH}/api/campaigns/:id/roi`, async (req, res) => {
   try {
+    // Verify campaign is in this workspace before running aggregation
+    const parent = await queryOne(
+      'SELECT id FROM campaigns WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Campaign not found' });
     const result = await getCampaignRoi(req.params.id, { query, queryOne });
     if (result.error) return res.status(404).json(result);
     res.json(result);
@@ -1285,14 +1389,18 @@ app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
     const templateId = req.body.template_id;
     if (!templateId) return res.status(400).json({ error: 'template_id required' });
 
-    const contact = await queryOne(
+    const s = scoped(req.workspace.id);
+    const contact = await s.queryOne(
       `SELECT c.*, k.display_name, k.username, k.platform, k.followers, k.category, k.email as kol_email
-       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ?`,
-      [req.params.id]
+       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ? AND c.workspace_id = ?`,
+      [req.params.id, req.workspace.id]
     );
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
-    const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [contact.campaign_id]);
+    const campaign = await s.queryOne(
+      'SELECT name FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [contact.campaign_id, req.workspace.id]
+    );
 
     const variables = {
       kol_name: contact.display_name || contact.username,
@@ -1315,12 +1423,13 @@ app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
   }
 });
 
-// List all KOLs in the global database
+// List all KOLs in the workspace's global database
 app.get(`${BASE_PATH}/api/kol-database`, async (req, res) => {
   try {
     const { platform, search, status, sort } = req.query;
-    let sql = 'SELECT * FROM kol_database WHERE 1=1';
-    const params = [];
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT * FROM kol_database WHERE workspace_id = ?';
+    const params = [req.workspace.id];
     if (platform) { sql += ' AND platform = ?'; params.push(platform); }
     if (status) { sql += ' AND scrape_status = ?'; params.push(status); }
     if (search) { sql += ' AND (username LIKE ? OR display_name LIKE ? OR email LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
@@ -1328,7 +1437,7 @@ app.get(`${BASE_PATH}/api/kol-database`, async (req, res) => {
     else if (sort === 'score') sql += ' ORDER BY ai_score DESC';
     else if (sort === 'engagement') sql += ' ORDER BY engagement_rate DESC';
     else sql += ' ORDER BY created_at DESC';
-    const result = await query(sql, params);
+    const result = await s.query(sql, params);
     const kols = result.rows;
     kols.forEach(k => k.tags = JSON.parse(k.tags || '[]'));
     res.json(kols);
@@ -1340,7 +1449,11 @@ app.get(`${BASE_PATH}/api/kol-database`, async (req, res) => {
 // Get single KOL from database
 app.get(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
   try {
-    const kol = await queryOne('SELECT * FROM kol_database WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const kol = await s.queryOne(
+      'SELECT * FROM kol_database WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
     if (!kol) return res.status(404).json({ error: 'KOL not found' });
     kol.tags = JSON.parse(kol.tags || '[]');
     res.json(kol);
@@ -1364,15 +1477,19 @@ app.post(`${BASE_PATH}/api/kol-database`, async (req, res) => {
     else if (profile_url.includes('twitter.com') || profile_url.includes('x.com')) detectedPlatform = 'x';
 
     const username = extractUsernameFromUrl(profile_url, detectedPlatform);
+    const s = scoped(req.workspace.id);
 
-    // Check for duplicate
-    const existing = await queryOne('SELECT id FROM kol_database WHERE profile_url = ? OR (platform = ? AND username = ?)', [profile_url, detectedPlatform, username]);
+    // Check for duplicate within this workspace
+    const existing = await s.queryOne(
+      'SELECT id FROM kol_database WHERE workspace_id = ? AND (profile_url = ? OR (platform = ? AND username = ?))',
+      [req.workspace.id, profile_url, detectedPlatform, username]
+    );
     if (existing) return res.status(409).json({ error: 'This KOL already exists in the database', id: existing.id });
 
     const id = uuidv4();
-    await exec(
-      "INSERT INTO kol_database (id, platform, username, display_name, profile_url, scrape_status) VALUES (?, ?, ?, ?, ?, 'scraping')",
-      [id, detectedPlatform, username, username, profile_url]
+    await s.exec(
+      "INSERT INTO kol_database (id, workspace_id, platform, username, display_name, profile_url, scrape_status) VALUES (?, ?, ?, ?, ?, ?, 'scraping')",
+      [id, req.workspace.id, detectedPlatform, username, username, profile_url]
     );
 
     // Simulate AI scrape asynchronously
@@ -1390,6 +1507,7 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
     const { urls } = req.body;
     if (!urls || !Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: 'urls array is required' });
 
+    const s = scoped(req.workspace.id);
     const results = [];
     for (const url of urls) {
       const trimmed = url.trim();
@@ -1403,13 +1521,16 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
       else if (trimmed.includes('twitter.com') || trimmed.includes('x.com')) platform = 'x';
 
       const username = extractUsernameFromUrl(trimmed, platform);
-      const existing = await queryOne('SELECT id FROM kol_database WHERE profile_url = ? OR (platform = ? AND username = ?)', [trimmed, platform, username]);
+      const existing = await s.queryOne(
+        'SELECT id FROM kol_database WHERE workspace_id = ? AND (profile_url = ? OR (platform = ? AND username = ?))',
+        [req.workspace.id, trimmed, platform, username]
+      );
       if (existing) { results.push({ url: trimmed, status: 'duplicate', id: existing.id }); continue; }
 
       const id = uuidv4();
-      await exec(
-        "INSERT INTO kol_database (id, platform, username, display_name, profile_url, scrape_status) VALUES (?, ?, ?, ?, ?, 'scraping')",
-        [id, platform, username, username, trimmed]
+      await s.exec(
+        "INSERT INTO kol_database (id, workspace_id, platform, username, display_name, profile_url, scrape_status) VALUES (?, ?, ?, ?, ?, ?, 'scraping')",
+        [id, req.workspace.id, platform, username, username, trimmed]
       );
       setTimeout(() => scrapeAndEnrichKol(id, trimmed, platform, username), 100 + results.length * 500);
       results.push({ url: trimmed, status: 'queued', id, platform, username });
@@ -1423,7 +1544,12 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
 // Delete KOL from database
 app.delete(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
   try {
-    await exec('DELETE FROM kol_database WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'DELETE FROM kol_database WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'KOL not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1433,18 +1559,31 @@ app.delete(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
 // Import KOLs from a campaign into the global database
 app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, async (req, res) => {
   try {
-    const campaignKolsResult = await query('SELECT * FROM kols WHERE campaign_id = ?', [req.params.campaignId]);
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT id FROM campaigns WHERE id=? AND workspace_id=?',
+      [req.params.campaignId, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Campaign not found' });
+
+    const campaignKolsResult = await s.query(
+      'SELECT * FROM kols WHERE campaign_id = ? AND workspace_id = ?',
+      [req.params.campaignId, req.workspace.id]
+    );
     const campaignKols = campaignKolsResult.rows;
     let imported = 0, skipped = 0;
 
     for (const k of campaignKols) {
-      const existing = await queryOne('SELECT id FROM kol_database WHERE platform = ? AND username = ?', [k.platform, k.username]);
+      const existing = await s.queryOne(
+        'SELECT id FROM kol_database WHERE workspace_id = ? AND platform = ? AND username = ?',
+        [req.workspace.id, k.platform, k.username]
+      );
       if (existing) { skipped++; continue; }
 
       const id = uuidv4();
-      await exec(
-        "INSERT INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, category, email, bio, ai_score, ai_reason, estimated_cpm, scrape_status, source_campaign_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?)",
-        [id, k.platform, k.username, k.display_name, k.avatar_url, k.profile_url || `https://${k.platform}.com/@${k.username}`, k.followers, k.engagement_rate, k.avg_views, k.category, k.email, k.bio, k.ai_score, k.ai_reason, k.estimated_cpm, req.params.campaignId]
+      await s.exec(
+        "INSERT INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, category, email, bio, ai_score, ai_reason, estimated_cpm, scrape_status, source_campaign_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?)",
+        [id, req.workspace.id, k.platform, k.username, k.display_name, k.avatar_url, k.profile_url || `https://${k.platform}.com/@${k.username}`, k.followers, k.engagement_rate, k.avg_views, k.category, k.email, k.bio, k.ai_score, k.ai_reason, k.estimated_cpm, req.params.campaignId]
       );
       imported++;
     }
@@ -1493,14 +1632,34 @@ app.post(`${BASE_PATH}/api/pipeline/start`, async (req, res) => {
 
     const username = extractUsernameFromUrl(profile_url, platform);
     const id = uuidv4();
-    const campaignId = campaign_id || 'hakko-q1-all';
+    const workspaceId = req.workspace.id;
+
+    // Require an explicit campaign_id that belongs to this workspace.
+    // For legacy clients that omit it, fall back to the first campaign in the workspace.
+    let campaignId = campaign_id;
+    if (campaignId) {
+      const ok = await queryOne(
+        'SELECT id FROM campaigns WHERE id=? AND workspace_id=?',
+        [campaignId, workspaceId]
+      );
+      if (!ok) return res.status(404).json({ error: 'Campaign not found in this workspace' });
+    } else {
+      const fallback = await queryOne(
+        'SELECT id FROM campaigns WHERE workspace_id=? ORDER BY created_at ASC LIMIT 1',
+        [workspaceId]
+      );
+      if (!fallback) return res.status(400).json({ error: 'No campaigns in this workspace — create one first' });
+      campaignId = fallback.id;
+    }
 
     // Create pipeline job
-    await exec("INSERT INTO pipeline_jobs (id, profile_url, platform, username, campaign_id, stage, source) VALUES (?, ?, ?, ?, ?, 'scrape', 'manual')",
-      [id, profile_url, platform, username, campaignId]);
+    await exec(
+      "INSERT INTO pipeline_jobs (id, workspace_id, profile_url, platform, username, campaign_id, stage, source) VALUES (?, ?, ?, ?, ?, ?, 'scrape', 'manual')",
+      [id, workspaceId, profile_url, platform, username, campaignId]
+    );
 
     // Run pipeline async
-    runPipeline(id, profile_url, platform, username, campaignId).catch(async (e) => {
+    runPipeline(id, profile_url, platform, username, campaignId, workspaceId).catch(async (e) => {
       console.error('Pipeline error:', e);
       await exec("UPDATE pipeline_jobs SET stage='error', error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", [e.message, id]);
     });
@@ -1511,7 +1670,7 @@ app.post(`${BASE_PATH}/api/pipeline/start`, async (req, res) => {
   }
 });
 
-async function runPipeline(jobId, profileUrl, platform, username, campaignId) {
+async function runPipeline(jobId, profileUrl, platform, username, campaignId, workspaceId) {
   // === Stage 1: SCRAPE ===
   console.log(`[Pipeline ${jobId}] Stage 1: Scraping ${username} on ${platform}...`);
 
@@ -1571,19 +1730,24 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId) {
   // Create contact record with draft status
   const contactId = uuidv4();
 
-  // First ensure a KOL record exists in the kols table for this campaign
-  const existingKol = await queryOne('SELECT id FROM kols WHERE campaign_id=? AND username=? AND platform=?', [campaignId, username, platform]);
+  // First ensure a KOL record exists in the kols table for this campaign+workspace
+  const existingKol = await queryOne(
+    'SELECT id FROM kols WHERE campaign_id=? AND username=? AND platform=? AND workspace_id=?',
+    [campaignId, username, platform, workspaceId]
+  );
   let campaignKolId = existingKol?.id;
   if (!campaignKolId) {
     campaignKolId = uuidv4();
     await exec(
-      "INSERT INTO kols (id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, profile_url, bio, ai_score, ai_reason, estimated_cpm, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')",
-      [campaignKolId, campaignId, platform, username, d.display_name || username, d.avatar_url || '', d.followers || 0, d.engagement_rate || 0, d.avg_views || 0, d.category || '', d.email || '', profileUrl, d.bio || '', score.score, score.reason, score.estimatedCpm]
+      "INSERT INTO kols (id, workspace_id, campaign_id, platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, profile_url, bio, ai_score, ai_reason, estimated_cpm, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')",
+      [campaignKolId, workspaceId, campaignId, platform, username, d.display_name || username, d.avatar_url || '', d.followers || 0, d.engagement_rate || 0, d.avg_views || 0, d.category || '', d.email || '', profileUrl, d.bio || '', score.score, score.reason, score.estimatedCpm]
     );
   }
 
-  await exec("INSERT INTO contacts (id, kol_id, campaign_id, email_subject, email_body, cooperation_type, status) VALUES (?, ?, ?, ?, ?, 'affiliate', 'draft')",
-    [contactId, campaignKolId, campaignId, emailContent.subject, emailContent.body]);
+  await exec(
+    "INSERT INTO contacts (id, workspace_id, kol_id, campaign_id, email_subject, email_body, cooperation_type, status) VALUES (?, ?, ?, ?, ?, ?, 'affiliate', 'draft')",
+    [contactId, workspaceId, campaignKolId, campaignId, emailContent.subject, emailContent.body]
+  );
 
   await exec("UPDATE pipeline_jobs SET contact_id=?, email_subject=?, email_body=?, stage='review', updated_at=CURRENT_TIMESTAMP WHERE id=?",
     [contactId, emailContent.subject, emailContent.body, jobId]);
@@ -1594,12 +1758,14 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId) {
 // List pipeline jobs
 app.get(`${BASE_PATH}/api/pipeline/jobs`, async (req, res) => {
   try {
-    const result = await query(`
+    const s = scoped(req.workspace.id);
+    const result = await s.query(`
       SELECT pj.*, kd.display_name, kd.avatar_url, kd.followers, kd.engagement_rate, kd.avg_views, kd.category
       FROM pipeline_jobs pj
       LEFT JOIN kol_database kd ON pj.kol_database_id = kd.id
+      WHERE pj.workspace_id = ?
       ORDER BY pj.created_at DESC
-    `);
+    `, [req.workspace.id]);
     res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1609,12 +1775,13 @@ app.get(`${BASE_PATH}/api/pipeline/jobs`, async (req, res) => {
 // Get single pipeline job
 app.get(`${BASE_PATH}/api/pipeline/jobs/:id`, async (req, res) => {
   try {
-    const job = await queryOne(`
+    const s = scoped(req.workspace.id);
+    const job = await s.queryOne(`
       SELECT pj.*, kd.display_name, kd.avatar_url, kd.followers, kd.engagement_rate, kd.avg_views, kd.category, kd.bio, kd.email as kol_email
       FROM pipeline_jobs pj
       LEFT JOIN kol_database kd ON pj.kol_database_id = kd.id
-      WHERE pj.id = ?
-    `, [req.params.id]);
+      WHERE pj.id = ? AND pj.workspace_id = ?
+    `, [req.params.id, req.workspace.id]);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (job.scrape_result) job.scrape_result = JSON.parse(job.scrape_result);
     res.json(job);
@@ -1627,14 +1794,23 @@ app.get(`${BASE_PATH}/api/pipeline/jobs/:id`, async (req, res) => {
 app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, async (req, res) => {
   try {
     const { email_subject, email_body, email_to } = req.body;
-    await exec("UPDATE pipeline_jobs SET email_subject=?, email_body=?, email_to=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      [email_subject, email_body, email_to || null, req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      "UPDATE pipeline_jobs SET email_subject=?, email_body=?, email_to=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [email_subject, email_body, email_to || null, req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Job not found' });
 
-    // Also update the contact record
-    const job = await queryOne('SELECT contact_id FROM pipeline_jobs WHERE id=?', [req.params.id]);
+    // Also update the contact record (same workspace)
+    const job = await s.queryOne(
+      'SELECT contact_id FROM pipeline_jobs WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
     if (job?.contact_id) {
-      await exec("UPDATE contacts SET email_subject=?, email_body=? WHERE id=?",
-        [email_subject, email_body, job.contact_id]);
+      await s.exec(
+        "UPDATE contacts SET email_subject=?, email_body=? WHERE id=? AND workspace_id=?",
+        [email_subject, email_body, job.contact_id, req.workspace.id]
+      );
     }
 
     res.json({ success: true });
@@ -1646,7 +1822,11 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, async (req, res) => {
 // Approve and send email
 app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
   try {
-    const job = await queryOne('SELECT * FROM pipeline_jobs WHERE id=?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const job = await s.queryOne(
+      'SELECT * FROM pipeline_jobs WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (job.stage !== 'review') return res.status(400).json({ error: `Job is in stage "${job.stage}", not "review"` });
 
@@ -1654,12 +1834,17 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
     if (!emailTo) return res.status(400).json({ error: 'No email address available for this KOL. Set email_to.' });
 
     // Mark as approved
-    await exec("UPDATE pipeline_jobs SET email_approved=1, email_to=?, stage='send', updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      [emailTo, job.id]);
+    await s.exec(
+      "UPDATE pipeline_jobs SET email_approved=1, email_to=?, stage='send', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [emailTo, job.id, req.workspace.id]
+    );
 
     // === Stage 3: SEND ===
     if (!mailAgent.isConfigured()) {
-      await exec("UPDATE pipeline_jobs SET stage='review', error='SMTP not configured', updated_at=CURRENT_TIMESTAMP WHERE id=?", [job.id]);
+      await s.exec(
+        "UPDATE pipeline_jobs SET stage='review', error='SMTP not configured', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+        [job.id, req.workspace.id]
+      );
       return res.json({ success: false, error: 'SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS env vars.' });
     }
 
@@ -1670,24 +1855,32 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
     });
 
     if (sendResult.success) {
-      await exec("UPDATE pipeline_jobs SET email_sent_at=CURRENT_TIMESTAMP, smtp_message_id=?, stage='monitor', updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        [sendResult.messageId, job.id]);
+      await s.exec(
+        "UPDATE pipeline_jobs SET email_sent_at=CURRENT_TIMESTAMP, smtp_message_id=?, stage='monitor', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+        [sendResult.messageId, job.id, req.workspace.id]
+      );
 
       // Update contact status
       if (job.contact_id) {
-        await exec("UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=?", [job.contact_id]);
+        await s.exec(
+          "UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+          [job.contact_id, req.workspace.id]
+        );
       }
 
       // Save outbound email to email_replies for thread tracking
-      await exec(
-        "INSERT INTO email_replies (id, contact_id, pipeline_job_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, ?, 'outbound', 'contact@market.hakko.ai', ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-        [uuidv4(), job.contact_id, job.id, emailTo, job.email_subject, job.email_body, sendResult.messageId]
+      const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@localhost';
+      await s.exec(
+        "INSERT INTO email_replies (id, workspace_id, contact_id, pipeline_job_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, ?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        [uuidv4(), req.workspace.id, job.contact_id, job.id, fromEmail, emailTo, job.email_subject, job.email_body, sendResult.messageId]
       );
 
       res.json({ success: true, messageId: sendResult.messageId });
     } else {
-      await exec("UPDATE pipeline_jobs SET stage='review', error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        [sendResult.error, job.id]);
+      await s.exec(
+        "UPDATE pipeline_jobs SET stage='review', error=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+        [sendResult.error, job.id, req.workspace.id]
+      );
       res.json({ success: false, error: sendResult.error });
     }
   } catch (e) {
@@ -1698,12 +1891,19 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
 // Reject / regenerate email
 app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, async (req, res) => {
   try {
-    const job = await queryOne('SELECT * FROM pipeline_jobs WHERE id=?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const job = await s.queryOne(
+      'SELECT * FROM pipeline_jobs WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
     // Regenerate email
     const scrapeData = job.scrape_result ? JSON.parse(job.scrape_result) : {};
-    const campaign = (await queryOne('SELECT * FROM campaigns WHERE id = ?', [job.campaign_id])) || { name: 'HakkoAI', description: 'AI gaming assistant' };
+    const campaign = (await s.queryOne(
+      'SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [job.campaign_id, req.workspace.id]
+    )) || { name: 'HakkoAI', description: 'AI gaming assistant' };
 
     const emailContent = generateOutreachEmail(
       { display_name: scrapeData.display_name || job.username, platform: job.platform, followers: scrapeData.followers || 0, username: job.username, category: scrapeData.category, engagement_rate: scrapeData.engagement_rate, avg_views: scrapeData.avg_views, bio: scrapeData.bio },
@@ -1711,12 +1911,16 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, async (req, res) => {
       'affiliate', ''
     );
 
-    await exec("UPDATE pipeline_jobs SET email_subject=?, email_body=?, error=NULL, stage='review', updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      [emailContent.subject, emailContent.body, job.id]);
+    await s.exec(
+      "UPDATE pipeline_jobs SET email_subject=?, email_body=?, error=NULL, stage='review', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [emailContent.subject, emailContent.body, job.id, req.workspace.id]
+    );
 
     if (job.contact_id) {
-      await exec("UPDATE contacts SET email_subject=?, email_body=? WHERE id=?",
-        [emailContent.subject, emailContent.body, job.contact_id]);
+      await s.exec(
+        "UPDATE contacts SET email_subject=?, email_body=? WHERE id=? AND workspace_id=?",
+        [emailContent.subject, emailContent.body, job.contact_id, req.workspace.id]
+      );
     }
 
     res.json({ success: true, email_subject: emailContent.subject, email_body: emailContent.body });
