@@ -13,14 +13,19 @@ const startTime = Date.now();
 function registerHealthRoutes(app, basePath, deps) {
   const { query, usePostgres, youtubeQuota, notifications } = deps;
 
-  // Liveness — always returns 200 if the process is responsive
-  app.get(`${basePath}/healthz`, (req, res) => {
+  // Liveness — always returns 200 if the process is responsive.
+  // Note: Cloud Run's Google front-end intercepts /healthz in some configs,
+  // returning a Google 404 before it reaches Express. We expose both /health
+  // and /healthz so monitoring probes can use either.
+  const liveness = (req, res) => {
     res.json({
       status: 'ok',
       uptime_s: Math.round((Date.now() - startTime) / 1000),
       timestamp: new Date().toISOString(),
     });
-  });
+  };
+  app.get(`${basePath}/health`, liveness);
+  app.get(`${basePath}/healthz`, liveness);
 
   // Readiness — checks that we can reach dependencies
   app.get(`${basePath}/readyz`, async (req, res) => {
