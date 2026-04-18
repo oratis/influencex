@@ -1,0 +1,68 @@
+version: '3.9'
+
+# One-command dev environment for InfluenceX.
+#
+# Start:    docker compose up -d
+# Logs:     docker compose logs -f app
+# Stop:     docker compose down
+# Reset DB: docker compose down -v   (deletes the postgres volume)
+#
+# Ports:
+#   http://localhost:8080/InfluenceX   - the app
+#   localhost:5432                     - postgres (dev only — not for prod)
+#
+# First run: the app will auto-create the schema. Set ADMIN_EMAIL and
+# ADMIN_PASSWORD in .env to auto-create an admin account, or register
+# the first user via the sign-up UI.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: influencex
+      POSTGRES_PASSWORD: influencex_dev_password
+      POSTGRES_DB: influencex
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U influencex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 8080
+      BASE_PATH: /InfluenceX
+      DATABASE_URL: postgresql://influencex:influencex_dev_password@postgres:5432/influencex
+      # Optional: auto-create admin on first boot
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Admin}
+      # Pass through any keys set in .env on the host
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-}
+      RESEND_REPLY_TO: ${RESEND_REPLY_TO:-}
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      HUNTER_API_KEY: ${HUNTER_API_KEY:-}
+      APIFY_TOKEN: ${APIFY_TOKEN:-}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      NOTIFY_SLACK_WEBHOOK_URL: ${NOTIFY_SLACK_WEBHOOK_URL:-}
+      NOTIFY_FEISHU_WEBHOOK_URL: ${NOTIFY_FEISHU_WEBHOOK_URL:-}
+      NOTIFY_DISCORD_WEBHOOK_URL: ${NOTIFY_DISCORD_WEBHOOK_URL:-}
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:

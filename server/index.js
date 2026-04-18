@@ -22,6 +22,12 @@ const { rateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
 const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
+const { createQueue } = require('./job-queue');
+const { defaultCache } = require('./cache');
+const apify = require('./apify-client');
+
+// Shared job queue for background work (scraping, enrichment, etc)
+const jobQueue = createQueue({ concurrency: parseInt(process.env.QUEUE_CONCURRENCY) || 3 });
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -1133,6 +1139,21 @@ app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermissi
 // Notification sinks status
 app.get(`${BASE_PATH}/api/notifications/status`, (req, res) => {
   res.json({ enabled_sinks: notifications.getEnabledSinks() });
+});
+
+// Job queue stats
+app.get(`${BASE_PATH}/api/queue/stats`, (req, res) => {
+  res.json(jobQueue.getStats());
+});
+
+// Cache stats
+app.get(`${BASE_PATH}/api/cache/stats`, (req, res) => {
+  res.json(defaultCache.getStats());
+});
+
+// Apify integration status
+app.get(`${BASE_PATH}/api/apify/status`, (req, res) => {
+  res.json({ configured: apify.isConfigured() });
 });
 
 // ==================== ROI Dashboard ====================
