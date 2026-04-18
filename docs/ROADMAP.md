@@ -406,14 +406,19 @@ Usage overage: pay-as-you-go on agent tokens beyond tier.
 
 ## 9. Open questions / decisions needed
 
-1. **Brand direction** — keep "InfluenceX" or rename (e.g. "Aha", "Swarm", "Crew")? Current name implies influencer-only.
-2. **Single-tenant → multi-tenant** — do it in Phase A (bigger lift) or defer to Phase H? Argument for early: every new table wouldn't need backfill later.
-3. **BYOK vs managed** — should self-host users bring their own Anthropic/OpenAI keys by default, or do we run a metered proxy for convenience? (Recommend BYOK for OSS, managed for paid.)
-4. **Creator marketplace seed** — scrape public data and validate, or partner with existing databases (Modash/etc. resell)? First is slower but has better moat.
-5. **Browser extension?** — useful for "select text → ask Content Agent to rewrite," creator research. Possibly Phase C or D add-on.
+**Resolved (2026-04-18):**
+
+1. ✅ **Brand direction** — **Keep "InfluenceX"**. Changing mid-pivot burns SEO goodwill; product differentiation matters more than the name.
+2. ✅ **Single-tenant → multi-tenant** — **Do it in Phase A.** 3 days of upfront work saves ~2 weeks of retrofitting later. Required before any paid SaaS tier ships. See [`MULTITENANCY.md`](./MULTITENANCY.md) for the migration plan.
+3. ✅ **Creator marketplace seed** — **Self-crawl.** Slower cold start (3–6 months to ≥10K vetted creators) but builds a defensible asset. Scope under Phase E; background job queue does the heavy lifting; compliance layer (robots.txt, rate limits, GDPR-friendly storage) is non-negotiable.
+
+**Still open:**
+
+4. **BYOK vs managed LLM** — OSS users bring their own Anthropic/OpenAI keys; SaaS users get a metered proxy. Needs a spec doc in Phase A.
+5. **Browser extension?** — useful for "select text → ask Content Agent to rewrite." Candidate for Phase C or D add-on.
 6. **Mobile app** — probably Phase H; until then, responsive web is the focus.
-7. **AI safety stance** — opt-in vs. opt-out on auto-publishing? Default probably opt-in for first 30 days.
-8. **Data retention** — how long do we keep agent traces / generated content? Default 90 days unless workspace ops in.
+7. **AI safety stance on auto-publish** — default opt-in for first 30 days, then per-channel override.
+8. **Data retention** — default 90 days on agent traces; workspace can opt in to longer retention.
 
 ---
 
