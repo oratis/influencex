@@ -240,6 +240,31 @@ export const api = {
   // persisting expiring image URLs like Volcengine's 24h signed ones)
   fetchAsDataUrl: (url) => request('/util/fetch-as-data-url', { method: 'POST', body: { url } }),
 
+  // Prompt presets
+  listPromptPresets: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/prompt-presets${q ? '?' + q : ''}`);
+  },
+  createPromptPreset: (data) => request('/prompt-presets', { method: 'POST', body: data }),
+  updatePromptPreset: (id, data) => request(`/prompt-presets/${id}`, { method: 'PATCH', body: data }),
+  deletePromptPreset: (id) => request(`/prompt-presets/${id}`, { method: 'DELETE' }),
+  usePromptPreset: (id) => request(`/prompt-presets/${id}/use`, { method: 'POST' }),
+
+  // Scheduled publishes
+  listScheduledPublishes: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/scheduled-publishes${q ? '?' + q : ''}`);
+  },
+  schedulePublish: (data) => request('/scheduled-publishes', { method: 'POST', body: data }),
+  cancelScheduledPublish: (id) => request(`/scheduled-publishes/${id}`, { method: 'DELETE' }),
+  tickScheduledPublishes: () => request('/scheduled-publishes/tick', { method: 'POST' }),
+
+  // Platform OAuth
+  listPublishPlatforms: () => request('/publish/platforms'),
+  initOAuth: (platform) => request(`/publish/oauth/${platform}/init`, { method: 'POST' }),
+  disconnectPlatform: (platform) => request(`/publish/platforms/${platform}`, { method: 'DELETE' }),
+  directPublish: (platform, data) => request(`/publish/direct/${platform}`, { method: 'POST', body: data }),
+
   // Brand voices
   listBrandVoices: () => request('/brand-voices'),
   createBrandVoice: (data) => request('/brand-voices', { method: 'POST', body: data }),

@@ -56,6 +56,82 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-19-prompts-schedules-oauth',
+    description: 'Prompt presets, scheduled publishes, platform OAuth connections',
+    up: async ({ exec }) => {
+      const stmts = [
+        `CREATE TABLE IF NOT EXISTS prompt_presets (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          prompt TEXT NOT NULL,
+          type TEXT NOT NULL,
+          agent_id TEXT,
+          tags TEXT DEFAULT '[]',
+          use_count INTEGER DEFAULT 0,
+          created_by TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_prompt_presets_workspace ON prompt_presets(workspace_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_prompt_presets_type ON prompt_presets(type)`,
+
+        `CREATE TABLE IF NOT EXISTS scheduled_publishes (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          content_piece_id TEXT,
+          platforms TEXT NOT NULL,
+          content_snapshot TEXT NOT NULL,
+          scheduled_at TIMESTAMP NOT NULL,
+          status TEXT DEFAULT 'pending',
+          result TEXT,
+          mode TEXT DEFAULT 'intent',
+          attempts INTEGER DEFAULT 0,
+          created_by TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          last_attempt_at TIMESTAMP,
+          completed_at TIMESTAMP
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_sched_pub_workspace ON scheduled_publishes(workspace_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_sched_pub_due ON scheduled_publishes(status, scheduled_at)`,
+
+        `CREATE TABLE IF NOT EXISTS platform_connections (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          account_name TEXT,
+          account_id TEXT,
+          access_token TEXT,
+          refresh_token TEXT,
+          token_scope TEXT,
+          expires_at TIMESTAMP,
+          metadata TEXT DEFAULT '{}',
+          connected_by TEXT,
+          connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          last_used_at TIMESTAMP,
+          UNIQUE(workspace_id, platform)
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_platform_conn_workspace ON platform_connections(workspace_id)`,
+
+        `CREATE TABLE IF NOT EXISTS oauth_states (
+          state TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          code_verifier TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+      ];
+      for (const s of stmts) {
+        try { await exec(s); } catch (e) {
+          if (!/already exists/i.test(e.message)) throw e;
+        }
+      }
+    },
+  },
+
+  {
     id: '2026-04-19-agent-runtime-tables',
     description: 'Create agents, agent_runs, agent_traces, content_pieces, brand_voices tables for Phase A Week 2',
     up: async ({ exec }) => {

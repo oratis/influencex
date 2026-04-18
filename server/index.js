@@ -371,6 +371,9 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   if (req.path.startsWith('/auth/')) return next();
   // SSE streams authenticate via query-string (EventSource can't set headers)
   if (/^\/agents\/runs\/[^/]+\/stream$/.test(req.path)) return next();
+  // OAuth callbacks — the provider redirects here without auth; the state
+  // table acts as the authenticity check.
+  if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
   authMiddleware(req, res, next);
 });
 
@@ -387,6 +390,7 @@ const WORKSPACE_SKIP_PREFIXES = [
   '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
   '/notifications/', '/quota/', '/cache/', '/queue/', '/apify/',
   '/query/', '/scheduler/', '/email-templates', '/stats',
+  '/publish/oauth/', // OAuth callbacks resolve workspace from state row
 ];
 app.use(`${BASE_PATH}/api`, (req, res, next) => {
   if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
@@ -1810,6 +1814,314 @@ app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, async (req, res) => {
   }
 });
 
+// ==================== Platform OAuth Connections ====================
+
+const publishOauth = require('./publish/oauth');
+
+// List available platforms + their configured/connected state for this workspace
+app.get(`${BASE_PATH}/api/publish/platforms`, async (req, res) => {
+  try {
+    const providers = publishOauth.listProviders();
+    const s = scoped(req.workspace.id);
+    const existing = await s.query(
+      'SELECT platform, account_name, account_id, connected_at, expires_at FROM platform_connections WHERE workspace_id = ?',
+      [req.workspace.id]
+    );
+    const connectedMap = {};
+    for (const row of existing.rows || []) connectedMap[row.platform] = row;
+
+    res.json({
+      platforms: providers.map(p => ({
+        ...p,
+        connection: connectedMap[p.id] || null,
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Begin OAuth flow — returns the authorize URL; caller opens it in a new tab
+app.post(`${BASE_PATH}/api/publish/oauth/:provider/init`, async (req, res) => {
+  try {
+    const provider = req.params.provider;
+    if (!publishOauth.getProvider(provider)) return res.status(404).json({ error: 'Unknown provider' });
+    if (!publishOauth.isConfigured(provider)) {
+      return res.status(400).json({ error: `${provider} OAuth not configured on this deployment (missing client credentials env vars)` });
+    }
+    const { url, state, codeVerifier, redirect } = publishOauth.buildAuthorizeUrl(provider, {
+      workspaceId: req.workspace.id,
+      userId: req.user.id,
+    });
+    await exec(
+      'INSERT INTO oauth_states (state, workspace_id, user_id, platform, code_verifier) VALUES (?, ?, ?, ?, ?)',
+      [state, req.workspace.id, req.user.id, provider, codeVerifier || null]
+    );
+    res.json({ authorize_url: url, state, redirect_uri: redirect });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// OAuth callback — the provider redirects here after user approves.
+// Exchanges code for tokens and stores in platform_connections.
+app.get(`${BASE_PATH}/api/publish/oauth/:provider/callback`, async (req, res) => {
+  try {
+    const provider = req.params.provider;
+    const { code, state, error } = req.query;
+    if (error) {
+      return res.status(400).send(`<html><body><h2>OAuth error</h2><p>${error}</p><p><a href="/workspace/settings">Back</a></p></body></html>`);
+    }
+    if (!code || !state) return res.status(400).send('missing code/state');
+
+    const row = await queryOne('SELECT * FROM oauth_states WHERE state = ?', [state]);
+    if (!row) return res.status(400).send('state mismatch or expired');
+    if (row.platform !== provider) return res.status(400).send('platform mismatch');
+
+    const redirect = `${process.env.OAUTH_CALLBACK_BASE || 'https://influencexes.com'}/api/publish/oauth/${provider}/callback`;
+    const tokenInfo = await publishOauth.exchangeCodeForToken(provider, {
+      code,
+      redirectUri: redirect,
+      codeVerifier: row.code_verifier,
+    });
+
+    // Upsert into platform_connections
+    const existingConn = await queryOne(
+      'SELECT id FROM platform_connections WHERE workspace_id = ? AND platform = ?',
+      [row.workspace_id, provider]
+    );
+    const expiresAt = tokenInfo.expires_in ? new Date(Date.now() + tokenInfo.expires_in * 1000).toISOString() : null;
+
+    if (existingConn) {
+      await exec(
+        'UPDATE platform_connections SET access_token=?, refresh_token=?, token_scope=?, expires_at=?, account_name=?, account_id=?, connected_at=CURRENT_TIMESTAMP WHERE id=?',
+        [tokenInfo.access_token, tokenInfo.refresh_token, tokenInfo.scope, expiresAt, tokenInfo.account_name, tokenInfo.account_id, existingConn.id]
+      );
+    } else {
+      await exec(
+        'INSERT INTO platform_connections (id, workspace_id, platform, account_name, account_id, access_token, refresh_token, token_scope, expires_at, connected_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [uuidv4(), row.workspace_id, provider, tokenInfo.account_name, tokenInfo.account_id, tokenInfo.access_token, tokenInfo.refresh_token, tokenInfo.scope, expiresAt, row.user_id]
+      );
+    }
+
+    await exec('DELETE FROM oauth_states WHERE state = ?', [state]);
+
+    // Small HTML page that closes the popup / shows success
+    res.send(`<!DOCTYPE html><html><head><title>Connected</title><style>body{font-family:sans-serif;background:#0a0a0f;color:#f0f0f5;padding:48px;text-align:center}</style></head><body><h1>✅ Connected to ${provider}</h1><p>as ${tokenInfo.account_name || '(account)'}<p>You can close this window.</p><script>setTimeout(() => window.close(), 1500);</script></body></html>`);
+  } catch (e) {
+    res.status(500).send(`<html><body><h2>OAuth callback failed</h2><pre>${String(e.message || e).slice(0, 500)}</pre></body></html>`);
+  }
+});
+
+app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const r = await s.exec(
+      'DELETE FROM platform_connections WHERE workspace_id = ? AND platform = ?',
+      [req.workspace.id, req.params.platform]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Not connected' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Direct publish: uses stored platform connection to post for real
+app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
+  try {
+    const platform = req.params.platform;
+    const { text, image_url } = req.body;
+    if (!text) return res.status(400).json({ error: 'text is required' });
+
+    const s = scoped(req.workspace.id);
+    const conn = await s.queryOne(
+      'SELECT * FROM platform_connections WHERE workspace_id = ? AND platform = ?',
+      [req.workspace.id, platform]
+    );
+    if (!conn) return res.status(400).json({ error: `${platform} not connected for this workspace` });
+
+    const result = await publishOauth.publishDirect(platform, conn.access_token, { text, imageUrl: image_url });
+
+    await exec(
+      'UPDATE platform_connections SET last_used_at=CURRENT_TIMESTAMP WHERE id=?',
+      [conn.id]
+    );
+
+    if (!result.success) {
+      return res.status(502).json(result);
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Make callback path skip workspace middleware (it has its own state validation)
+// We also need it to skip auth — which it already does since it's a GET and auth
+// only applies via req.headers. The state table validates authenticity.
+// But our lenient workspace middleware would 401 without auth. Fix:
+// callback path bypasses the workspace middleware in the skip list.
+
+// ==================== Scheduled Publishes ====================
+
+app.get(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
+  try {
+    const { status, limit } = req.query;
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT * FROM scheduled_publishes WHERE workspace_id = ?';
+    const params = [req.workspace.id];
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    sql += ' ORDER BY scheduled_at DESC LIMIT ?';
+    params.push(Math.min(parseInt(limit) || 100, 500));
+    const result = await s.query(sql, params);
+    const items = (result.rows || []).map(r => ({
+      ...r,
+      platforms: r.platforms ? JSON.parse(r.platforms) : [],
+      content_snapshot: r.content_snapshot ? JSON.parse(r.content_snapshot) : {},
+      result: r.result ? JSON.parse(r.result) : null,
+    }));
+    res.json({ items });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
+  try {
+    const { content_piece_id, platforms, scheduled_at, mode, content } = req.body;
+    if (!Array.isArray(platforms) || platforms.length === 0) return res.status(400).json({ error: 'platforms[] is required' });
+    if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at is required (ISO)' });
+    const when = new Date(scheduled_at);
+    if (isNaN(when.getTime())) return res.status(400).json({ error: 'Invalid scheduled_at' });
+
+    const s = scoped(req.workspace.id);
+    let snapshot = content || null;
+    if (!snapshot && content_piece_id) {
+      const piece = await s.queryOne('SELECT * FROM content_pieces WHERE id = ? AND workspace_id = ?', [content_piece_id, req.workspace.id]);
+      if (!piece) return res.status(404).json({ error: 'content_piece not found in this workspace' });
+      snapshot = {
+        title: piece.title,
+        body: piece.body,
+        type: piece.type,
+        metadata: piece.metadata ? JSON.parse(piece.metadata) : {},
+      };
+    }
+    if (!snapshot) return res.status(400).json({ error: 'Provide either content_piece_id or inline content' });
+
+    const id = uuidv4();
+    await s.exec(
+      'INSERT INTO scheduled_publishes (id, workspace_id, content_piece_id, platforms, content_snapshot, scheduled_at, mode, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, content_piece_id || null, JSON.stringify(platforms), JSON.stringify(snapshot), when.toISOString(), mode || 'intent', req.user?.id || null]
+    );
+    res.json({ id, scheduled_at: when.toISOString() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete(`${BASE_PATH}/api/scheduled-publishes/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const r = await s.exec(
+      "UPDATE scheduled_publishes SET status='cancelled' WHERE id = ? AND workspace_id = ? AND status = 'pending'",
+      [req.params.id, req.workspace.id]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Not found or not cancellable' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual trigger for admin — processes all due pending items now
+app.post(`${BASE_PATH}/api/scheduled-publishes/tick`, authMiddleware, rbac.requirePermission('system.manage'), async (req, res) => {
+  try {
+    const result = await processDueScheduledPublishes();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Prompt Presets ====================
+
+app.get(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
+  try {
+    const { type, agent_id, limit } = req.query;
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT * FROM prompt_presets WHERE workspace_id = ?';
+    const params = [req.workspace.id];
+    if (type) { sql += ' AND type = ?'; params.push(type); }
+    if (agent_id) { sql += ' AND agent_id = ?'; params.push(agent_id); }
+    sql += ' ORDER BY use_count DESC, created_at DESC LIMIT ?';
+    params.push(Math.min(parseInt(limit) || 100, 500));
+    const result = await s.query(sql, params);
+    const presets = (result.rows || []).map(p => ({ ...p, tags: p.tags ? JSON.parse(p.tags) : [] }));
+    res.json({ presets });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
+  try {
+    const { name, description, prompt, type, agent_id, tags } = req.body;
+    if (!name || !prompt || !type) return res.status(400).json({ error: 'name, prompt, and type are required' });
+    const id = uuidv4();
+    const s = scoped(req.workspace.id);
+    await s.exec(
+      'INSERT INTO prompt_presets (id, workspace_id, name, description, prompt, type, agent_id, tags, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, name, description || '', prompt, type, agent_id || null, JSON.stringify(tags || []), req.user?.id || null]
+    );
+    res.json({ id, name });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const updates = [];
+    const params = [];
+    for (const f of ['name', 'description', 'prompt', 'type', 'agent_id']) {
+      if (req.body[f] !== undefined) { updates.push(`${f} = ?`); params.push(req.body[f]); }
+    }
+    if (req.body.tags !== undefined) { updates.push('tags = ?'); params.push(JSON.stringify(req.body.tags)); }
+    if (updates.length === 0) return res.status(400).json({ error: 'nothing to update' });
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(req.params.id, req.workspace.id);
+    const r = await s.exec(`UPDATE prompt_presets SET ${updates.join(', ')} WHERE id = ? AND workspace_id = ?`, params);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const r = await s.exec('DELETE FROM prompt_presets WHERE id = ? AND workspace_id = ?', [req.params.id, req.workspace.id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Track preset usage (called by Studio when a preset is applied)
+app.post(`${BASE_PATH}/api/prompt-presets/:id/use`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    await s.exec('UPDATE prompt_presets SET use_count = use_count + 1 WHERE id = ? AND workspace_id = ?', [req.params.id, req.workspace.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==================== Brand Voices ====================
 
 app.get(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
@@ -3181,6 +3493,83 @@ app.use(BASE_PATH, (req, res, next) => {
   res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html'));
 });
 
+/**
+ * Process all scheduled_publishes rows whose scheduled_at <= now and status=pending.
+ * Dispatches to the publisher agent. Supports two modes:
+ *   - 'intent' (default): just generates intent URLs; stores them as result
+ *   - 'auto':  uses stored platform_connections to post directly (v2; not yet implemented)
+ */
+async function processDueScheduledPublishes() {
+  const nowIso = new Date().toISOString();
+  const due = await query(
+    "SELECT * FROM scheduled_publishes WHERE status = 'pending' AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT 20",
+    [nowIso]
+  );
+  const rows = due.rows || [];
+  if (rows.length === 0) return { processed: 0 };
+
+  let ok = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      await exec(
+        "UPDATE scheduled_publishes SET status='running', last_attempt_at=CURRENT_TIMESTAMP, attempts=attempts+1 WHERE id=?",
+        [row.id]
+      );
+      const snapshot = JSON.parse(row.content_snapshot);
+      const platforms = JSON.parse(row.platforms);
+      const content = {
+        title: snapshot.title,
+        body: snapshot.type === 'image' ? (snapshot.title || '') : (snapshot.body || ''),
+        cta: snapshot.metadata?.cta,
+        hashtags: snapshot.metadata?.hashtags || [],
+        image_url: snapshot.type === 'image' ? snapshot.body : snapshot.metadata?.image_url,
+      };
+
+      // Dispatch to publisher agent (intent-URL mode). Auto-posting via
+      // platform_connections is TODO when OAuth is wired up end-to-end.
+      const { runId, stream } = agentRuntime.createRun('publisher', { content, platforms }, {
+        workspaceId: row.workspace_id,
+      });
+      let finalOutput = null;
+      let finalError = null;
+      await new Promise((resolve) => {
+        stream.on('event', (evt) => {
+          if (evt.type === 'complete') finalOutput = evt.data.output;
+          if (evt.type === 'error') finalError = evt.data?.message;
+          if (evt.type === 'closed') resolve();
+        });
+      });
+
+      if (finalError) {
+        await exec(
+          "UPDATE scheduled_publishes SET status='error', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+          [JSON.stringify({ error: finalError }), row.id]
+        );
+        failed++;
+      } else {
+        await exec(
+          "UPDATE scheduled_publishes SET status='complete', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+          [JSON.stringify(finalOutput), row.id]
+        );
+        ok++;
+        notifications.notify({
+          type: 'publish.scheduled.ready',
+          level: 'success',
+          title: 'Scheduled publish ready',
+          message: `${platforms.length} platform intent URL(s) generated for "${(snapshot.title || snapshot.body || '').slice(0, 60)}"`,
+        });
+      }
+    } catch (e) {
+      await exec(
+        "UPDATE scheduled_publishes SET status='error', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+        [JSON.stringify({ error: e.message }), row.id]
+      ).catch(() => {});
+      failed++;
+    }
+  }
+  return { processed: rows.length, ok, failed };
+}
+
 // ==================== Auto-setup on startup ====================
 async function initializeDefaultData() {
   // Create default admin account from env vars (skip if not configured)
@@ -3218,6 +3607,10 @@ async function initializeDefaultData() {
       const sinks = notifications.getEnabledSinks();
       if (sinks.length) console.log(`[notifications] Active sinks: ${sinks.join(', ')}`);
       scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
+      // Additional tick for scheduled publishes (every 60s)
+      setInterval(() => {
+        processDueScheduledPublishes().catch(e => console.warn('[sched-publish]', e.message));
+      }, 60_000).unref?.();
       // Register all v2 agents with the runtime
       const registered = agentsV2.registerAll();
       console.log(`[agents-v2] Registered ${registered.length} agents: ${registered.join(', ')}`);

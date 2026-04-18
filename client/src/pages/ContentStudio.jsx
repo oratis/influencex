@@ -36,12 +36,74 @@ export default function ContentStudio() {
   const { confirm: confirmDialog } = useConfirm();
   const [publishResults, setPublishResults] = useState(null);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [presets, setPresets] = useState([]);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [scheduleAt, setScheduleAt] = useState('');
 
   useEffect(() => {
     loadVoices();
     loadPieces();
+    loadPresets();
     return () => { if (srcRef.current) srcRef.current.close(); };
   }, []);
+
+  useEffect(() => { loadPresets(); }, [format, isImage]);
+
+  async function loadPresets() {
+    try {
+      const type = isImage ? 'image' : 'text';
+      const r = await api.listPromptPresets({ type, limit: 12 });
+      setPresets(r.presets || []);
+    } catch (e) { /* ok */ }
+  }
+
+  function applyPreset(preset) {
+    setBrief(preset.prompt);
+    api.usePromptPreset(preset.id).catch(() => {});
+    toast.success(`Applied "${preset.name}"`);
+  }
+
+  async function saveAsPreset() {
+    if (!brief.trim()) return;
+    const name = window.prompt(`Save this ${isImage ? 'image' : 'text'} brief as a preset. Name:`);
+    if (!name) return;
+    try {
+      await api.createPromptPreset({
+        name,
+        prompt: brief.trim(),
+        type: isImage ? 'image' : 'text',
+        agent_id: isImage ? 'content-visual' : 'content-text',
+      });
+      toast.success(`Saved preset "${name}"`);
+      loadPresets();
+    } catch (e) {
+      toast.error(e.message);
+    }
+  }
+
+  async function handleSchedule() {
+    if (!currentOutput) return;
+    const content = isImage
+      ? { title: currentOutput.original_brief || '', body: currentOutput.url || '', image_url: currentOutput.url }
+      : {
+          title: currentOutput.title,
+          body: currentOutput.body,
+          cta: currentOutput.cta,
+          hashtags: currentOutput.hashtags || [],
+        };
+    try {
+      await api.schedulePublish({
+        platforms: defaultPlatformsFor(format),
+        scheduled_at: scheduleAt,
+        content,
+        mode: 'intent',
+      });
+      toast.success('Scheduled');
+      setShowScheduleModal(false);
+    } catch (e) {
+      toast.error(e.message);
+    }
+  }
 
   async function loadVoices() {
     try {
@@ -260,8 +322,42 @@ export default function ContentStudio() {
             ))}
           </div>
 
+          {presets.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <label className="form-label" style={{ fontSize: 12 }}>Your presets (click to apply)</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {presets.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => applyPreset(p)}
+                    style={{
+                      padding: '4px 10px', fontSize: 11, borderRadius: 14,
+                      border: '1px solid var(--border)', background: 'var(--bg-input)',
+                      color: 'var(--text-secondary)', cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                    title={p.prompt.slice(0, 200)}
+                  >
+                    {p.name}{p.use_count > 0 ? ` · ${p.use_count}` : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="form-group">
-            <label className="form-label">{isImage ? 'What should the image show?' : 'What should this say?'}</label>
+            <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>{isImage ? 'What should the image show?' : 'What should this say?'}</span>
+              {brief.trim() && (
+                <button
+                  onClick={saveAsPreset}
+                  style={{
+                    fontSize: 11, color: 'var(--accent)', background: 'none',
+                    border: 'none', cursor: 'pointer', padding: 0,
+                  }}
+                  title="Save this brief as a reusable preset"
+                >💾 Save preset</button>
+              )}
+            </label>
             <textarea
               className="form-textarea"
               placeholder={isImage
@@ -431,6 +527,12 @@ export default function ContentStudio() {
                 <button className="btn btn-secondary btn-sm" onClick={() => handlePublish(defaultPlatformsFor(format))} disabled={isPublishing}>
                   {isPublishing ? '...' : '🚀 Publish'}
                 </button>
+                <button className="btn btn-secondary btn-sm" onClick={() => {
+                  const now = new Date();
+                  now.setHours(now.getHours() + 1, 0, 0, 0);
+                  setScheduleAt(now.toISOString().slice(0, 16));
+                  setShowScheduleModal(true);
+                }}>📅 Schedule</button>
               </div>
               {currentOutput.word_count && (
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
@@ -556,6 +658,37 @@ export default function ContentStudio() {
           </div>
         )}
       </div>
+
+      {/* Schedule modal */}
+      {showScheduleModal && (
+        <div className="modal-overlay" onClick={() => setShowScheduleModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+            <div className="modal-header">
+              <h3>Schedule publish</h3>
+              <button className="btn-icon" onClick={() => setShowScheduleModal(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+                The Publisher agent will generate intent URLs at the chosen time and notify you. Platforms:{' '}
+                <strong>{defaultPlatformsFor(format).join(', ')}</strong>
+              </p>
+              <label className="form-label">Scheduled time (local)</label>
+              <input
+                type="datetime-local"
+                className="form-input"
+                value={scheduleAt}
+                onChange={e => setScheduleAt(e.target.value)}
+              />
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowScheduleModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSchedule} disabled={!scheduleAt}>
+                Schedule
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes pulse {
