@@ -566,42 +566,95 @@ function pgParams(sql) {
   return sql.replace(/\?/g, () => `$${++i}`);
 }
 
+// ==================== Query timing instrumentation ====================
+
+const queryStats = {
+  total: 0,
+  slowCount: 0,
+  totalMs: 0,
+  recentSlow: [],   // keep last 20 slow queries
+};
+const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS) || 100;
+
+function recordQueryTiming(sql, durationMs) {
+  queryStats.total += 1;
+  queryStats.totalMs += durationMs;
+  if (durationMs >= SLOW_QUERY_THRESHOLD_MS) {
+    queryStats.slowCount += 1;
+    queryStats.recentSlow.unshift({
+      sql: sql.slice(0, 200),
+      durationMs: Math.round(durationMs),
+      timestamp: new Date().toISOString(),
+    });
+    if (queryStats.recentSlow.length > 20) queryStats.recentSlow.length = 20;
+    if (process.env.LOG_SLOW_QUERIES === 'true') {
+      console.warn(`[slow-query ${Math.round(durationMs)}ms] ${sql.slice(0, 140)}`);
+    }
+  }
+}
+
+function getQueryStats() {
+  return {
+    total: queryStats.total,
+    slowCount: queryStats.slowCount,
+    avgMs: queryStats.total > 0 ? +(queryStats.totalMs / queryStats.total).toFixed(2) : 0,
+    totalMs: Math.round(queryStats.totalMs),
+    slowThresholdMs: SLOW_QUERY_THRESHOLD_MS,
+    recentSlow: queryStats.recentSlow,
+  };
+}
+
 // Unified query interface
 // query(sql, params) -> { rows: [...] }
 async function query(sql, params = []) {
-  if (usePostgres) {
-    return pool.query(pgParams(sql), params);
-  } else {
-    // SQLite: detect query type
-    const trimmed = sql.trim().toUpperCase();
-    if (trimmed.startsWith('SELECT') || trimmed.startsWith('WITH') || trimmed.startsWith('EXPLAIN')) {
-      const rows = db.prepare(sql).all(...params);
-      return { rows };
+  const start = Date.now();
+  try {
+    if (usePostgres) {
+      return await pool.query(pgParams(sql), params);
     } else {
-      const info = db.prepare(sql).run(...params);
-      return { rows: [], rowCount: info.changes };
+      // SQLite: detect query type
+      const trimmed = sql.trim().toUpperCase();
+      if (trimmed.startsWith('SELECT') || trimmed.startsWith('WITH') || trimmed.startsWith('EXPLAIN')) {
+        const rows = db.prepare(sql).all(...params);
+        return { rows };
+      } else {
+        const info = db.prepare(sql).run(...params);
+        return { rows: [], rowCount: info.changes };
+      }
     }
+  } finally {
+    recordQueryTiming(sql, Date.now() - start);
   }
 }
 
 // queryOne(sql, params) -> row or undefined
 async function queryOne(sql, params = []) {
-  if (usePostgres) {
-    const result = await pool.query(pgParams(sql), params);
-    return result.rows[0];
-  } else {
-    return db.prepare(sql).get(...params);
+  const start = Date.now();
+  try {
+    if (usePostgres) {
+      const result = await pool.query(pgParams(sql), params);
+      return result.rows[0];
+    } else {
+      return db.prepare(sql).get(...params);
+    }
+  } finally {
+    recordQueryTiming(sql, Date.now() - start);
   }
 }
 
 // exec(sql, params) -> { rowCount }
 async function exec(sql, params = []) {
-  if (usePostgres) {
-    const result = await pool.query(pgParams(sql), params);
-    return { rowCount: result.rowCount };
-  } else {
-    const info = db.prepare(sql).run(...params);
-    return { rowCount: info.changes };
+  const start = Date.now();
+  try {
+    if (usePostgres) {
+      const result = await pool.query(pgParams(sql), params);
+      return { rowCount: result.rowCount };
+    } else {
+      const info = db.prepare(sql).run(...params);
+      return { rowCount: info.changes };
+    }
+  } finally {
+    recordQueryTiming(sql, Date.now() - start);
   }
 }
 
@@ -657,6 +710,7 @@ module.exports = {
   db,
   usePostgres,
   initializeDatabase,
+  getQueryStats,
   query,
   queryOne,
   exec,

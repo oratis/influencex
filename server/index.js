@@ -1,8 +1,9 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
-const { query, queryOne, exec, transaction, initializeDatabase, usePostgres } = require('./database');
+const { query, queryOne, exec, transaction, initializeDatabase, usePostgres, getQueryStats } = require('./database');
 const { v4: uuidv4 } = require('uuid');
 const { authMiddleware, registerUser, loginUser, destroySession, getSession } = require('./auth');
 const ga4 = require('./ga4');
@@ -50,6 +51,18 @@ app.use(cors({
   credentials: true,
 }));
 
+// gzip/deflate response compression — significant bandwidth savings on JSON
+// and HTML. Skips small bodies (<1kb) and already-compressed content types.
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => {
+    // Don't compress CSV downloads — Content-Disposition: attachment files are
+    // usually streamed to disk, compression adds CPU with little benefit
+    if (req.path.endsWith('/export')) return false;
+    return compression.filter(req, res);
+  },
+}));
+
 // Resend webhook needs raw body for signature verification
 const crypto = require('crypto');
 app.use((req, res, next) => {
@@ -62,8 +75,23 @@ app.use((req, res, next) => {
   }
 });
 
-// Serve static frontend files
-app.use(BASE_PATH, express.static(path.join(__dirname, '..', 'client', 'dist')));
+// Serve static frontend files with long-term caching for hashed assets.
+// Vite emits content-hashed filenames in /assets (e.g. index-abc123.js),
+// so we can safely cache them for a year. index.html is never cached.
+app.use(BASE_PATH, express.static(path.join(__dirname, '..', 'client', 'dist'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+      // Hashed bundle assets — immutable, cache forever
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else if (filePath.endsWith('.html')) {
+      // HTML entry points — always revalidate
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else {
+      // Other files — short cache
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+    }
+  },
+}));
 
 // Register health endpoints early (outside auth, rate limit, and BASE_PATH conventions)
 registerHealthRoutes(app, BASE_PATH, { query, usePostgres, youtubeQuota, notifications });
@@ -1149,6 +1177,11 @@ app.get(`${BASE_PATH}/api/queue/stats`, (req, res) => {
 // Cache stats
 app.get(`${BASE_PATH}/api/cache/stats`, (req, res) => {
   res.json(defaultCache.getStats());
+});
+
+// Database query stats (slow query log + averages)
+app.get(`${BASE_PATH}/api/query/stats`, authMiddleware, rbac.requirePermission('system.manage'), (req, res) => {
+  res.json(getQueryStats());
 });
 
 // Apify integration status

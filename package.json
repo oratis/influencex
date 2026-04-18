@@ -12,19 +12,28 @@
     "test:watch": "node --test --watch 'server/__tests__/*.test.js'",
     "seed": "node server/seed-demo.js"
   },
-  "keywords": [],
+  "keywords": ["kol", "influencer-marketing", "creator-economy", "youtube", "tiktok", "crm", "automation"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oratis/influencex.git"
+  },
+  "homepage": "https://github.com/oratis/influencex",
+  "bugs": {
+    "url": "https://github.com/oratis/influencex/issues"
+  },
   "type": "commonjs",
   "dependencies": {
     "@google-analytics/data": "^5.2.1",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
-    "pg": "^8.13.0",
+    "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.0",
     "express": "^5.2.1",
     "nodemailer": "^8.0.4",
+    "pg": "^8.13.0",
     "resend": "^6.10.0",
     "undici": "^8.0.0",
     "uuid": "^13.0.0"
