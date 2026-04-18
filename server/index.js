@@ -2865,7 +2865,7 @@ async function initializeDefaultData() {
 (async () => {
   try {
     await initializeDatabase();
-    const migrationResult = await runPendingMigrations({ query, exec });
+    const migrationResult = await runPendingMigrations({ query, queryOne, exec });
     if (migrationResult.applied > 0) {
       console.log(`[migrations] Applied ${migrationResult.applied} migration(s), total ${migrationResult.total}`);
     }
