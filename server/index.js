@@ -1503,7 +1503,66 @@ app.get(`${BASE_PATH}/api/agents`, (req, res) => {
   res.json({ agents: agentRuntime.listAgents() });
 });
 
-// Get a single agent's metadata
+// NOTE: Fixed-path routes (/cost, /runs, /runs/:id/stream) must come BEFORE
+// the generic /:id route, otherwise Express matches 'cost' / 'runs' as
+// agent IDs.
+
+// Cost summary for the current workspace
+app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const today = new Date().toISOString().slice(0, 10);
+    const [all, todayRow, byAgent] = await Promise.all([
+      s.queryOne('SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents, COALESCE(SUM(input_tokens),0) as in_t, COALESCE(SUM(output_tokens),0) as out_t FROM agent_runs WHERE workspace_id = ?', [req.workspace.id]),
+      s.queryOne(`SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? AND substr(started_at, 1, 10) = ?`, [req.workspace.id, today]),
+      s.query('SELECT agent_id, COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? GROUP BY agent_id ORDER BY cents DESC', [req.workspace.id]),
+    ]);
+    res.json({
+      lifetime: { runs: parseInt(all.runs) || 0, usdCents: parseInt(all.cents) || 0, inputTokens: parseInt(all.in_t) || 0, outputTokens: parseInt(all.out_t) || 0 },
+      today: { runs: parseInt(todayRow.runs) || 0, usdCents: parseInt(todayRow.cents) || 0 },
+      byAgent: (byAgent.rows || []).map(r => ({ agent_id: r.agent_id, runs: parseInt(r.runs), usdCents: parseInt(r.cents) })),
+      llmStats: llm.getStats(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List agent runs (fixed path before /:id)
+app.get(`${BASE_PATH}/api/agents/runs`, async (req, res) => {
+  try {
+    const { agent_id, status, limit } = req.query;
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT id, agent_id, user_id, status, cost_usd_cents, input_tokens, output_tokens, duration_ms, started_at, completed_at FROM agent_runs WHERE workspace_id = ?';
+    const params = [req.workspace.id];
+    if (agent_id) { sql += ' AND agent_id = ?'; params.push(agent_id); }
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    sql += ' ORDER BY started_at DESC LIMIT ?';
+    params.push(Math.min(parseInt(limit) || 50, 200));
+    const result = await s.query(sql, params);
+    res.json({ runs: result.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get a single run with its traces
+app.get(`${BASE_PATH}/api/agents/runs/:runId`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const run = await s.queryOne('SELECT * FROM agent_runs WHERE id = ? AND workspace_id = ?', [req.params.runId, req.workspace.id]);
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    const traces = await query('SELECT event_type, data, timestamp FROM agent_traces WHERE run_id = ? ORDER BY timestamp ASC', [req.params.runId]);
+    run.input = run.input ? JSON.parse(run.input) : null;
+    run.output = run.output ? JSON.parse(run.output) : null;
+    run.traces = (traces.rows || []).map(t => ({ ...t, data: JSON.parse(t.data || '{}') }));
+    res.json(run);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get a single agent's metadata — generic /:id MUST come last
 app.get(`${BASE_PATH}/api/agents/:id`, (req, res) => {
   const agent = agentRuntime.getAgent(req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -1616,60 +1675,7 @@ app.get(`${BASE_PATH}/api/agents/runs/:runId/stream`, async (req, res) => {
   }
 });
 
-// List agent runs in the current workspace
-app.get(`${BASE_PATH}/api/agents/runs`, async (req, res) => {
-  try {
-    const { agent_id, status, limit } = req.query;
-    const s = scoped(req.workspace.id);
-    let sql = 'SELECT id, agent_id, user_id, status, cost_usd_cents, input_tokens, output_tokens, duration_ms, started_at, completed_at FROM agent_runs WHERE workspace_id = ?';
-    const params = [req.workspace.id];
-    if (agent_id) { sql += ' AND agent_id = ?'; params.push(agent_id); }
-    if (status) { sql += ' AND status = ?'; params.push(status); }
-    sql += ' ORDER BY started_at DESC LIMIT ?';
-    params.push(Math.min(parseInt(limit) || 50, 200));
-    const result = await s.query(sql, params);
-    res.json({ runs: result.rows || [] });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Get a single run with its traces
-app.get(`${BASE_PATH}/api/agents/runs/:runId`, async (req, res) => {
-  try {
-    const s = scoped(req.workspace.id);
-    const run = await s.queryOne('SELECT * FROM agent_runs WHERE id = ? AND workspace_id = ?', [req.params.runId, req.workspace.id]);
-    if (!run) return res.status(404).json({ error: 'Run not found' });
-    const traces = await query('SELECT event_type, data, timestamp FROM agent_traces WHERE run_id = ? ORDER BY timestamp ASC', [req.params.runId]);
-    run.input = run.input ? JSON.parse(run.input) : null;
-    run.output = run.output ? JSON.parse(run.output) : null;
-    run.traces = (traces.rows || []).map(t => ({ ...t, data: JSON.parse(t.data || '{}') }));
-    res.json(run);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Cost summary for the current workspace
-app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
-  try {
-    const s = scoped(req.workspace.id);
-    const today = new Date().toISOString().slice(0, 10);
-    const [all, todayRow, byAgent] = await Promise.all([
-      s.queryOne('SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents, COALESCE(SUM(input_tokens),0) as in_t, COALESCE(SUM(output_tokens),0) as out_t FROM agent_runs WHERE workspace_id = ?', [req.workspace.id]),
-      s.queryOne(`SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? AND substr(started_at, 1, 10) = ?`, [req.workspace.id, today]),
-      s.query('SELECT agent_id, COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? GROUP BY agent_id ORDER BY cents DESC', [req.workspace.id]),
-    ]);
-    res.json({
-      lifetime: { runs: parseInt(all.runs) || 0, usdCents: parseInt(all.cents) || 0, inputTokens: parseInt(all.in_t) || 0, outputTokens: parseInt(all.out_t) || 0 },
-      today: { runs: parseInt(todayRow.runs) || 0, usdCents: parseInt(todayRow.cents) || 0 },
-      byAgent: (byAgent.rows || []).map(r => ({ agent_id: r.agent_id, runs: parseInt(r.runs), usdCents: parseInt(r.cents) })),
-      llmStats: llm.getStats(),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+// (duplicate handlers removed — see reordered block above)
 
 // Conductor — build a plan from a goal
 app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
