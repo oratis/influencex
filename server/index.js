@@ -21,6 +21,7 @@ const scheduler = require('./scheduler');
 const { rateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
+const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -60,6 +61,14 @@ app.use(BASE_PATH, express.static(path.join(__dirname, '..', 'client', 'dist')))
 
 // Register health endpoints early (outside auth, rate limit, and BASE_PATH conventions)
 registerHealthRoutes(app, BASE_PATH, { query, usePostgres, youtubeQuota, notifications });
+
+// OpenAPI spec and Swagger UI
+app.get(`${BASE_PATH}/api/openapi.json`, (req, res) => {
+  res.json(buildOpenApiSpec(BASE_PATH));
+});
+app.get(`${BASE_PATH}/api/docs`, (req, res) => {
+  res.type('html').send(swaggerUiHtml(`${BASE_PATH}/api/openapi.json`));
+});
 
 // Rate limiters — applied per-endpoint below
 const authLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many auth attempts' });
@@ -960,6 +969,67 @@ app.get(`${BASE_PATH}/api/auth/permissions`, authMiddleware, (req, res) => {
 // List all roles (for admin UI)
 app.get(`${BASE_PATH}/api/auth/roles`, (req, res) => {
   res.json({ roles: rbac.ROLES });
+});
+
+// ==================== User Management (admin only) ====================
+
+// List all users
+app.get(`${BASE_PATH}/api/users`, authMiddleware, rbac.requirePermission('user.manage'), async (req, res) => {
+  try {
+    const result = await query('SELECT id, email, name, role, avatar_url, created_at, last_login FROM users ORDER BY created_at DESC');
+    res.json(result.rows || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Invite (create) a new user with a temporary password
+app.post(`${BASE_PATH}/api/users/invite`, authMiddleware, rbac.requirePermission('user.invite'), async (req, res) => {
+  try {
+    const { email, name, password, role } = req.body;
+    if (!email || !name || !password) return res.status(400).json({ error: 'email, name, and password are required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    const safeRole = rbac.ROLES.includes(role) ? role : 'editor';
+    const result = await registerUser(email, password, name);
+    if (result.error) return res.status(400).json({ error: result.error });
+    if (safeRole !== 'editor' && safeRole !== 'member') {
+      await exec('UPDATE users SET role=? WHERE id=?', [safeRole, result.id]);
+    }
+    res.json({ success: true, user: { ...result, role: safeRole } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update a user's role
+app.patch(`${BASE_PATH}/api/users/:id/role`, authMiddleware, rbac.requirePermission('user.manage'), async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!rbac.ROLES.includes(role) && role !== 'member') {
+      return res.status(400).json({ error: `Invalid role. Must be one of: ${rbac.ROLES.join(', ')}` });
+    }
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: 'Cannot change your own role' });
+    }
+    await exec('UPDATE users SET role=? WHERE id=?', [role, req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete a user
+app.delete(`${BASE_PATH}/api/users/:id`, authMiddleware, rbac.requirePermission('user.delete'), async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    await exec('DELETE FROM sessions WHERE user_id=?', [req.params.id]);
+    await exec('DELETE FROM users WHERE id=?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ==================== CSV Export ====================

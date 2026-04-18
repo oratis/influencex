@@ -178,4 +178,10 @@ export const api = {
 
   // ROI Dashboard
   getCampaignRoi: (id) => request(`/campaigns/${id}/roi`),
+
+  // User management (admin only)
+  listUsers: () => request('/users'),
+  inviteUser: (data) => request('/users/invite', { method: 'POST', body: data }),
+  updateUserRole: (id, role) => request(`/users/${id}/role`, { method: 'PATCH', body: { role } }),
+  deleteUser: (id) => request(`/users/${id}`, { method: 'DELETE' }),
 };
