@@ -79,6 +79,33 @@ const PG_SCHEMA = `
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
+  CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE,
+    owner_user_id TEXT NOT NULL,
+    plan TEXT DEFAULT 'starter',
+    settings TEXT DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW(),
+    deleted_at TIMESTAMP,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'editor',
+    joined_at TIMESTAMP DEFAULT NOW(),
+    invited_by TEXT,
+    PRIMARY KEY (workspace_id, user_id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_user_id);
+  CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug);
+  CREATE INDEX IF NOT EXISTS idx_members_user ON workspace_members(user_id);
+
   CREATE TABLE IF NOT EXISTS campaigns (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -328,6 +355,33 @@ const SQLITE_SCHEMA = `
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE,
+    owner_user_id TEXT NOT NULL,
+    plan TEXT DEFAULT 'starter',
+    settings TEXT DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME,
+    FOREIGN KEY (owner_user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'editor',
+    joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    invited_by TEXT,
+    PRIMARY KEY (workspace_id, user_id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces(owner_user_id);
+  CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug);
+  CREATE INDEX IF NOT EXISTS idx_members_user ON workspace_members(user_id);
 
   CREATE TABLE IF NOT EXISTS campaigns (
     id TEXT PRIMARY KEY,
