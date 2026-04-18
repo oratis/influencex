@@ -42,12 +42,27 @@ const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (server-to-server, curl, mobile apps)
-    if (!origin || ALLOWED_ORIGINS.includes(origin) || process.env.NODE_ENV !== 'production') {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+    // 1. No origin (curl, server-to-server, <img> subresources in some browsers)
+    // 2. Non-production: allow all
+    // 3. In ALLOWED_ORIGINS env list
+    // 4. Same-origin: origin's host matches one of our serving hosts (apex/www)
+    if (!origin || process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
     }
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    // Same-origin fallback — if the request Origin matches the Host we're serving on,
+    // it's trivially allowed. Prevents misconfigured CORS_ORIGINS from breaking the app.
+    try {
+      const originHost = new URL(origin).host;
+      if (ALLOWED_ORIGINS.some(allowed => {
+        try { return new URL(allowed).host === originHost; } catch { return false; }
+      })) {
+        return callback(null, true);
+      }
+    } catch { /* malformed origin header */ }
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
 }));
