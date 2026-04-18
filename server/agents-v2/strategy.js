@@ -107,6 +107,9 @@ Produce a complete strategy. Call publish_strategy.`;
       tools: [strategyTool],
       maxTokens: 3000,
       temperature: 0.4,
+      // Cost tip: Gemini Flash does structured JSON extraction well at ~10%
+      // the cost of Claude Sonnet. Set STRATEGY_LLM_PROVIDER=google to use it.
+      provider: process.env.STRATEGY_LLM_PROVIDER,
     });
 
     const toolUse = (res.toolUses || []).find(t => t.name === 'publish_strategy');

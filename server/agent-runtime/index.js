@@ -104,6 +104,10 @@ function createRun(agentId, input, ctx = {}) {
       warn: (...args) => console.warn(`[agent:${agentId} run:${runId.slice(0, 8)}]`, ...args),
       error: (...args) => console.error(`[agent:${agentId} run:${runId.slice(0, 8)}]`, ...args),
     },
+    // DB access + uuid helper for agents that need to write to workspace tables.
+    // Only populated when the runtime's host (server/index.js) passes them through.
+    db: ctx.db || null,
+    uuidv4: ctx.uuidv4 || null,
     ...ctx,
   };
 

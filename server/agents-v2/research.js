@@ -115,6 +115,7 @@ Produce a research report. Call publish_research.`;
       tools: [researchTool],
       maxTokens: 3000,
       temperature: 0.5,
+      provider: process.env.RESEARCH_LLM_PROVIDER,
     });
 
     const toolUse = (res.toolUses || []).find(t => t.name === 'publish_research');

@@ -1590,6 +1590,8 @@ app.post(`${BASE_PATH}/api/agents/:id/run`, async (req, res) => {
     const { runId, stream } = agentRuntime.createRun(req.params.id, req.body, {
       workspaceId: req.workspace?.id,
       userId: req.user?.id,
+      db: { query, queryOne, exec },
+      uuidv4,
     });
 
     const wsId = req.workspace?.id || null;
@@ -2044,6 +2046,107 @@ app.post(`${BASE_PATH}/api/scheduled-publishes/tick`, authMiddleware, rbac.requi
   }
 });
 
+// ==================== Analytics ====================
+
+// Preset effectiveness — usage + derived pieces + cost per-preset
+app.get(`${BASE_PATH}/api/analytics/presets`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const presets = await s.query(
+      'SELECT id, name, type, agent_id, use_count, created_at FROM prompt_presets WHERE workspace_id = ? ORDER BY use_count DESC, created_at DESC',
+      [req.workspace.id]
+    );
+    res.json({ presets: presets.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Platform performance from scheduled_publishes — count per status per platform
+app.get(`${BASE_PATH}/api/analytics/platforms`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      'SELECT platforms, status FROM scheduled_publishes WHERE workspace_id = ?',
+      [req.workspace.id]
+    );
+    // Aggregate JS-side (platforms is a JSON array, not directly queryable portably)
+    const perPlatform = {};
+    for (const row of result.rows || []) {
+      let list = [];
+      try { list = JSON.parse(row.platforms); } catch {}
+      for (const p of list) {
+        perPlatform[p] = perPlatform[p] || { complete: 0, error: 0, pending: 0, cancelled: 0, running: 0 };
+        perPlatform[p][row.status] = (perPlatform[p][row.status] || 0) + 1;
+      }
+    }
+    const byPlatform = Object.entries(perPlatform).map(([platform, counts]) => ({
+      platform,
+      ...counts,
+      total: Object.values(counts).reduce((a, b) => a + b, 0),
+      successRate: counts.complete / Math.max(1, Object.values(counts).reduce((a, b) => a + b, 0)),
+    }));
+    res.json({ byPlatform });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Agent performance — breakdown of runs, cost, avg duration, error rate
+app.get(`${BASE_PATH}/api/analytics/agents`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      `SELECT agent_id,
+              COUNT(*) as total_runs,
+              SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) as complete_runs,
+              SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_runs,
+              COALESCE(SUM(cost_usd_cents), 0) as total_cents,
+              COALESCE(SUM(input_tokens), 0) as input_tokens,
+              COALESCE(SUM(output_tokens), 0) as output_tokens,
+              COALESCE(AVG(duration_ms), 0) as avg_duration_ms
+       FROM agent_runs
+       WHERE workspace_id = ?
+       GROUP BY agent_id
+       ORDER BY total_runs DESC`,
+      [req.workspace.id]
+    );
+    const byAgent = (result.rows || []).map(r => ({
+      agent_id: r.agent_id,
+      total_runs: parseInt(r.total_runs) || 0,
+      complete_runs: parseInt(r.complete_runs) || 0,
+      error_runs: parseInt(r.error_runs) || 0,
+      total_usd_cents: parseInt(r.total_cents) || 0,
+      input_tokens: parseInt(r.input_tokens) || 0,
+      output_tokens: parseInt(r.output_tokens) || 0,
+      avg_duration_ms: Math.round(parseFloat(r.avg_duration_ms) || 0),
+      success_rate: r.total_runs > 0 ? parseInt(r.complete_runs) / parseInt(r.total_runs) : 0,
+    }));
+    res.json({ byAgent });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Content library breakdown — pieces per type, per status
+app.get(`${BASE_PATH}/api/analytics/content`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      `SELECT type, status, COUNT(*) as c FROM content_pieces WHERE workspace_id = ? GROUP BY type, status`,
+      [req.workspace.id]
+    );
+    const byType = {};
+    for (const r of result.rows || []) {
+      byType[r.type] = byType[r.type] || {};
+      byType[r.type][r.status] = parseInt(r.c) || 0;
+    }
+    res.json({ byType });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==================== Prompt Presets ====================
 
 app.get(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
@@ -2268,6 +2371,8 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
           const { runId, stream } = agentRuntime.createRun(step.agent, step.input, {
             workspaceId: req.workspace.id,
             userId: req.user.id,
+            db: { query, queryOne, exec },
+            uuidv4,
           });
 
           // Attach listener FIRST (before await) so sync agents don't race.
@@ -3529,6 +3634,8 @@ async function processDueScheduledPublishes() {
       // platform_connections is TODO when OAuth is wired up end-to-end.
       const { runId, stream } = agentRuntime.createRun('publisher', { content, platforms }, {
         workspaceId: row.workspace_id,
+        db: { query, queryOne, exec },
+        uuidv4,
       });
       let finalOutput = null;
       let finalError = null;

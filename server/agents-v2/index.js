@@ -15,6 +15,7 @@ function registerAll() {
     require('./content-voice'),
     require('./content-video'),
     require('./publisher'),
+    require('./kol-outreach'),
     require('./discovery'),
   ];
   for (const a of agents) {

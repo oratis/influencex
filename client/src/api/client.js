@@ -240,6 +240,12 @@ export const api = {
   // persisting expiring image URLs like Volcengine's 24h signed ones)
   fetchAsDataUrl: (url) => request('/util/fetch-as-data-url', { method: 'POST', body: { url } }),
 
+  // Analytics
+  getPresetAnalytics: () => request('/analytics/presets'),
+  getPlatformAnalytics: () => request('/analytics/platforms'),
+  getAgentAnalytics: () => request('/analytics/agents'),
+  getContentAnalytics: () => request('/analytics/content'),
+
   // Prompt presets
   listPromptPresets: (params = {}) => {
     const q = new URLSearchParams(params).toString();
