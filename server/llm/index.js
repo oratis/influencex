@@ -60,8 +60,14 @@ function resetStats() {
 // (As of 2026-04 — ballpark; actual billing may differ.)
 const PRICING = {
   'claude-opus-4': { input: 1500, output: 7500 },       // $15 / $75 per 1M → cents
+  'claude-opus-4-5': { input: 1500, output: 7500 },
   'claude-sonnet-4': { input: 300, output: 1500 },
+  'claude-sonnet-4-5': { input: 300, output: 1500 },
   'claude-haiku-4': { input: 25, output: 125 },
+  'claude-haiku-4-5': { input: 25, output: 125 },
+  // Fallback aliases (3.5 series)
+  'claude-3-5-sonnet-latest': { input: 300, output: 1500 },
+  'claude-3-5-haiku-latest': { input: 80, output: 400 },
   'gpt-5': { input: 750, output: 3000 },
   'gpt-4o': { input: 250, output: 1000 },
   'gpt-4o-mini': { input: 15, output: 60 },
@@ -231,9 +237,11 @@ async function complete({
     throw new Error('No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.');
   }
 
+  // Default model per provider — overridable via ANTHROPIC_MODEL / OPENAI_MODEL env.
+  // Uses stable alias names that Anthropic/OpenAI keep pointing at current-gen.
   const effectiveModel = model || {
-    anthropic: 'claude-sonnet-4',
-    openai: 'gpt-4o',
+    anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+    openai: process.env.OPENAI_MODEL || 'gpt-4o',
   }[effectiveProvider];
 
   // Caching — skip when temperature > 0 and no explicit opt-in
