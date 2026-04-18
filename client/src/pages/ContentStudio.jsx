@@ -4,12 +4,13 @@ import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 
 const FORMATS = [
-  { id: 'twitter', label: 'Twitter / X', emoji: '𝕏', hint: 'Single tweet or thread' },
-  { id: 'linkedin', label: 'LinkedIn', emoji: 'in', hint: '150–300 word post' },
-  { id: 'blog', label: 'Blog post', emoji: '✎', hint: '600–1200 word article' },
-  { id: 'email', label: 'Email', emoji: '✉', hint: 'Subject + body' },
-  { id: 'caption', label: 'Caption', emoji: '#', hint: '<150 chars + hashtags' },
-  { id: 'youtube-short', label: 'YouTube Short', emoji: '▷', hint: '60s video script' },
+  { id: 'twitter', label: 'Twitter / X', emoji: '𝕏', hint: 'Single tweet or thread', kind: 'text' },
+  { id: 'linkedin', label: 'LinkedIn', emoji: 'in', hint: '150–300 word post', kind: 'text' },
+  { id: 'blog', label: 'Blog post', emoji: '✎', hint: '600–1200 word article', kind: 'text' },
+  { id: 'email', label: 'Email', emoji: '✉', hint: 'Subject + body', kind: 'text' },
+  { id: 'caption', label: 'Caption', emoji: '#', hint: '<150 chars + hashtags', kind: 'text' },
+  { id: 'youtube-short', label: 'YouTube Short', emoji: '▷', hint: '60s video script', kind: 'text' },
+  { id: 'image', label: 'Image', emoji: '🖼', hint: 'AI-generated illustration', kind: 'image' },
 ];
 
 export default function ContentStudio() {
@@ -18,6 +19,11 @@ export default function ContentStudio() {
   const [audience, setAudience] = useState('');
   const [keywords, setKeywords] = useState('');
   const [cta, setCta] = useState('');
+  const [imageSize, setImageSize] = useState('2K');
+  const [enrichPrompt, setEnrichPrompt] = useState(true);
+
+  const currentFormat = FORMATS.find(f => f.id === format);
+  const isImage = currentFormat?.kind === 'image';
   const [voiceId, setVoiceId] = useState('');
   const [voices, setVoices] = useState([]);
   const [pieces, setPieces] = useState([]);
@@ -58,21 +64,30 @@ export default function ContentStudio() {
     setEvents([{ type: 'started', data: { agent: 'content-text' } }]);
 
     const voice = voices.find(v => v.id === voiceId);
-    const input = {
-      format,
-      brief: brief.trim(),
-      audience: audience.trim() || undefined,
-      keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
-      cta: cta.trim() || undefined,
-      brand_voice: voice ? {
-        tone_words: voice.tone_words,
-        do_examples: voice.do_examples,
-        dont_examples: voice.dont_examples,
-      } : undefined,
-    };
+    const agentId = isImage ? 'content-visual' : 'content-text';
+    const input = isImage
+      ? {
+          brief: brief.trim(),
+          mode: enrichPrompt ? 'enrich' : 'direct',
+          size: imageSize,
+          aspect: audience.trim() || undefined,
+          brand_voice: voice ? { tone_words: voice.tone_words } : undefined,
+        }
+      : {
+          format,
+          brief: brief.trim(),
+          audience: audience.trim() || undefined,
+          keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
+          cta: cta.trim() || undefined,
+          brand_voice: voice ? {
+            tone_words: voice.tone_words,
+            do_examples: voice.do_examples,
+            dont_examples: voice.dont_examples,
+          } : undefined,
+        };
 
     try {
-      const r = await api.runAgent('content-text', input);
+      const r = await api.runAgent(agentId, input);
       setActiveRunId(r.runId);
       const src = api.streamAgentRun(r.runId);
       srcRef.current = src;
@@ -103,19 +118,35 @@ export default function ContentStudio() {
   async function handleSave() {
     if (!currentOutput) return;
     try {
-      await api.createContentPiece({
-        type: format,
-        title: currentOutput.title || '',
-        body: currentOutput.body || '',
-        status: 'draft',
-        metadata: {
-          hashtags: currentOutput.hashtags,
-          cta: currentOutput.cta,
-          word_count: currentOutput.word_count,
-          reasoning: currentOutput.reasoning,
-        },
-        created_by_agent_run_id: activeRunId,
-      });
+      if (isImage) {
+        await api.createContentPiece({
+          type: 'image',
+          title: currentOutput.original_brief || '',
+          body: currentOutput.url || '',            // body = image URL for image pieces
+          status: 'draft',
+          metadata: {
+            prompt: currentOutput.prompt,
+            size: currentOutput.size,
+            provider: currentOutput.provider,
+            model: currentOutput.model,
+          },
+          created_by_agent_run_id: activeRunId,
+        });
+      } else {
+        await api.createContentPiece({
+          type: format,
+          title: currentOutput.title || '',
+          body: currentOutput.body || '',
+          status: 'draft',
+          metadata: {
+            hashtags: currentOutput.hashtags,
+            cta: currentOutput.cta,
+            word_count: currentOutput.word_count,
+            reasoning: currentOutput.reasoning,
+          },
+          created_by_agent_run_id: activeRunId,
+        });
+      }
       toast.success('Saved to your library');
       await loadPieces();
     } catch (e) {
@@ -180,31 +211,42 @@ export default function ContentStudio() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">What should this say?</label>
+            <label className="form-label">{isImage ? 'What should the image show?' : 'What should this say?'}</label>
             <textarea
               className="form-textarea"
-              placeholder="e.g. Announce our new AI agents feature. Focus on how it saves solo founders 20 hours/week. Include a self-deprecating hook."
+              placeholder={isImage
+                ? 'e.g. A minimalist dashboard screenshot of our product, soft pastel palette, isometric view, floating over a clean gradient background'
+                : 'e.g. Announce our new AI agents feature. Focus on how it saves solo founders 20 hours/week. Include a self-deprecating hook.'}
               value={brief}
               onChange={e => setBrief(e.target.value)}
               style={{ minHeight: 110 }}
             />
           </div>
 
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Audience (optional)</label>
-              <input className="form-input" placeholder="SaaS founders" value={audience} onChange={e => setAudience(e.target.value)} />
+          {isImage && (
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Size</label>
+                <select className="form-select" value={imageSize} onChange={e => setImageSize(e.target.value)}>
+                  <option value="1K">1K (fast, ~¢2)</option>
+                  <option value="2K">2K (balanced, ~¢4)</option>
+                  <option value="4K">4K (high-res, ~¢8)</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Prompt enrichment</label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, padding: '10px 0', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={enrichPrompt} onChange={e => setEnrichPrompt(e.target.checked)} />
+                  Expand brief via Claude first (+¢2)
+                </label>
+              </div>
             </div>
-            <div className="form-group">
-              <label className="form-label">Keywords (comma-sep)</label>
-              <input className="form-input" placeholder="ai, marketing, automation" value={keywords} onChange={e => setKeywords(e.target.value)} />
-            </div>
-          </div>
+          )}
 
           <div className="form-row">
             <div className="form-group">
-              <label className="form-label">Call to action (optional)</label>
-              <input className="form-input" placeholder="Sign up for early access" value={cta} onChange={e => setCta(e.target.value)} />
+              <label className="form-label">{isImage ? 'Aspect/use (optional)' : 'Audience (optional)'}</label>
+              <input className="form-input" placeholder={isImage ? 'Instagram post / blog hero / Twitter card' : 'SaaS founders'} value={audience} onChange={e => setAudience(e.target.value)} />
             </div>
             <div className="form-group">
               <label className="form-label">Brand voice</label>
@@ -214,6 +256,19 @@ export default function ContentStudio() {
               </select>
             </div>
           </div>
+
+          {!isImage && (
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Keywords (comma-sep)</label>
+                <input className="form-input" placeholder="ai, marketing, automation" value={keywords} onChange={e => setKeywords(e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Call to action (optional)</label>
+                <input className="form-input" placeholder="Sign up for early access" value={cta} onChange={e => setCta(e.target.value)} />
+              </div>
+            </div>
+          )}
 
           <button
             className="btn btn-primary"
@@ -255,7 +310,45 @@ export default function ContentStudio() {
             </div>
           )}
 
-          {currentOutput && (
+          {currentOutput && isImage && currentOutput.url && (
+            <div>
+              <img
+                src={currentOutput.url}
+                alt={currentOutput.original_brief || 'Generated image'}
+                style={{
+                  width: '100%', borderRadius: 8, border: '1px solid var(--border)',
+                  marginBottom: 12,
+                }}
+              />
+              <details style={{ marginBottom: 12 }}>
+                <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>
+                  Prompt used ({currentOutput.prompt?.length || 0} chars)
+                </summary>
+                <div style={{
+                  fontSize: 12, color: 'var(--text-secondary)', marginTop: 6,
+                  lineHeight: 1.5, padding: 10, background: 'var(--bg-input)', borderRadius: 6,
+                }}>
+                  {currentOutput.prompt}
+                </div>
+              </details>
+              <div className="btn-group">
+                <button className="btn btn-primary btn-sm" onClick={handleSave}>💾 Save</button>
+                <a
+                  className="btn btn-secondary btn-sm"
+                  href={currentOutput.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  download
+                >⬇ Open / download</a>
+                <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>🔄 Regenerate</button>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+                {currentOutput.size} · {currentOutput.provider} · {currentOutput.model}
+              </div>
+            </div>
+          )}
+
+          {currentOutput && !isImage && (
             <div>
               {currentOutput.title && (
                 <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>{currentOutput.title}</div>
@@ -310,11 +403,23 @@ export default function ContentStudio() {
                   <span className="badge badge-gray" style={{ fontSize: 10 }}>{p.type}</span>
                   <button className="btn-icon" onClick={() => handleDelete(p.id)} style={{ padding: 4 }}>🗑</button>
                 </div>
+                {p.type === 'image' && p.body ? (
+                  <a href={p.body} target="_blank" rel="noreferrer">
+                    <img
+                      src={p.body}
+                      alt={p.title || 'Image'}
+                      style={{ width: '100%', height: 160, objectFit: 'cover', borderRadius: 6, marginBottom: 6, background: 'var(--bg-input)' }}
+                      onError={e => { e.currentTarget.style.display = 'none'; }}
+                    />
+                  </a>
+                ) : null}
                 {p.title && <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{p.title}</div>}
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4, maxHeight: 80, overflow: 'hidden' }}>
-                  {(p.body || '').slice(0, 160)}
-                  {(p.body || '').length > 160 && '…'}
-                </div>
+                {p.type !== 'image' && (
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4, maxHeight: 80, overflow: 'hidden' }}>
+                    {(p.body || '').slice(0, 160)}
+                    {(p.body || '').length > 160 && '…'}
+                  </div>
+                )}
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8 }}>
                   {new Date(p.created_at).toLocaleDateString()} · {p.status}
                 </div>

@@ -11,6 +11,7 @@ function registerAll() {
     require('./strategy'),
     require('./research'),
     require('./content-text'),
+    require('./content-visual'),
     require('./discovery'),
   ];
   for (const a of agents) {
