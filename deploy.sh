@@ -33,7 +33,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --min-instances 0 \
   --max-instances 3 \
   --add-cloudsql-instances ${CLOUD_SQL_INSTANCE} \
-  --update-env-vars "BASE_PATH=/InfluenceX,NODE_ENV=production,CLOUD_SQL_CONNECTION=${CLOUD_SQL_INSTANCE}"
+  --update-env-vars "BASE_PATH=,NODE_ENV=production,CLOUD_SQL_CONNECTION=${CLOUD_SQL_INSTANCE}"
 
 echo ""
 echo "✅ Deployment complete!"

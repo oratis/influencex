@@ -1,4 +1,6 @@
-const BASE = '/InfluenceX/api';
+// API base path. Defaults to /api for root-hosted deploys (influencexes.com).
+// Override via VITE_API_BASE at build time if serving under a sub-path.
+const BASE = import.meta.env.VITE_API_BASE || '/api';
 
 function getToken() {
   return localStorage.getItem('influencex_token');
