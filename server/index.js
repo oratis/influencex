@@ -1589,13 +1589,10 @@ app.post(`${BASE_PATH}/api/agents/:id/run`, async (req, res) => {
     });
 
     const wsId = req.workspace?.id || null;
-    await exec(
-      'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status, cost_usd_cents) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [runId, wsId, req.params.id, req.user?.id || null, JSON.stringify(req.body || {}), 'running', estimate.usdCents || 0]
-    );
 
-    // Attach listener that persists trace events + final status.
-    // Listener runs in background — we return runId to the client right away.
+    // Attach listener FIRST (synchronously) before any awaits, so fast
+    // synchronous agents don't emit started/progress/complete before we're
+    // listening. The DB insert then happens in the background.
     stream.on('event', async (evt) => {
       try {
         await exec(
@@ -1626,6 +1623,14 @@ app.post(`${BASE_PATH}/api/agents/:id/run`, async (req, res) => {
         console.warn('[agent-run] Trace persistence error:', persistErr.message);
       }
     });
+
+    // Persist the agent_runs row. This can happen asynchronously (we don't
+    // block the HTTP response on it), but we do block the response so the
+    // client gets a valid runId that will exist when they poll.
+    await exec(
+      'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status, cost_usd_cents) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [runId, wsId, req.params.id, req.user?.id || null, JSON.stringify(req.body || {}), 'running', estimate.usdCents || 0]
+    );
 
     res.json({ runId, status: 'running', estimate });
   } catch (e) {
@@ -1952,12 +1957,8 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
             workspaceId: req.workspace.id,
             userId: req.user.id,
           });
-          // Persist an agent_runs row for dashboard visibility
-          await exec(
-            'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status) VALUES (?, ?, ?, ?, ?, ?)',
-            [runId, req.workspace.id, step.agent, req.user.id, JSON.stringify(step.input || {}), 'running']
-          );
 
+          // Attach listener FIRST (before await) so sync agents don't race.
           await new Promise((resolve) => {
             let finalOutput = null;
             let finalError = null;
@@ -1997,6 +1998,11 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
                 resolve();
               }
             });
+            // After listener attach, persist the agent_runs row (async)
+            exec(
+              'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status) VALUES (?, ?, ?, ?, ?, ?)',
+              [runId, req.workspace.id, step.agent, req.user.id, JSON.stringify(step.input || {}), 'running']
+            ).catch(() => {});
           });
 
           // If a step fails, stop the plan (simple strategy; fine-grained
