@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useWorkspace } from '../WorkspaceContext';
 import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog';
@@ -12,6 +13,7 @@ export default function WorkspaceSwitcher() {
   const { workspaces, currentId, currentWorkspace, switchWorkspace, refresh } = useWorkspace();
   const [showMenu, setShowMenu] = useState(false);
   const toast = useToast();
+  const navigate = useNavigate();
   const { prompt: promptDialog } = useConfirm();
 
   if (!currentWorkspace) return null;
@@ -100,6 +102,17 @@ export default function WorkspaceSwitcher() {
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
           >
             + New workspace
+          </div>
+          <div
+            onClick={() => { setShowMenu(false); navigate('/workspace/settings'); }}
+            style={{
+              padding: '10px 12px', fontSize: 13, borderRadius: 6, cursor: 'pointer',
+              color: 'var(--text-secondary)',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-card)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+          >
+            ⚙ Workspace settings
           </div>
         </div>
       )}

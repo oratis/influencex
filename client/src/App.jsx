@@ -16,6 +16,7 @@ import KolDatabase from './pages/KolDatabase';
 import PipelinePage from './pages/PipelinePage';
 import UsersPage from './pages/UsersPage';
 import AgentsPage from './pages/AgentsPage';
+import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 
 // Lazy-load heavy pages
@@ -127,6 +128,7 @@ function AppContent() {
               <Route path="/data" element={<Suspense fallback={<PageFallback />}><DataModule /></Suspense>} />
               <Route path="/kol-database" element={<KolDatabase />} />
               <Route path="/users" element={<UsersPage />} />
+              <Route path="/workspace/settings" element={<WorkspaceSettingsPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
           </main>
