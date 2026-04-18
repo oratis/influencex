@@ -129,6 +129,16 @@ function createRun(agentId, input, ctx = {}) {
         }
       } else {
         output = await result;
+        // Promise-returning agents can attach their own cost to the output.
+        // We recognize `output.cost` with { inputTokens, outputTokens, usdCents }.
+        if (output && typeof output === 'object' && output.cost) {
+          cost = {
+            tokens: (output.cost.inputTokens || 0) + (output.cost.outputTokens || 0),
+            inputTokens: output.cost.inputTokens || 0,
+            outputTokens: output.cost.outputTokens || 0,
+            usdCents: output.cost.usdCents || 0,
+          };
+        }
       }
 
       if (output !== undefined) {
