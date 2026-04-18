@@ -31,7 +31,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --cpu 1 \
   --min-instances 0 \
   --max-instances 3 \
-  --set-env-vars "BASE_PATH=/InfluenceX,NODE_ENV=production"
+  --update-env-vars "BASE_PATH=/InfluenceX,NODE_ENV=production"
 
 echo ""
 echo "✅ Deployment complete!"
