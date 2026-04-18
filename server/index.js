@@ -24,6 +24,10 @@ const { rateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
 const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
+const agentRuntime = require('./agent-runtime');
+const conductor = require('./agent-runtime/conductor');
+const agentsV2 = require('./agents-v2');
+const llm = require('./llm');
 const { createQueue } = require('./job-queue');
 const { defaultCache } = require('./cache');
 const apify = require('./apify-client');
@@ -197,10 +201,175 @@ app.get(`${BASE_PATH}/api/auth/workspaces`, authMiddleware, async (req, res) => 
   }
 });
 
+// ==================== Workspace management ====================
+
+// Create a new workspace (any authenticated user can)
+app.post(`${BASE_PATH}/api/workspaces`, authMiddleware, async (req, res) => {
+  try {
+    const { name, plan } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Workspace name is required' });
+    }
+    const id = uuidv4();
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) + '-' + id.slice(0, 6);
+    await exec(
+      'INSERT INTO workspaces (id, name, slug, owner_user_id, plan) VALUES (?, ?, ?, ?, ?)',
+      [id, name.trim(), slug, req.user.id, plan || 'starter']
+    );
+    await exec(
+      'INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)',
+      [id, req.user.id, 'admin']
+    );
+    res.json({ id, name, slug, owner_user_id: req.user.id, role: 'admin', plan: plan || 'starter' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update workspace (admin of that workspace only)
+app.patch(`${BASE_PATH}/api/workspaces/:id`, authMiddleware, async (req, res) => {
+  try {
+    const membership = await queryOne(
+      'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+    if (!membership) return res.status(404).json({ error: 'Workspace not found' });
+    if (membership.role !== 'admin') return res.status(403).json({ error: 'Only admins can edit workspace' });
+    const { name, plan } = req.body;
+    const updates = [];
+    const params = [];
+    if (name !== undefined) { updates.push('name = ?'); params.push(name); }
+    if (plan !== undefined) { updates.push('plan = ?'); params.push(plan); }
+    if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+    params.push(req.params.id);
+    await exec(`UPDATE workspaces SET ${updates.join(', ')} WHERE id = ?`, params);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Soft-delete workspace (owner only). Sets deleted_at; data retained for 30 days.
+app.delete(`${BASE_PATH}/api/workspaces/:id`, authMiddleware, async (req, res) => {
+  try {
+    const ws = await queryOne('SELECT owner_user_id FROM workspaces WHERE id = ?', [req.params.id]);
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+    if (ws.owner_user_id !== req.user.id) return res.status(403).json({ error: 'Only the owner can delete' });
+    await exec('UPDATE workspaces SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List workspace members
+app.get(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, res) => {
+  try {
+    const membership = await queryOne(
+      'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+    if (!membership) return res.status(404).json({ error: 'Workspace not found' });
+    const result = await query(
+      `SELECT u.id, u.email, u.name, u.avatar_url, wm.role, wm.joined_at, wm.invited_by
+       FROM workspace_members wm
+       JOIN users u ON u.id = wm.user_id
+       WHERE wm.workspace_id = ?
+       ORDER BY wm.joined_at ASC`,
+      [req.params.id]
+    );
+    res.json({ members: result.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Invite a user (by email) into a workspace. Admin only.
+app.post(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, res) => {
+  try {
+    const myMembership = await queryOne(
+      'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+    if (!myMembership) return res.status(404).json({ error: 'Workspace not found' });
+    if (myMembership.role !== 'admin') return res.status(403).json({ error: 'Only admins can invite' });
+
+    const { email, role = 'editor' } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    if (!['admin', 'editor', 'viewer'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const invitee = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
+    if (!invitee) return res.status(404).json({ error: 'User not found. They must register first.' });
+
+    const existing = await queryOne(
+      'SELECT 1 as x FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, invitee.id]
+    );
+    if (existing) return res.status(409).json({ error: 'Already a member' });
+
+    await exec(
+      'INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)',
+      [req.params.id, invitee.id, role, req.user.id]
+    );
+    res.json({ success: true, user_id: invitee.id, role });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Change member role. Admin only.
+app.patch(`${BASE_PATH}/api/workspaces/:id/members/:userId/role`, authMiddleware, async (req, res) => {
+  try {
+    const myMembership = await queryOne(
+      'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+    if (!myMembership) return res.status(404).json({ error: 'Workspace not found' });
+    if (myMembership.role !== 'admin') return res.status(403).json({ error: 'Only admins can change roles' });
+
+    const { role } = req.body;
+    if (!['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+    if (req.params.userId === req.user.id) return res.status(400).json({ error: 'Cannot change your own role' });
+
+    await exec(
+      'UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?',
+      [role, req.params.id, req.params.userId]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Remove a member. Admin only; cannot remove yourself.
+app.delete(`${BASE_PATH}/api/workspaces/:id/members/:userId`, authMiddleware, async (req, res) => {
+  try {
+    const myMembership = await queryOne(
+      'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+    if (!myMembership) return res.status(404).json({ error: 'Workspace not found' });
+    if (myMembership.role !== 'admin') return res.status(403).json({ error: 'Only admins can remove members' });
+    if (req.params.userId === req.user.id) return res.status(400).json({ error: 'Cannot remove yourself — transfer ownership or leave via a separate action' });
+
+    await exec(
+      'DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.params.userId]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==================== Protect all API routes below ====================
 app.use(`${BASE_PATH}/api`, (req, res, next) => {
   // Skip auth routes
   if (req.path.startsWith('/auth/')) return next();
+  // SSE streams authenticate via query-string (EventSource can't set headers)
+  if (/^\/agents\/runs\/[^/]+\/stream$/.test(req.path)) return next();
   authMiddleware(req, res, next);
 });
 
@@ -1325,6 +1494,204 @@ app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermissi
 // Notification sinks status
 app.get(`${BASE_PATH}/api/notifications/status`, (req, res) => {
   res.json({ enabled_sinks: notifications.getEnabledSinks() });
+});
+
+// ==================== Agent Runtime API (Phase A Week 2) ====================
+
+// List all registered agents
+app.get(`${BASE_PATH}/api/agents`, (req, res) => {
+  res.json({ agents: agentRuntime.listAgents() });
+});
+
+// Get a single agent's metadata
+app.get(`${BASE_PATH}/api/agents/:id`, (req, res) => {
+  const agent = agentRuntime.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  res.json(agent);
+});
+
+// Run an agent. Returns { runId } immediately; use streamAgentRun for events.
+app.post(`${BASE_PATH}/api/agents/:id/run`, async (req, res) => {
+  try {
+    const agent = agentRuntime.getAgent(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    // Persist the run row now so the client can look it up
+    const estimate = agentRuntime.estimateCost(req.params.id, req.body) || {};
+    const { runId, stream } = agentRuntime.createRun(req.params.id, req.body, {
+      workspaceId: req.workspace?.id,
+      userId: req.user?.id,
+    });
+
+    const wsId = req.workspace?.id || null;
+    await exec(
+      'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status, cost_usd_cents) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [runId, wsId, req.params.id, req.user?.id || null, JSON.stringify(req.body || {}), 'running', estimate.usdCents || 0]
+    );
+
+    // Attach listener that persists trace events + final status.
+    // Listener runs in background — we return runId to the client right away.
+    stream.on('event', async (evt) => {
+      try {
+        await exec(
+          'INSERT INTO agent_traces (id, run_id, event_type, data) VALUES (?, ?, ?, ?)',
+          [uuidv4(), runId, evt.type, JSON.stringify(evt.data || {})]
+        );
+        if (evt.type === 'complete') {
+          const cost = evt.data?.cost || {};
+          await exec(
+            `UPDATE agent_runs SET status=?, output=?, cost_usd_cents=?, input_tokens=?, output_tokens=?, duration_ms=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
+            [
+              'complete',
+              JSON.stringify(evt.data.output || {}),
+              cost.usdCents || 0,
+              cost.inputTokens || 0,
+              cost.outputTokens || 0,
+              evt.data.durationMs || null,
+              runId,
+            ]
+          );
+        } else if (evt.type === 'error') {
+          await exec(
+            "UPDATE agent_runs SET status='error', error=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+            [evt.data?.message || 'unknown', runId]
+          );
+        }
+      } catch (persistErr) {
+        console.warn('[agent-run] Trace persistence error:', persistErr.message);
+      }
+    });
+
+    res.json({ runId, status: 'running', estimate });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// SSE stream of events for a running agent.
+// Auth via query string token + workspace_id since EventSource can't set headers.
+app.get(`${BASE_PATH}/api/agents/runs/:runId/stream`, async (req, res) => {
+  try {
+    // Manual auth from query string (EventSource limitation)
+    const token = req.query.token;
+    const user = token ? await getSession(token) : null;
+    if (!user) return res.status(401).end();
+
+    // Check the run belongs to this user's workspace
+    const wsId = req.query.workspace_id;
+    const run = await queryOne('SELECT workspace_id, agent_id, status FROM agent_runs WHERE id = ?', [req.params.runId]);
+    if (!run) return res.status(404).end();
+    if (wsId && run.workspace_id !== wsId) return res.status(403).end();
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const stream = agentRuntime.getRunStream(req.params.runId);
+    if (!stream) {
+      // Run already finished — replay traces from DB
+      const traces = await query('SELECT event_type, data, timestamp FROM agent_traces WHERE run_id = ? ORDER BY timestamp ASC', [req.params.runId]);
+      for (const t of traces.rows || []) {
+        res.write(`event: ${t.event_type}\ndata: ${JSON.stringify({ data: JSON.parse(t.data || '{}'), timestamp: t.timestamp })}\n\n`);
+      }
+      res.write(`event: closed\ndata: {}\n\n`);
+      return res.end();
+    }
+
+    const listener = (evt) => {
+      res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`);
+      if (evt.type === 'closed' || evt.type === 'complete' || evt.type === 'error') {
+        setTimeout(() => { try { res.end(); } catch {} }, 50);
+      }
+    };
+    stream.on('event', listener);
+
+    req.on('close', () => {
+      stream.off('event', listener);
+    });
+  } catch (e) {
+    console.error('[agent stream]', e);
+    try { res.status(500).end(); } catch {}
+  }
+});
+
+// List agent runs in the current workspace
+app.get(`${BASE_PATH}/api/agents/runs`, async (req, res) => {
+  try {
+    const { agent_id, status, limit } = req.query;
+    const s = scoped(req.workspace.id);
+    let sql = 'SELECT id, agent_id, user_id, status, cost_usd_cents, input_tokens, output_tokens, duration_ms, started_at, completed_at FROM agent_runs WHERE workspace_id = ?';
+    const params = [req.workspace.id];
+    if (agent_id) { sql += ' AND agent_id = ?'; params.push(agent_id); }
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    sql += ' ORDER BY started_at DESC LIMIT ?';
+    params.push(Math.min(parseInt(limit) || 50, 200));
+    const result = await s.query(sql, params);
+    res.json({ runs: result.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get a single run with its traces
+app.get(`${BASE_PATH}/api/agents/runs/:runId`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const run = await s.queryOne('SELECT * FROM agent_runs WHERE id = ? AND workspace_id = ?', [req.params.runId, req.workspace.id]);
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    const traces = await query('SELECT event_type, data, timestamp FROM agent_traces WHERE run_id = ? ORDER BY timestamp ASC', [req.params.runId]);
+    run.input = run.input ? JSON.parse(run.input) : null;
+    run.output = run.output ? JSON.parse(run.output) : null;
+    run.traces = (traces.rows || []).map(t => ({ ...t, data: JSON.parse(t.data || '{}') }));
+    res.json(run);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cost summary for the current workspace
+app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const today = new Date().toISOString().slice(0, 10);
+    const [all, todayRow, byAgent] = await Promise.all([
+      s.queryOne('SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents, COALESCE(SUM(input_tokens),0) as in_t, COALESCE(SUM(output_tokens),0) as out_t FROM agent_runs WHERE workspace_id = ?', [req.workspace.id]),
+      s.queryOne(`SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? AND substr(started_at, 1, 10) = ?`, [req.workspace.id, today]),
+      s.query('SELECT agent_id, COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? GROUP BY agent_id ORDER BY cents DESC', [req.workspace.id]),
+    ]);
+    res.json({
+      lifetime: { runs: parseInt(all.runs) || 0, usdCents: parseInt(all.cents) || 0, inputTokens: parseInt(all.in_t) || 0, outputTokens: parseInt(all.out_t) || 0 },
+      today: { runs: parseInt(todayRow.runs) || 0, usdCents: parseInt(todayRow.cents) || 0 },
+      byAgent: (byAgent.rows || []).map(r => ({ agent_id: r.agent_id, runs: parseInt(r.runs), usdCents: parseInt(r.cents) })),
+      llmStats: llm.getStats(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Conductor — build a plan from a goal
+app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
+  try {
+    const { goal } = req.body;
+    if (!goal) return res.status(400).json({ error: 'goal is required' });
+    if (!llm.isConfigured()) return res.status(400).json({ error: 'LLM provider not configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)' });
+
+    const { plan, cost } = await conductor.buildPlan({
+      goal, workspaceId: req.workspace.id, userId: req.user.id,
+    });
+
+    const planId = uuidv4();
+    await exec(
+      'INSERT INTO conductor_plans (id, workspace_id, goal, plan, status, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+      [planId, req.workspace.id, goal, JSON.stringify(plan), 'pending_approval', req.user.id]
+    );
+    const estimate = conductor.estimatePlanCost(plan);
+    res.json({ planId, plan, cost, estimate });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Job queue stats
@@ -2509,6 +2876,9 @@ async function initializeDefaultData() {
       const sinks = notifications.getEnabledSinks();
       if (sinks.length) console.log(`[notifications] Active sinks: ${sinks.join(', ')}`);
       scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
+      // Register all v2 agents with the runtime
+      const registered = agentsV2.registerAll();
+      console.log(`[agents-v2] Registered ${registered.length} agents: ${registered.join(', ')}`);
     });
   } catch (e) {
     console.error('Failed to initialize database:', e);

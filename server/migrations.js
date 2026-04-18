@@ -56,6 +56,116 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-19-agent-runtime-tables',
+    description: 'Create agents, agent_runs, agent_traces, content_pieces, brand_voices tables for Phase A Week 2',
+    up: async ({ exec }) => {
+      // agents table: static metadata about registered agents. Populated
+      // when the server boots + each registered agent calls upsertAgent.
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS agents (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          version TEXT,
+          capabilities TEXT DEFAULT '[]',
+          input_schema TEXT,
+          output_schema TEXT,
+          enabled INTEGER DEFAULT 1,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS agent_runs (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT,
+          agent_id TEXT NOT NULL,
+          user_id TEXT,
+          input TEXT,
+          output TEXT,
+          status TEXT DEFAULT 'running',
+          error TEXT,
+          cost_usd_cents INTEGER DEFAULT 0,
+          input_tokens INTEGER DEFAULT 0,
+          output_tokens INTEGER DEFAULT 0,
+          duration_ms INTEGER,
+          started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          completed_at TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS agent_traces (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          data TEXT,
+          timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS content_pieces (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          type TEXT,
+          title TEXT,
+          body TEXT,
+          metadata TEXT DEFAULT '{}',
+          status TEXT DEFAULT 'draft',
+          created_by_agent_run_id TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS brand_voices (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          style_guide TEXT,
+          tone_words TEXT DEFAULT '[]',
+          do_examples TEXT DEFAULT '[]',
+          dont_examples TEXT DEFAULT '[]',
+          is_default INTEGER DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS conductor_plans (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          goal TEXT NOT NULL,
+          plan TEXT NOT NULL,
+          status TEXT DEFAULT 'pending_approval',
+          created_by TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          approved_at TIMESTAMP,
+          completed_at TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+
+      // Indexes
+      for (const stmt of [
+        'CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace ON agent_runs(workspace_id)',
+        'CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id)',
+        'CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status)',
+        'CREATE INDEX IF NOT EXISTS idx_agent_traces_run ON agent_traces(run_id)',
+        'CREATE INDEX IF NOT EXISTS idx_content_pieces_workspace ON content_pieces(workspace_id)',
+        'CREATE INDEX IF NOT EXISTS idx_brand_voices_workspace ON brand_voices(workspace_id)',
+        'CREATE INDEX IF NOT EXISTS idx_conductor_plans_workspace ON conductor_plans(workspace_id)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
+  {
     id: '2026-04-18-multitenancy-init',
     description: 'Add workspace_id to 13 business tables; backfill existing data into owner workspaces',
     up: async ({ exec, query, queryOne }) => {

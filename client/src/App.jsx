@@ -5,7 +5,9 @@ import { CampaignProvider, useCampaign } from './CampaignContext';
 import { ToastProvider } from './components/Toast';
 import { ConfirmProvider } from './components/ConfirmDialog';
 import { I18nProvider, useI18n } from './i18n';
+import { WorkspaceProvider } from './WorkspaceContext';
 import LanguageSwitcher from './components/LanguageSwitcher';
+import WorkspaceSwitcher from './components/WorkspaceSwitcher';
 import AuthPage from './pages/AuthPage';
 import CampaignList from './pages/CampaignList';
 import CampaignDetail from './pages/CampaignDetail';
@@ -13,6 +15,7 @@ import ContactModule from './pages/ContactModule';
 import KolDatabase from './pages/KolDatabase';
 import PipelinePage from './pages/PipelinePage';
 import UsersPage from './pages/UsersPage';
+import AgentsPage from './pages/AgentsPage';
 import NotFoundPage from './components/NotFoundPage';
 
 // Lazy-load heavy pages
@@ -26,6 +29,7 @@ function PageFallback() {
 function useNavItems() {
   const { t } = useI18n();
   return [
+    { path: '/agents', label: 'Agents', icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> },
     { path: '/pipeline', label: t('nav.pipeline'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> },
     { path: '/campaigns', label: t('nav.campaigns'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> },
     { path: '/roi', label: t('nav.roi'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg> },
@@ -69,6 +73,7 @@ function AppContent() {
               <h1>InfluenceX</h1>
             </div>
           </div>
+          <WorkspaceSwitcher />
           <nav className="sidebar-nav">
             {navItems.map(item => (
               <NavLink
@@ -113,6 +118,7 @@ function AppContent() {
           <main className="main-content" onClick={() => showUserMenu && setShowUserMenu(false)}>
             <Routes>
               <Route path="/" element={<Navigate to="/pipeline" replace />} />
+              <Route path="/agents" element={<AgentsPage />} />
               <Route path="/pipeline" element={<PipelinePage />} />
               <Route path="/campaigns" element={<CampaignList />} />
               <Route path="/campaigns/:id" element={<CampaignDetail />} />
@@ -170,7 +176,9 @@ export default function App() {
     <I18nProvider>
       <ToastProvider>
         <ConfirmProvider>
-          <AppContent />
+          <WorkspaceProvider>
+            <AppContent />
+          </WorkspaceProvider>
         </ConfirmProvider>
       </ToastProvider>
     </I18nProvider>

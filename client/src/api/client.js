@@ -16,6 +16,12 @@ async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
+  // Propagate current workspace context to the backend.
+  // WorkspaceContext sets window.__influencex_workspace_id.
+  if (typeof window !== 'undefined' && window.__influencex_workspace_id) {
+    headers['X-Workspace-Id'] = window.__influencex_workspace_id;
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     headers,
     ...options,
@@ -186,4 +192,36 @@ export const api = {
   inviteUser: (data) => request('/users/invite', { method: 'POST', body: data }),
   updateUserRole: (id, role) => request(`/users/${id}/role`, { method: 'PATCH', body: { role } }),
   deleteUser: (id) => request(`/users/${id}`, { method: 'DELETE' }),
+
+  // Workspaces
+  listWorkspaces: () => request('/auth/workspaces'),
+  createWorkspace: (data) => request('/workspaces', { method: 'POST', body: data }),
+  updateWorkspace: (id, data) => request(`/workspaces/${id}`, { method: 'PATCH', body: data }),
+  deleteWorkspace: (id) => request(`/workspaces/${id}`, { method: 'DELETE' }),
+  listWorkspaceMembers: (id) => request(`/workspaces/${id}/members`),
+  inviteToWorkspace: (id, data) => request(`/workspaces/${id}/members`, { method: 'POST', body: data }),
+  updateMemberRole: (wsId, userId, role) => request(`/workspaces/${wsId}/members/${userId}/role`, { method: 'PATCH', body: { role } }),
+  removeMember: (wsId, userId) => request(`/workspaces/${wsId}/members/${userId}`, { method: 'DELETE' }),
+
+  // Agents (Phase A Week 2)
+  listAgents: () => request('/agents'),
+  getAgent: (id) => request(`/agents/${id}`),
+  runAgent: (id, input) => request(`/agents/${id}/run`, { method: 'POST', body: input }),
+  listAgentRuns: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/agents/runs${q ? '?' + q : ''}`);
+  },
+  getAgentRun: (id) => request(`/agents/runs/${id}`),
+  getAgentCostSummary: () => request('/agents/cost'),
+  // SSE stream for a running agent — returns EventSource (caller manages lifecycle)
+  streamAgentRun: (runId) => {
+    const token = getToken();
+    const wsId = window.__influencex_workspace_id;
+    const url = `${BASE}/agents/runs/${runId}/stream?token=${encodeURIComponent(token || '')}${wsId ? `&workspace_id=${encodeURIComponent(wsId)}` : ''}`;
+    return new EventSource(url);
+  },
+
+  // Conductor
+  conductorPlan: (goal) => request('/conductor/plan', { method: 'POST', body: { goal } }),
+  conductorRun: (planId) => request(`/conductor/plans/${planId}/run`, { method: 'POST' }),
 };
