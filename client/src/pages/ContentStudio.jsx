@@ -19,7 +19,7 @@ export default function ContentStudio() {
   const [audience, setAudience] = useState('');
   const [keywords, setKeywords] = useState('');
   const [cta, setCta] = useState('');
-  const [imageSize, setImageSize] = useState('2K');
+  const [imageSize, setImageSize] = useState('2k');
   const [enrichPrompt, setEnrichPrompt] = useState(true);
 
   const currentFormat = FORMATS.find(f => f.id === format);
@@ -228,9 +228,8 @@ export default function ContentStudio() {
               <div className="form-group">
                 <label className="form-label">Size</label>
                 <select className="form-select" value={imageSize} onChange={e => setImageSize(e.target.value)}>
-                  <option value="1K">1K (fast, ~¢2)</option>
-                  <option value="2K">2K (balanced, ~¢4)</option>
-                  <option value="4K">4K (high-res, ~¢8)</option>
+                  <option value="2k">2K (balanced, ~¢4)</option>
+                  <option value="3k">3K (high-res, ~¢8)</option>
                 </select>
               </div>
               <div className="form-group">

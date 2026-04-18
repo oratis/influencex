@@ -48,7 +48,20 @@ Write the detailed image prompt.`;
   return { prompt: (res.text || '').trim(), cost: res.usage };
 }
 
-async function callVolcengine({ prompt, size = '2K', watermark = false }) {
+// Volcengine accepts lowercase '2k' or '3k' (or explicit WxH). Normalize
+// our preferred 2K / 3K input to the lowercase form the API wants.
+function normalizeSize(size) {
+  if (!size) return '2k';
+  if (/^\d+x\d+$/.test(size)) return size;
+  const s = String(size).toLowerCase();
+  if (s === '2k' || s === '3k') return s;
+  // Map legacy / convenience tokens to supported values
+  if (s === '1k') return '2k';
+  if (s === '4k') return '3k';
+  return '2k';
+}
+
+async function callVolcengine({ prompt, size = '2k', watermark = false }) {
   const key = process.env.VOLCENGINE_ARK_API_KEY;
   if (!key) throw new Error('VOLCENGINE_ARK_API_KEY not configured');
 
@@ -63,7 +76,7 @@ async function callVolcengine({ prompt, size = '2K', watermark = false }) {
       prompt,
       sequential_image_generation: 'disabled',
       response_format: 'url',
-      size,
+      size: normalizeSize(size),
       stream: false,
       watermark,
     }),
@@ -93,7 +106,7 @@ module.exports = {
     properties: {
       brief: { type: 'string', description: 'What you want depicted' },
       mode: { type: 'string', enum: ['direct', 'enrich'], default: 'enrich' },
-      size: { type: 'string', enum: ['1K', '2K', '4K'], default: '2K' },
+      size: { type: 'string', enum: ['2k', '3k'], default: '2k', description: 'Volcengine Doubao supports 2k or 3k (or explicit WxH)' },
       brand_voice: {
         type: 'object',
         properties: {
@@ -117,9 +130,10 @@ module.exports = {
   },
 
   costEstimate(input) {
-    // Volcengine Seedream is approximately 0.3 RMB ≈ ¢4 per 2K image.
-    // Add ~2¢ if enrichment is on (one Claude call).
-    const base = { '1K': 2, '2K': 4, '4K': 8 }[input?.size || '2K'] || 4;
+    // Volcengine Doubao Seedream: ~¢4 for 2k, ~¢8 for 3k (rough approximation).
+    // Add ~¢2 if enrichment is on (one Claude call).
+    const sz = (input?.size || '2k').toLowerCase();
+    const base = sz === '3k' ? 8 : 4;
     const enrich = (input?.mode === 'enrich') ? 2 : 0;
     return { usdCents: base + enrich, tokens: enrich * 1000 };
   },
@@ -149,17 +163,18 @@ module.exports = {
       }
     }
 
+    const sizeToUse = (input.size || '2k').toLowerCase();
     ctx.emit('progress', { step: 'generating', message: 'Calling Doubao Seedream...' });
-    const { url } = await callVolcengine({ prompt, size: input.size || '2K', watermark: false });
+    const { url } = await callVolcengine({ prompt, size: sizeToUse, watermark: false });
 
     ctx.emit('progress', { step: 'complete', message: 'Image ready' });
 
-    const imageCostCents = { '1K': 2, '2K': 4, '4K': 8 }[input.size || '2K'] || 4;
+    const imageCostCents = sizeToUse === '3k' ? 8 : 4;
     return {
       url,
       prompt,
       original_brief: input.brief,
-      size: input.size || '2K',
+      size: sizeToUse,
       provider: 'volcengine-ark',
       model: DEFAULT_VOLCENGINE_MODEL,
       cost: {
