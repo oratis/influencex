@@ -1511,10 +1511,15 @@ app.get(`${BASE_PATH}/api/agents`, (req, res) => {
 app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
-    const today = new Date().toISOString().slice(0, 10);
+    // Portable "today" window: compare as ISO strings. Works on both
+    // PG (timestamp) and SQLite (text) since ISO strings sort lexically.
+    const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart); dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+    const dayStartStr = dayStart.toISOString();
+    const dayEndStr = dayEnd.toISOString();
     const [all, todayRow, byAgent] = await Promise.all([
       s.queryOne('SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents, COALESCE(SUM(input_tokens),0) as in_t, COALESCE(SUM(output_tokens),0) as out_t FROM agent_runs WHERE workspace_id = ?', [req.workspace.id]),
-      s.queryOne(`SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? AND substr(started_at, 1, 10) = ?`, [req.workspace.id, today]),
+      s.queryOne(`SELECT COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? AND started_at >= ? AND started_at < ?`, [req.workspace.id, dayStartStr, dayEndStr]),
       s.query('SELECT agent_id, COUNT(*) as runs, COALESCE(SUM(cost_usd_cents),0) as cents FROM agent_runs WHERE workspace_id = ? GROUP BY agent_id ORDER BY cents DESC', [req.workspace.id]),
     ]);
     res.json({
