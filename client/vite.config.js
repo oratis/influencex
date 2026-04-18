@@ -11,6 +11,17 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: true
-  }
+    emptyOutDir: true,
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split heavy charting library into its own chunk — only loaded by Data page
+          recharts: ['recharts'],
+          // React core + router as a stable chunk
+          react: ['react', 'react-dom', 'react-router-dom'],
+        },
+      },
+    },
+  },
 });

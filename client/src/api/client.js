@@ -175,4 +175,7 @@ export const api = {
 
   // Notifications
   getNotificationStatus: () => request('/notifications/status'),
+
+  // ROI Dashboard
+  getCampaignRoi: (id) => request(`/campaigns/${id}/roi`),
 };

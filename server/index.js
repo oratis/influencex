@@ -18,6 +18,9 @@ const csvExport = require('./csv-export');
 const rbac = require('./rbac');
 const notifications = require('./notifications');
 const scheduler = require('./scheduler');
+const { rateLimit } = require('./rate-limit');
+const { registerHealthRoutes } = require('./health');
+const { getCampaignRoi } = require('./roi-dashboard');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -55,9 +58,18 @@ app.use((req, res, next) => {
 // Serve static frontend files
 app.use(BASE_PATH, express.static(path.join(__dirname, '..', 'client', 'dist')));
 
+// Register health endpoints early (outside auth, rate limit, and BASE_PATH conventions)
+registerHealthRoutes(app, BASE_PATH, { query, usePostgres, youtubeQuota, notifications });
+
+// Rate limiters — applied per-endpoint below
+const authLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many auth attempts' });
+const discoveryLimiter = rateLimit({ max: 5, windowMs: 60 * 1000, message: 'Discovery rate limit reached' });
+const exportLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many exports' });
+const sendEmailLimiter = rateLimit({ max: 20, windowMs: 60 * 1000, message: 'Email send rate limit reached' });
+
 // ==================== Auth API ====================
 
-app.post(`${BASE_PATH}/api/auth/register`, async (req, res) => {
+app.post(`${BASE_PATH}/api/auth/register`, authLimiter, async (req, res) => {
   try {
     const { email, password, name } = req.body;
     if (!email || !password || !name) return res.status(400).json({ error: 'Email, password, and name are required' });
@@ -72,7 +84,7 @@ app.post(`${BASE_PATH}/api/auth/register`, async (req, res) => {
   }
 });
 
-app.post(`${BASE_PATH}/api/auth/login`, async (req, res) => {
+app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
@@ -404,7 +416,7 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
 });
 
 // Send email (actually send via Resend/SMTP)
-app.post(`${BASE_PATH}/api/contacts/:id/send`, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res) => {
   try {
     // Load contact + KOL email address
     const contact = await queryOne(
@@ -960,7 +972,7 @@ function sendCsv(res, rows, columns, filename) {
 }
 
 // Export campaign KOLs to CSV
-app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, exportLimiter, async (req, res) => {
   try {
     const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [req.params.id]);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
@@ -973,7 +985,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, async (req, res) => {
 });
 
 // Export campaign contacts to CSV
-app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (req, res) => {
   try {
     const campaign = await queryOne('SELECT name FROM campaigns WHERE id = ?', [req.params.id]);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
@@ -992,7 +1004,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, async (req, res) => {
 });
 
 // Export the global KOL database to CSV
-app.get(`${BASE_PATH}/api/kol-database/export`, async (req, res) => {
+app.get(`${BASE_PATH}/api/kol-database/export`, exportLimiter, async (req, res) => {
   try {
     const result = await query('SELECT * FROM kol_database ORDER BY ai_score DESC, followers DESC');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kol-database.csv`);
@@ -1002,7 +1014,7 @@ app.get(`${BASE_PATH}/api/kol-database/export`, async (req, res) => {
 });
 
 // Export all content data to CSV
-app.get(`${BASE_PATH}/api/data/content/export`, async (req, res) => {
+app.get(`${BASE_PATH}/api/data/content/export`, exportLimiter, async (req, res) => {
   try {
     const result = await query('SELECT * FROM content_data ORDER BY publish_date DESC');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.content, 'content-data.csv');
@@ -1051,6 +1063,19 @@ app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermissi
 // Notification sinks status
 app.get(`${BASE_PATH}/api/notifications/status`, (req, res) => {
   res.json({ enabled_sinks: notifications.getEnabledSinks() });
+});
+
+// ==================== ROI Dashboard ====================
+
+// Aggregated ROI metrics for a campaign
+app.get(`${BASE_PATH}/api/campaigns/:id/roi`, async (req, res) => {
+  try {
+    const result = await getCampaignRoi(req.params.id, { query, queryOne });
+    if (result.error) return res.status(404).json(result);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ==================== Email Templates ====================
@@ -1695,7 +1720,7 @@ app.get(`${BASE_PATH}/api/data/dashboard/combined`, async (req, res) => {
 // ==================== Discovery API (Task 3) ====================
 
 // Start discovery
-app.post(`${BASE_PATH}/api/discovery/start`, async (req, res) => {
+app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) => {
   try {
     const { campaign_id, keywords, platforms, min_subscribers, max_results } = req.body;
     const searchKeywords = keywords || 'gaming AI roleplay, AI character game, AI NPC gaming, AI companion roleplay';

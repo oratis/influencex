@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, Suspense, lazy } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { CampaignProvider, useCampaign } from './CampaignContext';
@@ -8,10 +8,16 @@ import AuthPage from './pages/AuthPage';
 import CampaignList from './pages/CampaignList';
 import CampaignDetail from './pages/CampaignDetail';
 import ContactModule from './pages/ContactModule';
-import DataModule from './pages/DataModule';
 import KolDatabase from './pages/KolDatabase';
 import PipelinePage from './pages/PipelinePage';
 import NotFoundPage from './components/NotFoundPage';
+
+// Lazy-load DataModule — it pulls in recharts (~300kb)
+const DataModule = lazy(() => import('./pages/DataModule'));
+
+function PageFallback() {
+  return <div className="page-container"><div className="empty-state"><p>Loading...</p></div></div>;
+}
 
 const navItems = [
   { path: '/pipeline', label: 'Pipeline', icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> },
@@ -100,7 +106,7 @@ function AppContent() {
               <Route path="/campaigns" element={<CampaignList />} />
               <Route path="/campaigns/:id" element={<CampaignDetail />} />
               <Route path="/contacts" element={<ContactModule />} />
-              <Route path="/data" element={<DataModule />} />
+              <Route path="/data" element={<Suspense fallback={<PageFallback />}><DataModule /></Suspense>} />
               <Route path="/kol-database" element={<KolDatabase />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
