@@ -20,7 +20,7 @@ COPY server/ server/
 
 # Expose port
 ENV PORT=8080
-ENV BASE_PATH=/InfluenceX
+ENV BASE_PATH=""
 EXPOSE 8080
 
 CMD ["node", "server/index.js"]

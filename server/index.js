@@ -32,7 +32,8 @@ const jobQueue = createQueue({ concurrency: parseInt(process.env.QUEUE_CONCURREN
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const BASE_PATH = process.env.BASE_PATH || '/InfluenceX';
+// Default to root path. Set BASE_PATH=/something for sub-path hosting.
+const BASE_PATH = process.env.BASE_PATH ?? '';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
