@@ -57,11 +57,16 @@ function hasPermission(role, action) {
 /**
  * Express middleware factory: require a given permission.
  * Must be used AFTER authMiddleware (so req.user is populated).
+ *
+ * If workspace-middleware ran first, req.workspaceRole contains the role
+ * *within that workspace*, which takes precedence over req.user.role.
+ * This lets the same user be admin of workspace A and viewer of workspace B.
  */
 function requirePermission(action) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
-    const role = req.user.role || 'viewer';
+    // Prefer workspace-scoped role when present, fall back to global user role
+    const role = req.workspaceRole || req.user.role || 'viewer';
     if (!hasPermission(role, action)) {
       return res.status(403).json({
         error: `Insufficient permissions: requires "${action}" (your role: ${role})`,

@@ -776,6 +776,115 @@ async function transaction(fn) {
   }
 }
 
+// ==================== Workspace-scoped query helper ====================
+//
+// Tables that do NOT need workspace_id scoping (global/platform-level data).
+// Every other table must include a workspace_id filter or we refuse to run.
+const WORKSPACE_EXEMPT_TABLES = new Set([
+  'users', 'sessions',
+  'workspaces', 'workspace_members',
+  'schema_migrations',
+]);
+
+// Extract primary table name from a SQL statement. Best-effort; covers
+// standard patterns. Returns lowercase table name or null if unrecognizable.
+function extractTable(sql) {
+  const s = sql.trim();
+  // Strip leading comments
+  const cleaned = s.replace(/^\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)+\s*/g, '');
+  const patterns = [
+    /^SELECT[\s\S]+?\bFROM\s+["`]?([a-zA-Z_][a-zA-Z0-9_]*)/i,
+    /^UPDATE\s+["`]?([a-zA-Z_][a-zA-Z0-9_]*)/i,
+    /^INSERT\s+INTO\s+["`]?([a-zA-Z_][a-zA-Z0-9_]*)/i,
+    /^DELETE\s+FROM\s+["`]?([a-zA-Z_][a-zA-Z0-9_]*)/i,
+    /^WITH\s+[\s\S]+?\bFROM\s+["`]?([a-zA-Z_][a-zA-Z0-9_]*)/i,
+  ];
+  for (const p of patterns) {
+    const m = cleaned.match(p);
+    if (m) return m[1].toLowerCase();
+  }
+  return null;
+}
+
+/**
+ * Runtime lint: confirm a SQL statement either touches only exempt tables
+ * or mentions workspace_id somewhere. Dev throws; prod warns (graceful
+ * rollout of Day 3 handler migrations).
+ *
+ * Returns { ok, reason } so callers can inspect.
+ */
+function assertContainsWorkspaceScope(sql) {
+  const table = extractTable(sql);
+  if (!table) {
+    // Can't identify table (e.g. "PRAGMA table_info(...)" or similar meta query).
+    // Conservatively allow — these are never business data queries.
+    return { ok: true, reason: 'no-table-extracted' };
+  }
+  if (WORKSPACE_EXEMPT_TABLES.has(table)) {
+    return { ok: true, reason: 'exempt-table' };
+  }
+  // Must reference workspace_id somewhere in the statement
+  if (/\bworkspace_id\b/i.test(sql)) {
+    return { ok: true, reason: 'has-workspace-id' };
+  }
+  return { ok: false, reason: `table "${table}" requires workspace_id scope` };
+}
+
+function enforceScope(sql) {
+  const check = assertContainsWorkspaceScope(sql);
+  if (!check.ok) {
+    const message = `[scope-violation] ${check.reason}. SQL: ${sql.slice(0, 200)}`;
+    if (process.env.NODE_ENV === 'production' && process.env.STRICT_WORKSPACE_SCOPE !== 'true') {
+      // Graceful during v1→v2 handler rollout. Flip STRICT_WORKSPACE_SCOPE=true
+      // to make violations fatal in production once all handlers are migrated.
+      console.warn(message);
+    } else {
+      throw new Error(message);
+    }
+  }
+}
+
+/**
+ * Workspace-aware query wrappers.
+ *
+ *   const s = scoped(workspaceId);
+ *   await s.query('SELECT ... FROM campaigns WHERE workspace_id = ?', [workspaceId]);
+ *
+ * The wrappers refuse to run SQL on business tables that lacks workspace_id
+ * filtering — caller errors loudly in dev, warning in prod.
+ *
+ * NOTE: The caller still passes workspaceId explicitly in the params — we
+ * do NOT magic-inject it. This keeps SQL readable and reviewable.
+ */
+function scoped(workspaceId) {
+  if (!workspaceId) {
+    throw new Error('scoped() requires a non-empty workspaceId');
+  }
+  return {
+    workspaceId,
+    query: (sql, params = []) => {
+      enforceScope(sql);
+      return query(sql, params);
+    },
+    queryOne: (sql, params = []) => {
+      enforceScope(sql);
+      return queryOne(sql, params);
+    },
+    exec: (sql, params = []) => {
+      enforceScope(sql);
+      return exec(sql, params);
+    },
+    transaction: (fn) => transaction(async (tx) => {
+      const wrapped = {
+        query: (sql, params = []) => { enforceScope(sql); return tx.query(sql, params); },
+        queryOne: (sql, params = []) => { enforceScope(sql); return tx.queryOne(sql, params); },
+        exec: (sql, params = []) => { enforceScope(sql); return tx.exec(sql, params); },
+      };
+      return fn(wrapped);
+    }),
+  };
+}
+
 module.exports = {
   pool,
   db,
@@ -786,4 +895,9 @@ module.exports = {
   queryOne,
   exec,
   transaction,
+  // Workspace scoping
+  scoped,
+  assertContainsWorkspaceScope,
+  extractTable,
+  WORKSPACE_EXEMPT_TABLES,
 };
