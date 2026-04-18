@@ -2358,73 +2358,107 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
     // client polls /plans/:id for step progress.
     res.json({ success: true, planId: req.params.id, steps: planObj.steps.length });
 
-    // Run in background
+    // Run in background. Strategy:
+    //   - Build a dependency graph from step.dependsOn.
+    //   - Process in "waves": all steps whose deps are already complete run
+    //     concurrently via Promise.all. Steps that share a parallel_group are
+    //     naturally captured in the same wave (they have no cross-deps).
+    //   - If any step errors, later waves are skipped (marked 'skipped').
     (async () => {
+      const steps = planObj.steps;
+      const stepMap = Object.fromEntries(steps.map(s => [s.id, s]));
       const stepResults = [];
-      try {
-        for (const step of planObj.steps) {
-          const agent = agentRuntime.getAgent(step.agent);
-          if (!agent) {
-            stepResults.push({ id: step.id, agent: step.agent, status: 'skipped', error: 'Agent not found' });
-            continue;
-          }
-          const { runId, stream } = agentRuntime.createRun(step.agent, step.input, {
-            workspaceId: req.workspace.id,
-            userId: req.user.id,
-            db: { query, queryOne, exec },
-            uuidv4,
-          });
+      const done = new Set();
+      const errored = new Set();
+      const resultById = {};
 
-          // Attach listener FIRST (before await) so sync agents don't race.
-          await new Promise((resolve) => {
-            let finalOutput = null;
-            let finalError = null;
-            let finalCost = null;
-            stream.on('event', async (evt) => {
+      const runStep = async (step) => {
+        const agent = agentRuntime.getAgent(step.agent);
+        if (!agent) {
+          const r = { id: step.id, agent: step.agent, status: 'skipped', error: 'Agent not found', stage: step.stage };
+          resultById[step.id] = r; return r;
+        }
+        const { runId, stream } = agentRuntime.createRun(step.agent, step.input, {
+          workspaceId: req.workspace.id,
+          userId: req.user.id,
+          db: { query, queryOne, exec },
+          uuidv4,
+        });
+        return await new Promise((resolve) => {
+          let finalOutput = null;
+          let finalError = null;
+          let finalCost = null;
+          stream.on('event', async (evt) => {
+            try {
+              await exec(
+                'INSERT INTO agent_traces (id, run_id, event_type, data) VALUES (?, ?, ?, ?)',
+                [uuidv4(), runId, evt.type, JSON.stringify(evt.data || {})]
+              );
+            } catch {}
+            if (evt.type === 'complete') { finalOutput = evt.data.output; finalCost = evt.data.cost; }
+            if (evt.type === 'error') finalError = evt.data?.message;
+            if (evt.type === 'closed') {
               try {
                 await exec(
-                  'INSERT INTO agent_traces (id, run_id, event_type, data) VALUES (?, ?, ?, ?)',
-                  [uuidv4(), runId, evt.type, JSON.stringify(evt.data || {})]
+                  `UPDATE agent_runs SET status=?, output=?, error=?, cost_usd_cents=?, input_tokens=?, output_tokens=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
+                  [
+                    finalError ? 'error' : 'complete',
+                    finalOutput ? JSON.stringify(finalOutput) : null,
+                    finalError || null,
+                    finalCost?.usdCents || 0,
+                    finalCost?.inputTokens || 0,
+                    finalCost?.outputTokens || 0,
+                    runId,
+                  ]
                 );
               } catch {}
-              if (evt.type === 'complete') {
-                finalOutput = evt.data.output;
-                finalCost = evt.data.cost;
-              }
-              if (evt.type === 'error') finalError = evt.data?.message;
-              if (evt.type === 'closed') {
-                try {
-                  await exec(
-                    `UPDATE agent_runs SET status=?, output=?, error=?, cost_usd_cents=?, input_tokens=?, output_tokens=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
-                    [
-                      finalError ? 'error' : 'complete',
-                      finalOutput ? JSON.stringify(finalOutput) : null,
-                      finalError || null,
-                      finalCost?.usdCents || 0,
-                      finalCost?.inputTokens || 0,
-                      finalCost?.outputTokens || 0,
-                      runId,
-                    ]
-                  );
-                } catch {}
-                stepResults.push({
-                  id: step.id, agent: step.agent,
-                  runId, status: finalError ? 'error' : 'complete',
-                  output: finalOutput, error: finalError,
-                });
-                resolve();
-              }
-            });
-            // After listener attach, persist the agent_runs row (async)
-            exec(
-              'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status) VALUES (?, ?, ?, ?, ?, ?)',
-              [runId, req.workspace.id, step.agent, req.user.id, JSON.stringify(step.input || {}), 'running']
-            ).catch(() => {});
+              const r = {
+                id: step.id, agent: step.agent, stage: step.stage, parallel_group: step.parallel_group,
+                runId, status: finalError ? 'error' : 'complete',
+                output: finalOutput, error: finalError,
+              };
+              resultById[step.id] = r;
+              resolve(r);
+            }
           });
+          exec(
+            'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status) VALUES (?, ?, ?, ?, ?, ?)',
+            [runId, req.workspace.id, step.agent, req.user.id, JSON.stringify(step.input || {}), 'running']
+          ).catch(() => {});
+        });
+      };
 
-          // If a step fails, stop the plan (simple strategy; fine-grained
-          // retry-on-error can be added later).
-          if (stepResults[stepResults.length - 1].status === 'error') break;
+      try {
+        let guard = 0;
+        while (done.size + errored.size < steps.length && guard++ < 50) {
+          // Find ready steps: all deps done + not errored upstream.
+          const ready = steps.filter(s => {
+            if (done.has(s.id) || errored.has(s.id)) return false;
+            const deps = Array.isArray(s.dependsOn) ? s.dependsOn : [];
+            if (deps.some(d => errored.has(d))) {
+              errored.add(s.id);
+              stepResults.push({ id: s.id, agent: s.agent, status: 'skipped', error: 'upstream failed', stage: s.stage });
+              return false;
+            }
+            return deps.every(d => done.has(d));
+          });
+          if (ready.length === 0) {
+            // Unresolvable deps — mark remaining as skipped and bail.
+            for (const s of steps) {
+              if (!done.has(s.id) && !errored.has(s.id)) {
+                stepResults.push({ id: s.id, agent: s.agent, status: 'skipped', error: 'unreachable', stage: s.stage });
+                errored.add(s.id);
+              }
+            }
+            break;
+          }
+          // Run this wave in parallel.
+          const waveResults = await Promise.all(ready.map(runStep));
+          for (const r of waveResults) {
+            stepResults.push(r);
+            if (r.status === 'error') errored.add(r.id);
+            else done.add(r.id);
+          }
         }
 
         const allOk = stepResults.every(r => r.status === 'complete');

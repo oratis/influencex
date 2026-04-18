@@ -13,6 +13,22 @@
  */
 
 const llm = require('../llm');
+const crypto = require('crypto');
+const { safeFetch } = require('../web/web-fetch');
+
+function simpleDiff(oldText, newText) {
+  // Token-ish diff: compare by lines, produce a concise summary of added/removed lines.
+  if (!oldText) return { added: [], removed: [], unchanged: true };
+  const oldLines = new Set(oldText.split('\n').map(l => l.trim()).filter(l => l.length > 8));
+  const newLines = newText.split('\n').map(l => l.trim()).filter(l => l.length > 8);
+  const added = newLines.filter(l => !oldLines.has(l)).slice(0, 20);
+  const removed = [...oldLines].filter(l => !newLines.includes(l)).slice(0, 20);
+  return { added, removed, unchanged: added.length === 0 && removed.length === 0 };
+}
+
+function hashText(text) {
+  return crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
 
 const SYSTEM_PROMPT = `You are a competitive-intelligence analyst. Given a list of competitors, produce a structured snapshot of each.
 
@@ -77,11 +93,12 @@ module.exports = {
       competitors: {
         type: 'array',
         items: { type: 'string' },
-        description: 'List of competitor names or URLs',
+        description: 'List of competitor names or HTTPS URLs. When an HTTPS URL is given, we fetch the page + diff against any prior snapshot in this workspace.',
         minItems: 1,
       },
       our_positioning: { type: 'string', description: 'Short description of our own product for context' },
       category: { type: 'string', description: 'e.g. "AI content marketing", "project management"' },
+      skip_fetch: { type: 'boolean', default: false, description: 'Skip live fetch; use model knowledge only' },
     },
   },
 
@@ -103,9 +120,63 @@ module.exports = {
       message: `Analyzing ${input.competitors.length} competitor${input.competitors.length > 1 ? 's' : ''}...`,
     });
 
+    // Live-fetch HTTPS URLs + diff against prior snapshots (when ctx.db available)
+    const liveFetches = [];
+    const changes = [];
+    if (!input.skip_fetch && ctx.db && ctx.uuidv4) {
+      for (const entry of input.competitors) {
+        if (!/^https:\/\//i.test(entry)) continue;
+        try {
+          ctx.emit('progress', { step: 'fetching', message: `GET ${entry}` });
+          const r = await safeFetch(entry, { maxBytes: 3 * 1024 * 1024, timeoutMs: 20000, extractLinks: false });
+          const digest = (r.text || '').slice(0, 6000);
+          const hash = hashText(digest);
+
+          // Find prior snapshot
+          const prev = await ctx.db.queryOne(
+            'SELECT text_digest, content_hash, captured_at FROM competitor_snapshots WHERE workspace_id = ? AND url = ? ORDER BY captured_at DESC LIMIT 1',
+            [ctx.workspaceId, entry]
+          );
+
+          const diff = prev ? simpleDiff(prev.text_digest, digest) : { added: [], removed: [], unchanged: false };
+
+          liveFetches.push({
+            url: entry,
+            title: r.title,
+            text_length: (r.text || '').length,
+            changed: !!prev && !diff.unchanged,
+            first_seen: !prev,
+            previous_captured_at: prev?.captured_at,
+          });
+
+          if (prev && (diff.added.length || diff.removed.length)) {
+            changes.push({ url: entry, added: diff.added, removed: diff.removed });
+          }
+
+          // Store new snapshot (always — lets us trend over time)
+          await ctx.db.exec(
+            'INSERT INTO competitor_snapshots (id, workspace_id, competitor_name, url, title, text_digest, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [ctx.uuidv4(), ctx.workspaceId, entry, entry, r.title || '', digest, hash]
+          );
+        } catch (e) {
+          ctx.emit('progress', { step: 'fetch-fail', message: `${entry}: ${e.message}` });
+        }
+      }
+    }
+
+    const fetchBlock = liveFetches.length
+      ? '\n\nLive-fetched pages (use these as ground truth for current positioning):\n' +
+        liveFetches.map(f => `  - ${f.url}: ${f.title || '(no title)'} [${f.first_seen ? 'first seen' : f.changed ? 'changed since last capture' : 'unchanged'}]`).join('\n')
+      : '';
+    const diffBlock = changes.length
+      ? '\n\nDetected changes since last snapshot:\n' + changes.map(c =>
+          `  ${c.url}:\n    + ${c.added.slice(0, 3).join(' | ')}\n    - ${c.removed.slice(0, 3).join(' | ')}`
+        ).join('\n')
+      : '';
+
     const userMessage = `Competitors: ${input.competitors.join(', ')}
 ${input.our_positioning ? `Our positioning: ${input.our_positioning}` : ''}
-${input.category ? `Category: ${input.category}` : ''}
+${input.category ? `Category: ${input.category}` : ''}${fetchBlock}${diffBlock}
 
 Produce a competitive snapshot. Call publish_competitor_snapshot.`;
 

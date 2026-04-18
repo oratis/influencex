@@ -13,6 +13,7 @@
  */
 
 const llm = require('../llm');
+const { safeFetch } = require('../web/web-fetch');
 
 const SYSTEM_PROMPT = `You are a voice-of-customer analyst. Given product info (and optionally raw reviews), extract structured insights.
 
@@ -101,6 +102,11 @@ module.exports = {
     properties: {
       product: { type: 'string', description: 'Product name (ours or competitor)' },
       raw_reviews: { type: 'string', description: 'Optional: paste review text to analyze. Max ~30k characters.' },
+      scrape_urls: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Optional: public review pages to fetch + mine (Trustpilot, Capterra, App Store RSS, etc). Max 5 URLs.',
+      },
       audience_context: { type: 'string' },
     },
   },
@@ -118,17 +124,40 @@ module.exports = {
     if (!input?.product) throw new Error('product is required');
     if (!llm.isConfigured()) throw new Error('LLM provider not configured');
 
-    const hasRaw = !!input.raw_reviews?.trim();
+    // Optionally scrape public review URLs. Each URL is fetched safely,
+    // text extracted, and appended to the corpus we hand to Claude.
+    const scraped = [];
+    if (Array.isArray(input.scrape_urls) && input.scrape_urls.length) {
+      const urls = input.scrape_urls.slice(0, 5);
+      ctx.emit('progress', { step: 'scraping', message: `Fetching ${urls.length} review page(s)...` });
+      for (const url of urls) {
+        try {
+          const r = await safeFetch(url, { maxBytes: 2 * 1024 * 1024, timeoutMs: 20000 });
+          scraped.push({ url, title: r.title, text: r.text });
+          ctx.emit('progress', { step: 'scraped', message: `  ✓ ${url}: ${r.text?.length || 0} chars` });
+        } catch (e) {
+          ctx.emit('progress', { step: 'scrape-fail', message: `  ✗ ${url}: ${e.message}` });
+        }
+      }
+    }
+
+    const combinedRaw = [
+      input.raw_reviews || '',
+      ...scraped.map(s => `--- FROM ${s.url} (${s.title || ''}) ---\n${s.text}`),
+    ].filter(Boolean).join('\n\n');
+
+    const hasData = !!combinedRaw.trim();
     ctx.emit('progress', {
       step: 'analyzing',
-      message: hasRaw
-        ? `Mining ${input.raw_reviews.length} characters of review text for "${input.product}"...`
+      message: hasData
+        ? `Mining ${combinedRaw.length} characters of review text for "${input.product}"...`
         : `Synthesizing review patterns for "${input.product}" from model knowledge...`,
     });
 
+    const trimmed = combinedRaw.slice(0, 30000);
     const userMessage = `Product: ${input.product}
 ${input.audience_context ? `Audience: ${input.audience_context}` : ''}
-${hasRaw ? `\nRaw review excerpts (analyze these as the primary source):\n---\n${input.raw_reviews.slice(0, 30000)}\n---` : '(No raw reviews — work from model knowledge, flag confidence)'}
+${hasData ? `\nRaw review excerpts (analyze these as the primary source):\n---\n${trimmed}\n---` : '(No raw reviews — work from model knowledge, flag confidence)'}
 
 Extract insights. Call publish_review_insights.`;
 
@@ -149,6 +178,10 @@ Extract insights. Call publish_review_insights.`;
       message: `${toolUse.input.praise_themes?.length || 0} praise themes, ${toolUse.input.pain_points?.length || 0} pain points, ${toolUse.input.quotable_testimonials?.length || 0} quotes`,
     });
 
-    return { ...toolUse.input, cost: res.usage };
+    return {
+      ...toolUse.input,
+      sources: { scraped_urls: scraped.map(s => ({ url: s.url, title: s.title })) },
+      cost: res.usage,
+    };
   },
 };

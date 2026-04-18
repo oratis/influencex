@@ -9,6 +9,7 @@
  */
 
 const llm = require('../llm');
+const serpapi = require('../web/serpapi');
 
 const SYSTEM_PROMPT = `You are a senior SEO strategist. Given a topic or URL, produce a complete SEO brief.
 
@@ -117,11 +118,36 @@ module.exports = {
 
     ctx.emit('progress', { step: 'analyzing', message: `Researching SEO for "${input.topic.slice(0, 60)}"...` });
 
+    // Optional: enrich with real SERP data when SerpAPI is configured.
+    // This gives the model actual top-ranking URLs + snippets to work from
+    // instead of guessing from training data.
+    let serpBlock = '';
+    let serpSources = null;
+    if (serpapi.isConfigured()) {
+      ctx.emit('progress', { step: 'serp-fetch', message: 'Pulling live Google SERP via SerpAPI...' });
+      try {
+        const [serp, kwIdeas] = await Promise.all([
+          serpapi.search({ query: input.topic, limit: 8, gl: input.geo?.split('-')[1] || 'us' }),
+          serpapi.keywordIdeas({ seed: input.topic }),
+        ]);
+        if (serp.configured && serp.organic?.length) {
+          serpBlock = `\n\nLive SERP data for "${input.topic}" (top ${serp.organic.length} organic results):\n` +
+            serp.organic.map(r => `  ${r.position}. ${r.title}\n     ${r.url}\n     ${r.snippet || ''}`).join('\n') +
+            (serp.related_questions?.length ? `\n\nPeople also ask: ${serp.related_questions.join(' | ')}` : '') +
+            (kwIdeas.suggestions?.length ? `\n\nAutocomplete suggestions: ${kwIdeas.suggestions.slice(0, 10).join(', ')}` : '');
+          serpSources = serp.organic.map(r => ({ title: r.title, url: r.url }));
+          ctx.emit('progress', { step: 'serp-done', message: `Got ${serp.organic.length} organic results + ${kwIdeas.suggestions?.length || 0} suggestions` });
+        }
+      } catch (e) {
+        ctx.emit('progress', { step: 'serp-failed', message: `SerpAPI failed: ${e.message}. Falling back to LLM-only.` });
+      }
+    }
+
     const userMessage = `Topic or URL: ${input.topic}
 ${input.geo ? `Geo/language: ${input.geo}` : ''}
-${input.audience ? `Target audience: ${input.audience}` : ''}
+${input.audience ? `Target audience: ${input.audience}` : ''}${serpBlock}
 
-Produce a complete SEO brief. Call publish_seo_brief.`;
+Produce a complete SEO brief. ${serpBlock ? 'Ground your analysis in the live SERP data above — cite which ranking competitors you\'re analyzing.' : ''} Call publish_seo_brief.`;
 
     const res = await llm.complete({
       messages: [{ role: 'user', content: userMessage }],
@@ -141,6 +167,10 @@ Produce a complete SEO brief. Call publish_seo_brief.`;
       message: `${toolUse.input.secondary_keywords?.length || 0} keywords, ${toolUse.input.on_page?.outline?.length || 0}-section outline`,
     });
 
-    return { ...toolUse.input, cost: res.usage };
+    return {
+      ...toolUse.input,
+      data_sources: { serpapi: !!serpSources, serp_top_urls: serpSources },
+      cost: res.usage,
+    };
   },
 };

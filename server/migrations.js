@@ -122,6 +122,20 @@ const MIGRATIONS = [
           code_verifier TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )`,
+
+        `CREATE TABLE IF NOT EXISTS competitor_snapshots (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          competitor_name TEXT NOT NULL,
+          url TEXT NOT NULL,
+          title TEXT,
+          text_digest TEXT,
+          content_hash TEXT,
+          metadata TEXT DEFAULT '{}',
+          captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+        `CREATE INDEX IF NOT EXISTS idx_comp_snap_workspace ON competitor_snapshots(workspace_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_comp_snap_url ON competitor_snapshots(url)`,
       ];
       for (const s of stmts) {
         try { await exec(s); } catch (e) {
