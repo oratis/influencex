@@ -199,8 +199,16 @@ function sampleInputFor(agent) {
   const samples = {
     strategy: { brand_description: 'A SaaS platform helping indie devs track user analytics without ads' },
     research: { topic: 'AI content marketing for startups', audience: 'SaaS founders' },
-    'content-text': { format: 'twitter', brief: 'Announce our new AI agents feature' },
+    'content-text': { format: 'twitter', brief: 'Announce our new AI agents feature', tier: 'fast' },
+    'content-visual': { brief: 'Minimalist isometric dashboard illustration, soft pastel palette', size: '2k', mode: 'direct' },
+    'content-voice': { text: 'Welcome to the show. This week we look at AI marketing agents.' },
+    'content-video': { brief: 'Announce our new content studio feature', platform: 'shorts', include_voiceover: false },
+    publisher: { content: { title: 'Hi', body: 'Testing publisher', hashtags: ['demo'] }, platforms: ['twitter', 'linkedin'] },
+    'kol-outreach': { campaign_id: 'REPLACE_WITH_CAMPAIGN_ID', min_ai_score: 50, max_drafts: 5 },
     discovery: { keywords: 'gaming', min_subscribers: 10000, max_results: 20 },
+    seo: { topic: 'AI content marketing for indie SaaS', audience: 'SaaS founders' },
+    'competitor-monitor': { competitors: ['HubSpot', 'Jasper', 'Buffer'], our_positioning: 'Open-source AI content platform', category: 'AI content marketing' },
+    'review-miner': { product: 'InfluenceX', audience_context: 'SaaS founders' },
   };
   return JSON.stringify(samples[agent.id] || { input: '...' }, null, 2);
 }

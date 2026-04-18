@@ -16,6 +16,9 @@ function registerAll() {
     require('./content-video'),
     require('./publisher'),
     require('./kol-outreach'),
+    require('./seo'),
+    require('./competitor-monitor'),
+    require('./review-miner'),
     require('./discovery'),
   ];
   for (const a of agents) {

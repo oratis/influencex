@@ -71,6 +71,12 @@ module.exports = {
     properties: {
       format: { type: 'string', enum: ['twitter', 'linkedin', 'blog', 'email', 'caption', 'youtube-short'] },
       brief: { type: 'string', description: 'What this piece should cover' },
+      tier: {
+        type: 'string',
+        enum: ['fast', 'quality'],
+        default: 'quality',
+        description: 'fast = Claude Haiku 4.5 or Gemini Flash (~10% cost, 3x faster, fine for tweets/captions). quality = Claude Sonnet 4.5 (best for blogs, emails, LinkedIn).',
+      },
       brand_voice: {
         type: 'object',
         properties: {
@@ -89,6 +95,7 @@ module.exports = {
 
   costEstimate(input) {
     // Blog pieces are expensive; captions cheap.
+    // Fast tier (Haiku/Flash) costs ~10% of quality tier.
     const baseByFormat = {
       blog: 40,
       linkedin: 18,
@@ -97,7 +104,9 @@ module.exports = {
       twitter: 10,
       caption: 8,
     };
-    return { tokens: 2000, usdCents: baseByFormat[input.format] || 20 };
+    const base = baseByFormat[input.format] || 20;
+    const multiplier = input?.tier === 'fast' ? 0.1 : 1;
+    return { tokens: 2000, usdCents: Math.max(1, Math.round(base * multiplier)) };
   },
 
   async run(input, ctx) {
@@ -123,12 +132,33 @@ ${input.brief}
 
 Write one polished piece. Call write_content.`;
 
+    // Tier → provider+model mapping. `fast` picks the cheapest strong option
+    // available; `quality` (default) uses the flagship Claude Sonnet.
+    // Env vars CONTENT_TEXT_FAST_MODEL / CONTENT_TEXT_QUALITY_MODEL override.
+    const tier = input.tier || 'quality';
+    let provider, model;
+    if (tier === 'fast') {
+      if (process.env.ANTHROPIC_API_KEY) {
+        provider = 'anthropic';
+        model = process.env.CONTENT_TEXT_FAST_MODEL || 'claude-haiku-4-5';
+      } else if (process.env.GOOGLE_AI_API_KEY) {
+        provider = 'google';
+        model = process.env.CONTENT_TEXT_FAST_MODEL || 'gemini-2.5-flash';
+      }
+    } else {
+      // 'quality' — use whatever the default provider is; no explicit model
+      // so llm defaults pick (claude-sonnet-4-5 typically).
+      model = process.env.CONTENT_TEXT_QUALITY_MODEL;
+    }
+
     const res = await llm.complete({
       messages: [{ role: 'user', content: userMessage }],
       system: SYSTEM_PROMPT_BASE,
       tools: [writeTool],
       maxTokens: input.format === 'blog' ? 4000 : 2000,
       temperature: 0.7,
+      provider,
+      model,
     });
 
     const toolUse = (res.toolUses || []).find(t => t.name === 'write_content');
