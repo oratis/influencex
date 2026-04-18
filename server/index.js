@@ -3,9 +3,10 @@ const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
 const path = require('path');
-const { query, queryOne, exec, transaction, initializeDatabase, usePostgres, getQueryStats } = require('./database');
+const { query, queryOne, exec, transaction, initializeDatabase, usePostgres, getQueryStats, scoped } = require('./database');
 const { v4: uuidv4 } = require('uuid');
 const { authMiddleware, registerUser, loginUser, destroySession, getSession } = require('./auth');
+const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId } = require('./workspace-middleware');
 const ga4 = require('./ga4');
 const feishu = require('./feishu');
 const scraper = require('./scraper');
@@ -149,7 +150,13 @@ app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
     const result = await loginUser(email, password);
     if (result.error) return res.status(401).json({ error: result.error });
-    res.json(result);
+
+    // Enrich with workspace info so the client can populate the switcher
+    // immediately and the session has a default workspace to scope requests.
+    const workspaces = await listUserWorkspaces(result.user.id);
+    const currentWorkspaceId = workspaces[0]?.id || null;
+
+    res.json({ ...result, workspaces, currentWorkspaceId });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -172,7 +179,19 @@ app.get(`${BASE_PATH}/api/auth/me`, async (req, res) => {
     const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
     const user = await getSession(token);
     if (!user) return res.status(401).json({ error: 'Not authenticated' });
-    res.json(user);
+    const workspaces = await listUserWorkspaces(user.id);
+    const currentWorkspaceId = workspaces[0]?.id || null;
+    res.json({ ...user, workspaces, currentWorkspaceId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List workspaces the current user is a member of (for switcher UI)
+app.get(`${BASE_PATH}/api/auth/workspaces`, authMiddleware, async (req, res) => {
+  try {
+    const workspaces = await listUserWorkspaces(req.user.id);
+    res.json({ workspaces });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -186,16 +205,29 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
 });
 
 // ==================== Campaign API ====================
+//
+// Workspace-scoped. Legacy clients (no X-Workspace-Id header) automatically
+// resolve to the user's default workspace via the lenient context middleware.
+// The SQL uses scoped() which enforces workspace_id presence in every query.
 
-// List all campaigns
-app.get(`${BASE_PATH}/api/campaigns`, async (req, res) => {
+const lenientWorkspace = workspaceContext({ lenient: true });
+
+// List campaigns in the current workspace
+app.get(`${BASE_PATH}/api/campaigns`, lenientWorkspace, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM campaigns ORDER BY created_at DESC');
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      'SELECT * FROM campaigns WHERE workspace_id = ? ORDER BY created_at DESC',
+      [req.workspace.id]
+    );
     const campaigns = result.rows;
     for (const c of campaigns) {
       c.platforms = JSON.parse(c.platforms || '[]');
       c.filter_criteria = JSON.parse(c.filter_criteria || '{}');
-      const stats = await queryOne("SELECT COUNT(*) as total, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved FROM kols WHERE campaign_id = ?", [c.id]);
+      const stats = await s.queryOne(
+        "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved FROM kols WHERE campaign_id = ? AND workspace_id = ?",
+        [c.id, req.workspace.id]
+      );
       c.kol_total = parseInt(stats.total) || 0;
       c.kol_approved = parseInt(stats.approved) || 0;
     }
@@ -205,14 +237,15 @@ app.get(`${BASE_PATH}/api/campaigns`, async (req, res) => {
   }
 });
 
-// Create campaign
-app.post(`${BASE_PATH}/api/campaigns`, async (req, res) => {
+// Create campaign in the current workspace
+app.post(`${BASE_PATH}/api/campaigns`, lenientWorkspace, async (req, res) => {
   try {
     const { name, description, platforms, daily_target, filter_criteria, budget } = req.body;
     const id = uuidv4();
-    await exec(
-      'INSERT INTO campaigns (id, name, description, platforms, daily_target, filter_criteria, budget) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, name, description || '', JSON.stringify(platforms || []), daily_target || 10, JSON.stringify(filter_criteria || {}), budget || 0]
+    const s = scoped(req.workspace.id);
+    await s.exec(
+      'INSERT INTO campaigns (id, workspace_id, name, description, platforms, daily_target, filter_criteria, budget) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.workspace.id, name, description || '', JSON.stringify(platforms || []), daily_target || 10, JSON.stringify(filter_criteria || {}), budget || 0]
     );
     res.json({ id, name, description, platforms, daily_target, filter_criteria, budget, status: 'active' });
   } catch (e) {
@@ -220,10 +253,14 @@ app.post(`${BASE_PATH}/api/campaigns`, async (req, res) => {
   }
 });
 
-// Get single campaign
-app.get(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
+// Get single campaign — scoped so users can only see campaigns in their workspace
+app.get(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => {
   try {
-    const campaign = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const campaign = await s.queryOne(
+      'SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     campaign.platforms = JSON.parse(campaign.platforms || '[]');
     campaign.filter_criteria = JSON.parse(campaign.filter_criteria || '{}');
@@ -234,13 +271,15 @@ app.get(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
 });
 
 // Update campaign
-app.put(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
+app.put(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => {
   try {
     const { name, description, platforms, daily_target, filter_criteria, status } = req.body;
-    await exec(
-      'UPDATE campaigns SET name=?, description=?, platforms=?, daily_target=?, filter_criteria=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
-      [name, description, JSON.stringify(platforms || []), daily_target, JSON.stringify(filter_criteria || {}), status, req.params.id]
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'UPDATE campaigns SET name=?, description=?, platforms=?, daily_target=?, filter_criteria=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?',
+      [name, description, JSON.stringify(platforms || []), daily_target, JSON.stringify(filter_criteria || {}), status, req.params.id, req.workspace.id]
     );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -248,9 +287,14 @@ app.put(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
 });
 
 // Delete campaign
-app.delete(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/campaigns/:id`, lenientWorkspace, async (req, res) => {
   try {
-    await exec('DELETE FROM campaigns WHERE id = ?', [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'DELETE FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

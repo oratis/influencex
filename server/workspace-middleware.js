@@ -49,34 +49,50 @@ async function findMembership(workspaceId, userId) {
  * Express middleware that resolves + verifies the current workspace.
  *
  * Responses:
- *   400 if no workspace id can be resolved
- *   403 if the user is not a member
+ *   400 if no workspace id can be resolved (strict mode)
+ *   404 if the user is not a member of the resolved workspace
  *   otherwise sets req.workspace + calls next()
+ *
+ * @param {Object} opts
+ * @param {boolean} [opts.lenient] - If true, falls back to the user's
+ *   default workspace when no explicit context is provided. Used for
+ *   legacy (v1) routes so existing clients keep working post-multitenancy.
+ *   Strict (default) routes return 400 when no context is passed.
  */
-async function workspaceContext(req, res, next) {
-  try {
-    if (!req.user?.id) return res.status(401).json({ error: 'Authentication required' });
+function workspaceContext(opts = {}) {
+  const lenient = opts.lenient === true;
 
-    const wsId = resolveWorkspaceId(req);
-    if (!wsId) {
-      return res.status(400).json({
-        error: 'Workspace context required. Provide :workspaceId in URL, X-Workspace-Id header, or workspace_id in body.',
-      });
+  return async function workspaceContextMiddleware(req, res, next) {
+    try {
+      if (!req.user?.id) return res.status(401).json({ error: 'Authentication required' });
+
+      let wsId = resolveWorkspaceId(req);
+
+      if (!wsId && lenient) {
+        // Legacy-compat path: resolve user's default workspace
+        wsId = await getDefaultWorkspaceId(req.user.id);
+      }
+
+      if (!wsId) {
+        return res.status(400).json({
+          error: 'Workspace context required. Provide :workspaceId in URL, X-Workspace-Id header, or workspace_id in body.',
+        });
+      }
+
+      const membership = await findMembership(wsId, req.user.id);
+      if (!membership) {
+        // 404 (not 403) to avoid leaking existence of other workspaces to non-members.
+        return res.status(404).json({ error: 'Workspace not found or you are not a member' });
+      }
+
+      req.workspace = { id: wsId, role: membership.role };
+      req.workspaceRole = membership.role;  // convenience alias for RBAC middleware
+      next();
+    } catch (e) {
+      console.error('[workspace-middleware] error:', e.message);
+      res.status(500).json({ error: 'Workspace middleware error: ' + e.message });
     }
-
-    const membership = await findMembership(wsId, req.user.id);
-    if (!membership) {
-      // 404 (not 403) to avoid leaking existence of other workspaces to non-members.
-      return res.status(404).json({ error: 'Workspace not found or you are not a member' });
-    }
-
-    req.workspace = { id: wsId, role: membership.role };
-    req.workspaceRole = membership.role;  // convenience alias for RBAC middleware
-    next();
-  } catch (e) {
-    console.error('[workspace-middleware] error:', e.message);
-    res.status(500).json({ error: 'Workspace middleware error: ' + e.message });
-  }
+  };
 }
 
 /**

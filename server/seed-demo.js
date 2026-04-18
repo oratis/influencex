@@ -48,7 +48,31 @@ async function seedAdmin() {
   return user.id;
 }
 
-async function seedCampaigns() {
+async function seedWorkspace(ownerUserId) {
+  // The migration already creates one workspace per user, so prefer that.
+  // Fall back to creating one ourselves if it's missing (shouldn't happen).
+  const existing = await queryOne(
+    'SELECT id FROM workspaces WHERE owner_user_id = ? ORDER BY created_at ASC LIMIT 1',
+    [ownerUserId]
+  );
+  if (existing) {
+    console.log(`• workspace already exists (id=${existing.id})`);
+    return existing.id;
+  }
+  const wsId = uuidv4();
+  await exec(
+    'INSERT INTO workspaces (id, name, slug, owner_user_id, plan) VALUES (?, ?, ?, ?, ?)',
+    [wsId, 'Demo Workspace', 'demo-' + wsId.slice(0, 6), ownerUserId, 'starter']
+  );
+  await exec(
+    'INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)',
+    [wsId, ownerUserId, 'admin']
+  );
+  console.log(`• created workspace`);
+  return wsId;
+}
+
+async function seedCampaigns(workspaceId) {
   const campaigns = [
     {
       id: uuidv4(),
@@ -74,15 +98,18 @@ async function seedCampaigns() {
 
   const created = [];
   for (const c of campaigns) {
-    const existing = await queryOne('SELECT id FROM campaigns WHERE name = ?', [c.name]);
+    const existing = await queryOne(
+      'SELECT id FROM campaigns WHERE name = ? AND workspace_id = ?',
+      [c.name, workspaceId]
+    );
     if (existing) {
       console.log(`• campaign "${c.name}" already exists`);
       created.push({ ...c, id: existing.id });
       continue;
     }
     await exec(
-      'INSERT INTO campaigns (id, name, description, platforms, daily_target, budget, filter_criteria, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [c.id, c.name, c.description, c.platforms, c.daily_target, c.budget, c.filter_criteria, c.status]
+      'INSERT INTO campaigns (id, workspace_id, name, description, platforms, daily_target, budget, filter_criteria, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [c.id, workspaceId, c.name, c.description, c.platforms, c.daily_target, c.budget, c.filter_criteria, c.status]
     );
     created.push(c);
     console.log(`• created campaign "${c.name}"`);
@@ -90,7 +117,7 @@ async function seedCampaigns() {
   return created;
 }
 
-async function seedKols(campaigns) {
+async function seedKols(campaigns, workspaceId) {
   const gameCampaign = campaigns.find(c => /Gaming/.test(c.name));
   const aiCampaign = campaigns.find(c => /AI/.test(c.name));
 
@@ -111,9 +138,9 @@ async function seedKols(campaigns) {
     ));
 
     await exec(
-      'INSERT INTO kols (id, campaign_id, platform, username, display_name, followers, engagement_rate, avg_views, category, email, profile_url, ai_score, ai_reason, estimated_cpm, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO kols (id, workspace_id, campaign_id, platform, username, display_name, followers, engagement_rate, avg_views, category, email, profile_url, ai_score, ai_reason, estimated_cpm, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
-        uuidv4(), targetCampaign.id, k.platform, k.username, k.display_name,
+        uuidv4(), workspaceId, targetCampaign.id, k.platform, k.username, k.display_name,
         k.followers, k.engagement_rate, k.avg_views, k.category, k.email,
         `https://${k.platform}.com/@${k.username}`,
         aiScore,
@@ -126,9 +153,12 @@ async function seedKols(campaigns) {
   console.log(`• seeded ${SAMPLE_KOLS.length} KOLs across 2 campaigns`);
 }
 
-async function seedDraftContacts(campaigns) {
+async function seedDraftContacts(workspaceId) {
   // Create draft contacts only for KOLs with an email
-  const kols = await query('SELECT * FROM kols WHERE email IS NOT NULL');
+  const kols = await query(
+    'SELECT * FROM kols WHERE email IS NOT NULL AND workspace_id = ?',
+    [workspaceId]
+  );
   let created = 0;
   for (const kol of kols.rows || []) {
     const existing = await queryOne('SELECT id FROM contacts WHERE kol_id = ?', [kol.id]);
@@ -144,8 +174,8 @@ async function seedDraftContacts(campaigns) {
     });
 
     await exec(
-      'INSERT INTO contacts (id, kol_id, campaign_id, email_subject, email_body, cooperation_type, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [uuidv4(), kol.id, kol.campaign_id, rendered.subject, rendered.body, 'affiliate', 'draft']
+      'INSERT INTO contacts (id, workspace_id, kol_id, campaign_id, email_subject, email_body, cooperation_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [uuidv4(), workspaceId, kol.id, kol.campaign_id, rendered.subject, rendered.body, 'affiliate', 'draft']
     );
     created += 1;
   }
@@ -155,11 +185,16 @@ async function seedDraftContacts(campaigns) {
 async function main() {
   console.log('Seeding InfluenceX demo data...');
   await initializeDatabase();
-  await seedAdmin();
-  const campaigns = await seedCampaigns();
-  await seedKols(campaigns);
-  await seedDraftContacts(campaigns);
-  console.log('\nDone. Log in at /InfluenceX with demo@influencex.dev / demo1234');
+  // Run any pending migrations so workspaces tables exist before we use them.
+  const { runPendingMigrations } = require('./migrations');
+  await runPendingMigrations({ query, queryOne, exec });
+
+  const adminId = await seedAdmin();
+  const workspaceId = await seedWorkspace(adminId);
+  const campaigns = await seedCampaigns(workspaceId);
+  await seedKols(campaigns, workspaceId);
+  await seedDraftContacts(workspaceId);
+  console.log('\nDone. Log in with demo@influencex.dev / demo1234');
   process.exit(0);
 }
 
