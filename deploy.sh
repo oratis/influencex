@@ -5,6 +5,7 @@ PROJECT_ID="gameclaw-492005"
 SERVICE_NAME="influencex"
 REGION="us-central1"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+CLOUD_SQL_INSTANCE="${PROJECT_ID}:${REGION}:influencex-db"
 
 echo "🎯 Deploying InfluenceX to Google Cloud Run..."
 echo "Project: ${PROJECT_ID}"
@@ -31,7 +32,8 @@ gcloud run deploy ${SERVICE_NAME} \
   --cpu 1 \
   --min-instances 0 \
   --max-instances 3 \
-  --update-env-vars "BASE_PATH=/InfluenceX,NODE_ENV=production"
+  --add-cloudsql-instances ${CLOUD_SQL_INSTANCE} \
+  --update-env-vars "BASE_PATH=/InfluenceX,NODE_ENV=production,CLOUD_SQL_CONNECTION=${CLOUD_SQL_INSTANCE}"
 
 echo ""
 echo "✅ Deployment complete!"

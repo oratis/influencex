@@ -48,3 +48,7 @@ service-account*.json
 tmp/
 temp/
 .cache/
+
+# Claude Code session state
+.claude/scheduled_tasks.lock
+.claude/*.lock

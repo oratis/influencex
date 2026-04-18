@@ -9,25 +9,42 @@ let db = null; // SQLite fallback
 
 if (usePostgres) {
   const { Pool } = require('pg');
-  const CLOUD_SQL_CONNECTION = process.env.CLOUD_SQL_CONNECTION || 'gameclaw-492005:us-central1:influencex-db';
+  const CLOUD_SQL_CONNECTION = process.env.CLOUD_SQL_CONNECTION || '';
 
-  // On Cloud Run, connect via Unix socket; otherwise use DATABASE_URL directly
-  const poolConfig = process.env.K_SERVICE
-    ? {
-        user: process.env.DB_USER || 'postgres',
-        password: process.env.DB_PASS || '',
-        database: process.env.DB_NAME || 'influencex',
-        host: `/cloudsql/${CLOUD_SQL_CONNECTION}`,
-        max: 10,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000,
-      }
-    : {
-        connectionString: DATABASE_URL,
-        max: 20,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 5000,
+  // On Cloud Run with Cloud SQL attached, K_SERVICE and CLOUD_SQL_CONNECTION
+  // are both set — we connect via Unix socket, parsing credentials out of
+  // DATABASE_URL (so users don't have to set them twice). DB_USER / DB_PASS /
+  // DB_NAME env vars take precedence if explicitly set.
+  //
+  // Outside Cloud Run we use the DATABASE_URL connection string directly.
+  let poolConfig;
+  if (process.env.K_SERVICE && CLOUD_SQL_CONNECTION) {
+    let parsed = {};
+    try {
+      const u = new URL(DATABASE_URL);
+      parsed = {
+        user: decodeURIComponent(u.username || ''),
+        password: decodeURIComponent(u.password || ''),
+        database: (u.pathname || '').replace(/^\//, ''),
       };
+    } catch { /* fall through to env-var defaults */ }
+    poolConfig = {
+      user: process.env.DB_USER || parsed.user || 'postgres',
+      password: process.env.DB_PASS || parsed.password || '',
+      database: process.env.DB_NAME || parsed.database || 'postgres',
+      host: `/cloudsql/${CLOUD_SQL_CONNECTION}`,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    };
+  } else {
+    poolConfig = {
+      connectionString: DATABASE_URL,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    };
+  }
 
   pool = new Pool(poolConfig);
 
