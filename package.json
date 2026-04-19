@@ -12,7 +12,15 @@
     "test:watch": "node --test --watch 'server/__tests__/*.test.js'",
     "seed": "node server/seed-demo.js"
   },
-  "keywords": ["kol", "influencer-marketing", "creator-economy", "youtube", "tiktok", "crm", "automation"],
+  "keywords": [
+    "kol",
+    "influencer-marketing",
+    "creator-economy",
+    "youtube",
+    "tiktok",
+    "crm",
+    "automation"
+  ],
   "author": "",
   "license": "MIT",
   "repository": {
@@ -35,6 +43,7 @@
     "nodemailer": "^8.0.4",
     "pg": "^8.13.0",
     "resend": "^6.10.0",
+    "stripe": "^22.0.2",
     "undici": "^8.0.0",
     "uuid": "^13.0.0"
   }

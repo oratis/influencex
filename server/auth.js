@@ -140,4 +140,4 @@ async function cleanupExpiredSessions() {
 // Run cleanup every hour
 setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
 
-module.exports = { authMiddleware, registerUser, loginUser, destroySession, getSession, cleanupExpiredSessions };
+module.exports = { authMiddleware, registerUser, loginUser, destroySession, getSession, cleanupExpiredSessions, createSession };

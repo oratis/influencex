@@ -6,6 +6,8 @@ const path = require('path');
 const { query, queryOne, exec, transaction, initializeDatabase, usePostgres, getQueryStats, scoped } = require('./database');
 const { v4: uuidv4 } = require('uuid');
 const { authMiddleware, registerUser, loginUser, destroySession, getSession } = require('./auth');
+const authGoogle = require('./auth-google');
+const billing = require('./billing');
 const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId } = require('./workspace-middleware');
 const ga4 = require('./ga4');
 const feishu = require('./feishu');
@@ -92,6 +94,9 @@ app.use((req, res, next) => {
     express.json({
       verify: (req, _res, buf) => { req.rawBody = buf; }
     })(req, res, next);
+  } else if (req.path === `${BASE_PATH}/api/billing/webhook`) {
+    // Stripe webhook needs the raw string body for signature verification
+    express.raw({ type: 'application/json' })(req, res, next);
   } else {
     express.json()(req, res, next);
   }
@@ -189,6 +194,96 @@ app.get(`${BASE_PATH}/api/auth/me`, async (req, res) => {
     res.json({ ...user, workspaces, currentWorkspaceId });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Google SSO — initiate flow
+app.get(`${BASE_PATH}/api/auth/google/init`, (req, res) => {
+  try {
+    if (!authGoogle.isConfigured()) return res.status(501).json({ error: 'Google SSO not configured on this deployment' });
+    const { url } = authGoogle.buildAuthorizeUrl({ returnTo: req.query.returnTo });
+    res.json({ url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Google SSO — callback (browser redirect target). On success, creates a
+// session and redirects to the SPA with `#token=...` so the client can
+// persist it without leaking the token via Referer headers.
+app.get(`${BASE_PATH}/api/auth/google/callback`, async (req, res) => {
+  try {
+    const { code, state, error: gErr } = req.query;
+    if (gErr) return res.redirect(`${BASE_PATH}/auth?sso_error=${encodeURIComponent(gErr)}`);
+    if (!code || !state) return res.redirect(`${BASE_PATH}/auth?sso_error=missing_code_or_state`);
+    const stateEntry = authGoogle.consumeState(state);
+    if (!stateEntry) return res.redirect(`${BASE_PATH}/auth?sso_error=invalid_state`);
+    const profile = await authGoogle.exchangeCodeForIdentity(code);
+    const userId = await authGoogle.upsertUserFromGoogle(profile);
+    const { createSession } = require('./auth');
+    const session = await createSession(userId);
+    // Return to app with token in URL fragment (never leaves the browser).
+    const returnTo = stateEntry.returnTo || '/';
+    const safeReturn = returnTo.startsWith('/') ? returnTo : '/';
+    res.redirect(`${BASE_PATH}${safeReturn}#sso_token=${encodeURIComponent(session.token)}`);
+  } catch (e) {
+    console.error('[google sso callback]', e);
+    res.redirect(`${BASE_PATH}/auth?sso_error=${encodeURIComponent(e.message.slice(0, 80))}`);
+  }
+});
+
+app.get(`${BASE_PATH}/api/auth/google/status`, (req, res) => {
+  res.json({ configured: authGoogle.isConfigured() });
+});
+
+// --- Stripe billing -------------------------------------------------------
+// Public: list plans + configured state (so the Billing page can render w/o auth timing)
+app.get(`${BASE_PATH}/api/billing/plans`, (req, res) => {
+  res.json({ configured: billing.isConfigured(), plans: billing.listPlans() });
+});
+
+// Authenticated: current workspace's subscription
+app.get(`${BASE_PATH}/api/billing/subscription`, authMiddleware, workspaceContext, async (req, res) => {
+  try {
+    const sub = await billing.getSubscription(req.workspace.id);
+    res.json(sub);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Start a Stripe Checkout session for a paid plan
+app.post(`${BASE_PATH}/api/billing/checkout`, authMiddleware, workspaceContext, async (req, res) => {
+  try {
+    const { plan } = req.body;
+    if (!plan) return res.status(400).json({ error: 'plan is required' });
+    const result = await billing.createCheckoutSession({
+      workspaceId: req.workspace.id,
+      userEmail: req.user.email,
+      planId: plan,
+    });
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Open Stripe Customer Portal (change plan / update card / cancel)
+app.post(`${BASE_PATH}/api/billing/portal`, authMiddleware, workspaceContext, async (req, res) => {
+  try {
+    const result = await billing.createPortalSession({ workspaceId: req.workspace.id });
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Stripe webhook — receives events (signed). Must use the raw body.
+app.post(`${BASE_PATH}/api/billing/webhook`, async (req, res) => {
+  try {
+    const signature = req.headers['stripe-signature'];
+    if (!signature) return res.status(400).json({ error: 'Missing stripe-signature header' });
+    const event = billing.verifyWebhookSignature(req.body, signature);
+    // Respond 200 immediately; processing is async-safe
+    res.json({ received: true });
+    billing.handleWebhookEvent(event).catch(e => console.error('[stripe webhook]', e));
+  } catch (e) {
+    console.error('[stripe webhook verify]', e.message);
+    res.status(400).json({ error: `Webhook Error: ${e.message}` });
   }
 });
 
@@ -1915,6 +2010,51 @@ app.get(`${BASE_PATH}/api/publish/oauth/:provider/callback`, async (req, res) =>
   }
 });
 
+// API-key connect — for Medium / Ghost / WordPress (non-OAuth platforms).
+// Body: { fields: { <field_name>: value, ... } } matching provider.fields
+app.post(`${BASE_PATH}/api/publish/connect/:platform`, async (req, res) => {
+  try {
+    const platform = req.params.platform;
+    const provider = publishOauth.getProvider(platform);
+    if (!provider) return res.status(404).json({ error: 'Unknown platform' });
+    if (provider.kind !== 'api_key') return res.status(400).json({ error: 'Use OAuth init endpoint for this platform' });
+
+    const { fields } = req.body || {};
+    if (!fields || typeof fields !== 'object') return res.status(400).json({ error: 'fields object is required' });
+
+    // Validate required fields are present
+    for (const f of provider.fields) {
+      if (!fields[f.name] || String(fields[f.name]).trim() === '') {
+        return res.status(400).json({ error: `Missing field: ${f.name}` });
+      }
+    }
+
+    // Account label for the UI — best-effort.
+    let accountName = fields.site_url || fields.username || fields.integration_token?.slice(0, 8) || platform;
+    try { if (fields.site_url) accountName = new URL(fields.site_url).hostname; } catch {}
+
+    const existing = await queryOne(
+      'SELECT id FROM platform_connections WHERE workspace_id = ? AND platform = ?',
+      [req.workspace.id, platform]
+    );
+    const metadata = JSON.stringify(fields);
+    if (existing) {
+      await exec(
+        'UPDATE platform_connections SET account_name=?, metadata=?, connected_at=CURRENT_TIMESTAMP, connected_by=? WHERE id=?',
+        [accountName, metadata, req.user.id, existing.id]
+      );
+    } else {
+      await exec(
+        'INSERT INTO platform_connections (id, workspace_id, platform, account_name, metadata, connected_by) VALUES (?, ?, ?, ?, ?, ?)',
+        [uuidv4(), req.workspace.id, platform, accountName, metadata, req.user.id]
+      );
+    }
+    res.json({ success: true, account_name: accountName });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
@@ -1933,7 +2073,7 @@ app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, async (req, res) => {
 app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
   try {
     const platform = req.params.platform;
-    const { text, image_url } = req.body;
+    const { text, image_url, title, tags } = req.body;
     if (!text) return res.status(400).json({ error: 'text is required' });
 
     const s = scoped(req.workspace.id);
@@ -1943,7 +2083,12 @@ app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
     );
     if (!conn) return res.status(400).json({ error: `${platform} not connected for this workspace` });
 
-    const result = await publishOauth.publishDirect(platform, conn.access_token, { text, imageUrl: image_url });
+    const provider = publishOauth.getProvider(platform);
+    // API-key platforms store their creds JSON in metadata; OAuth platforms use access_token.
+    const credentials = provider?.kind === 'api_key'
+      ? (() => { try { return JSON.parse(conn.metadata || '{}'); } catch { return {}; } })()
+      : conn.access_token;
+    const result = await publishOauth.publishDirect(platform, credentials, { text, title, tags, imageUrl: image_url });
 
     await exec(
       'UPDATE platform_connections SET last_used_at=CURRENT_TIMESTAMP WHERE id=?',

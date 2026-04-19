@@ -146,6 +146,50 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-19-sso-billing-blog',
+    description: 'Google SSO sub on users, subscriptions + plans for Stripe billing, blog-platform connection extensions',
+    up: async ({ exec }) => {
+      // Google SSO — add a nullable `google_sub` column so we can link
+      // an OAuth identity to an existing email-password user or bootstrap
+      // a new user without a password.
+      for (const stmt of [
+        'ALTER TABLE users ADD COLUMN google_sub TEXT',
+        'ALTER TABLE users ADD COLUMN google_picture TEXT',
+        // Password becomes optional for SSO-only users
+        'ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL',
+      ]) {
+        try { await exec(stmt); } catch (e) {
+          // Some dialects don't need the DROP NOT NULL; ignore errors
+          // that are either "already exists" or "column already nullable".
+          if (!/duplicate|already exists|does not exist|not null constraint/i.test(e.message)) throw e;
+        }
+      }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)'); } catch {}
+
+      // Stripe billing — subscriptions scoped to workspace. A workspace has
+      // at most one active subscription; historical rows are kept for audit.
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS subscriptions (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          stripe_customer_id TEXT,
+          stripe_subscription_id TEXT,
+          stripe_price_id TEXT,
+          plan TEXT DEFAULT 'free',
+          status TEXT DEFAULT 'active',
+          current_period_end TIMESTAMP,
+          seats INTEGER DEFAULT 1,
+          metadata TEXT DEFAULT '{}',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_subscriptions_workspace ON subscriptions(workspace_id)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_id)'); } catch {}
+    },
+  },
+
+  {
     id: '2026-04-19-agent-runtime-tables',
     description: 'Create agents, agent_runs, agent_traces, content_pieces, brand_voices tables for Phase A Week 2',
     up: async ({ exec }) => {

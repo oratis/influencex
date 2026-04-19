@@ -23,6 +23,7 @@ const PROVIDERS = {
   twitter: {
     id: 'twitter',
     label: 'X (Twitter)',
+    kind: 'oauth',
     authUrl: 'https://twitter.com/i/oauth2/authorize',
     tokenUrl: 'https://api.twitter.com/2/oauth2/token',
     userInfoUrl: 'https://api.twitter.com/2/users/me',
@@ -34,6 +35,7 @@ const PROVIDERS = {
   linkedin: {
     id: 'linkedin',
     label: 'LinkedIn',
+    kind: 'oauth',
     authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
     tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
     userInfoUrl: 'https://api.linkedin.com/v2/userinfo',
@@ -41,6 +43,41 @@ const PROVIDERS = {
     usesPKCE: false,
     clientIdEnv: 'LINKEDIN_CLIENT_ID',
     clientSecretEnv: 'LINKEDIN_CLIENT_SECRET',
+  },
+  // --- API-key-based blog platforms. No OAuth dance — the user provides
+  // credentials directly and we store them in platform_connections. The
+  // "configured" flag is always true; configuration happens per-user.
+  medium: {
+    id: 'medium',
+    label: 'Medium',
+    kind: 'api_key',
+    fields: [
+      { name: 'integration_token', label: 'Integration Token', type: 'password',
+        help: 'Create at https://medium.com/me/settings → Integration tokens' },
+    ],
+  },
+  ghost: {
+    id: 'ghost',
+    label: 'Ghost',
+    kind: 'api_key',
+    fields: [
+      { name: 'site_url', label: 'Ghost Site URL', type: 'text',
+        help: 'e.g. https://yoursite.ghost.io — no trailing slash' },
+      { name: 'admin_api_key', label: 'Admin API Key', type: 'password',
+        help: 'Ghost Admin → Integrations → Add custom integration' },
+    ],
+  },
+  wordpress: {
+    id: 'wordpress',
+    label: 'WordPress',
+    kind: 'api_key',
+    fields: [
+      { name: 'site_url', label: 'Site URL', type: 'text',
+        help: 'e.g. https://yoursite.com — self-hosted WP with REST API enabled' },
+      { name: 'username', label: 'Username', type: 'text' },
+      { name: 'application_password', label: 'Application Password', type: 'password',
+        help: 'WP Admin → Users → Profile → Application Passwords' },
+    ],
   },
 };
 
@@ -51,6 +88,7 @@ function getProvider(name) {
 function isConfigured(name) {
   const p = PROVIDERS[name];
   if (!p) return false;
+  if (p.kind === 'api_key') return true; // User provides creds directly
   return !!(process.env[p.clientIdEnv] && process.env[p.clientSecretEnv]);
 }
 
@@ -58,8 +96,10 @@ function listProviders() {
   return Object.values(PROVIDERS).map(p => ({
     id: p.id,
     label: p.label,
+    kind: p.kind || 'oauth',
     configured: isConfigured(p.id),
-    scope: p.scope,
+    scope: p.scope || null,
+    fields: p.fields || null,
   }));
 }
 
@@ -180,13 +220,15 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
  * Post content directly to the platform using a stored access token.
  * Returns { success, platform_post_id?, url?, error? }.
  */
-async function publishDirect(providerName, accessToken, { text, imageUrl }) {
-  if (providerName === 'twitter') {
-    return publishTwitter(accessToken, { text });
-  }
-  if (providerName === 'linkedin') {
-    return publishLinkedIn(accessToken, { text });
-  }
+async function publishDirect(providerName, credentials, { text, title, imageUrl, tags }) {
+  // For OAuth providers, `credentials` is an access token (string).
+  // For API-key providers, `credentials` is a JSON object with the fields
+  // captured at connection time (decoded from platform_connections.metadata).
+  if (providerName === 'twitter')   return publishTwitter(credentials, { text });
+  if (providerName === 'linkedin')  return publishLinkedIn(credentials, { text });
+  if (providerName === 'medium')    return publishMedium(credentials, { text, title, tags });
+  if (providerName === 'ghost')     return publishGhost(credentials, { text, title, tags });
+  if (providerName === 'wordpress') return publishWordPress(credentials, { text, title, tags });
   return { success: false, error: `Direct publishing not implemented for ${providerName}` };
 }
 
@@ -246,6 +288,132 @@ async function publishLinkedIn(accessToken, { text }) {
     success: true,
     platform_post_id: data.id,
   };
+}
+
+// --- Blog platforms ------------------------------------------------------
+
+async function publishMedium(creds, { text, title, tags }) {
+  const token = typeof creds === 'string' ? creds : creds.integration_token;
+  if (!token) return { success: false, error: 'Medium integration_token missing' };
+  // Resolve user id
+  const meRes = await fetch('https://api.medium.com/v1/me', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!meRes.ok) return { success: false, error: `Medium /me ${meRes.status}` };
+  const me = await meRes.json();
+  const userId = me?.data?.id;
+  if (!userId) return { success: false, error: 'Medium could not resolve user id' };
+
+  const res = await fetch(`https://api.medium.com/v1/users/${userId}/posts`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: title || (text || '').split('\n')[0].slice(0, 100) || 'Untitled',
+      contentFormat: 'markdown',
+      content: text,
+      tags: Array.isArray(tags) ? tags.slice(0, 5) : [],
+      publishStatus: 'public',
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `Medium API ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  return { success: true, platform_post_id: data.data?.id, url: data.data?.url };
+}
+
+async function publishGhost(creds, { text, title, tags }) {
+  const siteUrl = (creds.site_url || '').replace(/\/$/, '');
+  const adminKey = creds.admin_api_key;
+  if (!siteUrl || !adminKey) return { success: false, error: 'Ghost site_url and admin_api_key required' };
+
+  // Ghost admin key format: "<id>:<secret>". Build a short-lived JWT.
+  const [keyid, secret] = adminKey.split(':');
+  if (!keyid || !secret) return { success: false, error: 'Invalid Ghost admin key format (expected id:secret)' };
+  const header = base64urlEncode(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT', kid: keyid })));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = base64urlEncode(Buffer.from(JSON.stringify({ iat: now, exp: now + 300, aud: '/admin/' })));
+  const sigBase = `${header}.${payload}`;
+  const sig = base64urlEncode(
+    crypto.createHmac('sha256', Buffer.from(secret, 'hex')).update(sigBase).digest()
+  );
+  const token = `${sigBase}.${sig}`;
+
+  const endpoint = `${siteUrl}/ghost/api/admin/posts/?source=html`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Ghost ${token}` },
+    body: JSON.stringify({
+      posts: [{
+        title: title || (text || '').split('\n')[0].slice(0, 100) || 'Untitled',
+        html: markdownToHtml(text || ''),
+        status: 'published',
+        tags: (Array.isArray(tags) ? tags : []).map(t => ({ name: t })),
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `Ghost API ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  const post = data.posts?.[0];
+  return { success: true, platform_post_id: post?.id, url: post?.url };
+}
+
+async function publishWordPress(creds, { text, title, tags }) {
+  const siteUrl = (creds.site_url || '').replace(/\/$/, '');
+  if (!siteUrl || !creds.username || !creds.application_password) {
+    return { success: false, error: 'WordPress site_url, username and application_password required' };
+  }
+  const basic = Buffer.from(`${creds.username}:${creds.application_password}`).toString('base64');
+  const endpoint = `${siteUrl}/wp-json/wp/v2/posts`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Basic ${basic}` },
+    body: JSON.stringify({
+      title: title || (text || '').split('\n')[0].slice(0, 100) || 'Untitled',
+      content: markdownToHtml(text || ''),
+      status: 'publish',
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `WordPress API ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  return { success: true, platform_post_id: String(data.id), url: data.link };
+}
+
+// Minimal markdown → HTML for blog post bodies. Not a full parser — covers
+// the cases the content-text agent actually produces.
+function markdownToHtml(md) {
+  if (!md) return '';
+  let html = md;
+  // Code fences first so we don't process their content.
+  html = html.replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code class="language-${(lang || '').trim()}">${escapeHtml(code)}</code></pre>`);
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHtml(c)}</code>`);
+  // Headings
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>')
+             .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+             .replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // Bold / italic
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+             .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Links
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  // Paragraphs: split on blank lines
+  html = html.split(/\n\n+/).map(block => {
+    if (/^<(h\d|pre|ul|ol|blockquote)/.test(block)) return block;
+    return `<p>${block.replace(/\n/g, '<br>')}</p>`;
+  }).join('\n');
+  return html;
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 module.exports = {

@@ -8,6 +8,17 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // SSO return path: /auth/callback sets #sso_token=<token> in the URL
+    // fragment. Drain it before calling auth.me.
+    if (window.location.hash.includes('sso_token=')) {
+      const m = window.location.hash.match(/sso_token=([^&]+)/);
+      if (m) {
+        auth.setToken(decodeURIComponent(m[1]));
+        // Strip the token from the URL so it isn't visible in history.
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+    }
+
     // Check for existing session on mount
     const token = auth.getToken();
     if (token) {

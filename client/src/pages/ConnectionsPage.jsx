@@ -10,6 +10,9 @@ export default function ConnectionsPage() {
   const [platforms, setPlatforms] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [apiKeyModal, setApiKeyModal] = useState(null); // provider obj or null
+  const [apiKeyValues, setApiKeyValues] = useState({});
+  const [apiKeySaving, setApiKeySaving] = useState(false);
   const toast = useToast();
   const { confirm: confirmDialog } = useConfirm();
 
@@ -28,6 +31,14 @@ export default function ConnectionsPage() {
   }
 
   async function handleConnect(platform) {
+    const p = platforms.find(x => x.id === platform);
+    if (p?.kind === 'api_key') {
+      const initial = {};
+      for (const f of (p.fields || [])) initial[f.name] = '';
+      setApiKeyValues(initial);
+      setApiKeyModal(p);
+      return;
+    }
     try {
       const r = await api.initOAuth(platform);
       // Open in a new tab — callback writes to DB
@@ -54,6 +65,36 @@ export default function ConnectionsPage() {
       toast.success('Disconnected');
       loadAll();
     } catch (e) { toast.error(e.message); }
+  }
+
+  async function handleApiKeySubmit() {
+    if (!apiKeyModal) return;
+    // Validate all fields present
+    for (const f of apiKeyModal.fields) {
+      if (!apiKeyValues[f.name] || String(apiKeyValues[f.name]).trim() === '') {
+        toast.error(`${f.label} is required`);
+        return;
+      }
+    }
+    setApiKeySaving(true);
+    try {
+      const token = localStorage.getItem('influencex_token');
+      const ws = window.__influencex_workspace_id;
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      if (ws) headers['X-Workspace-Id'] = ws;
+      const r = await fetch(`/api/publish/connect/${apiKeyModal.id}`, {
+        method: 'POST', headers, body: JSON.stringify({ fields: apiKeyValues }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Failed to connect');
+      toast.success(`Connected ${apiKeyModal.label} as ${data.account_name}`);
+      setApiKeyModal(null);
+      loadAll();
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setApiKeySaving(false);
   }
 
   async function handleCancelSchedule(id) {
@@ -176,6 +217,43 @@ export default function ConnectionsPage() {
           </div>
         )}
       </div>
+
+      {apiKeyModal && (
+        <div onClick={() => !apiKeySaving && setApiKeyModal(null)} style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 100,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div onClick={e => e.stopPropagation()} className="card" style={{
+            maxWidth: 480, width: '90%', padding: 24,
+          }}>
+            <h3 style={{ marginTop: 0 }}>Connect {apiKeyModal.label}</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 16 }}>
+              Your credentials are stored encrypted and used only to publish on your behalf.
+            </p>
+            {apiKeyModal.fields.map(f => (
+              <div key={f.name} style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
+                  {f.label}
+                </label>
+                <input
+                  type={f.type === 'password' ? 'password' : 'text'}
+                  value={apiKeyValues[f.name] || ''}
+                  onChange={e => setApiKeyValues(v => ({ ...v, [f.name]: e.target.value }))}
+                  className="form-input"
+                  style={{ width: '100%' }}
+                />
+                {f.help && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{f.help}</div>}
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+              <button className="btn btn-secondary" onClick={() => setApiKeyModal(null)} disabled={apiKeySaving}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleApiKeySubmit} disabled={apiKeySaving}>
+                {apiKeySaving ? 'Connecting…' : 'Connect'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
