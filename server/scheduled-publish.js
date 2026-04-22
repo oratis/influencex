@@ -89,6 +89,7 @@ async function processDue(deps) {
               title: content.title,
               imageUrl: content.image_url,
               tags: content.hashtags,
+              accountId: conn.account_id,
             });
             perPlatform.push({ platform, ...r });
             await exec('UPDATE platform_connections SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', [conn.id]).catch(() => {});

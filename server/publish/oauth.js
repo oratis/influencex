@@ -44,6 +44,21 @@ const PROVIDERS = {
     clientIdEnv: 'LINKEDIN_CLIENT_ID',
     clientSecretEnv: 'LINKEDIN_CLIENT_SECRET',
   },
+  instagram: {
+    id: 'instagram',
+    label: 'Instagram (Business)',
+    kind: 'oauth',
+    // Meta Graph uses Facebook Login; the IG Business account must be linked
+    // to a Facebook Page the user admins.
+    authUrl: 'https://www.facebook.com/v18.0/dialog/oauth',
+    tokenUrl: 'https://graph.facebook.com/v18.0/oauth/access_token',
+    // Resolved per-account via /me/accounts → page → instagram_business_account.
+    userInfoUrl: null,
+    scope: 'instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement',
+    usesPKCE: false,
+    clientIdEnv: 'META_APP_ID',
+    clientSecretEnv: 'META_APP_SECRET',
+  },
   // --- API-key-based blog platforms. No OAuth dance — the user provides
   // credentials directly and we store them in platform_connections. The
   // "configured" flag is always true; configuration happens per-user.
@@ -180,6 +195,8 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
     body.set('client_secret', clientSecret);
   }
 
+  // Meta's token endpoint accepts GET with query params; POST also works but
+  // some SDKs report quirks. We stay with POST form-encoded for consistency.
   const res = await fetch(p.tokenUrl, { method: 'POST', headers, body: body.toString() });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -189,30 +206,74 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
 
   // Fetch account info
   let accountName = null, accountId = null;
-  try {
-    const userRes = await fetch(p.userInfoUrl, {
-      headers: { 'Authorization': `Bearer ${data.access_token}` },
-    });
-    if (userRes.ok) {
-      const user = await userRes.json();
-      if (providerName === 'twitter') {
-        accountId = user.data?.id;
-        accountName = user.data?.username || user.data?.name;
-      } else if (providerName === 'linkedin') {
-        accountId = user.sub;
-        accountName = user.name || user.email;
+  let accessToken = data.access_token;
+  let expiresIn = data.expires_in || null;
+  let metadata = null;
+
+  if (providerName === 'instagram') {
+    // Meta flow: short-lived user token → long-lived user token → pick Page →
+    // read its `instagram_business_account`. We store the Page access token
+    // (long-lived) and the IG Business user id.
+    try {
+      const llRes = await fetch(
+        `https://graph.facebook.com/v18.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&fb_exchange_token=${encodeURIComponent(data.access_token)}`
+      );
+      if (llRes.ok) {
+        const ll = await llRes.json();
+        if (ll.access_token) { accessToken = ll.access_token; expiresIn = ll.expires_in || expiresIn; }
       }
-    }
-  } catch { /* ok, optional */ }
+      const pagesRes = await fetch(
+        `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token,instagram_business_account&access_token=${encodeURIComponent(accessToken)}`
+      );
+      if (pagesRes.ok) {
+        const pages = await pagesRes.json();
+        const linked = (pages.data || []).find(pg => pg.instagram_business_account?.id);
+        if (linked) {
+          accessToken = linked.access_token || accessToken;
+          accountId = linked.instagram_business_account.id;
+          metadata = { page_id: linked.id, page_name: linked.name, ig_user_id: accountId };
+          // Resolve IG username for display
+          try {
+            const igRes = await fetch(
+              `https://graph.facebook.com/v18.0/${accountId}?fields=username&access_token=${encodeURIComponent(accessToken)}`
+            );
+            if (igRes.ok) {
+              const ig = await igRes.json();
+              accountName = ig.username ? `@${ig.username}` : linked.name;
+            } else {
+              accountName = linked.name;
+            }
+          } catch { accountName = linked.name; }
+        }
+      }
+    } catch { /* ok, optional */ }
+  } else if (p.userInfoUrl) {
+    try {
+      const userRes = await fetch(p.userInfoUrl, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+      if (userRes.ok) {
+        const user = await userRes.json();
+        if (providerName === 'twitter') {
+          accountId = user.data?.id;
+          accountName = user.data?.username || user.data?.name;
+        } else if (providerName === 'linkedin') {
+          accountId = user.sub;
+          accountName = user.name || user.email;
+        }
+      }
+    } catch { /* ok, optional */ }
+  }
 
   return {
-    access_token: data.access_token,
+    access_token: accessToken,
     refresh_token: data.refresh_token || null,
-    expires_in: data.expires_in || null,
+    expires_in: expiresIn,
     scope: data.scope || p.scope,
     token_type: data.token_type || 'Bearer',
     account_name: accountName,
     account_id: accountId,
+    metadata,
   };
 }
 
@@ -220,12 +281,14 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
  * Post content directly to the platform using a stored access token.
  * Returns { success, platform_post_id?, url?, error? }.
  */
-async function publishDirect(providerName, credentials, { text, title, imageUrl, tags }) {
+async function publishDirect(providerName, credentials, payload) {
+  const { text, title, imageUrl, tags, accountId } = payload || {};
   // For OAuth providers, `credentials` is an access token (string).
   // For API-key providers, `credentials` is a JSON object with the fields
   // captured at connection time (decoded from platform_connections.metadata).
   if (providerName === 'twitter')   return publishTwitter(credentials, { text });
   if (providerName === 'linkedin')  return publishLinkedIn(credentials, { text });
+  if (providerName === 'instagram') return publishInstagram(credentials, { text, imageUrl, igUserId: accountId });
   if (providerName === 'medium')    return publishMedium(credentials, { text, title, tags });
   if (providerName === 'ghost')     return publishGhost(credentials, { text, title, tags });
   if (providerName === 'wordpress') return publishWordPress(credentials, { text, title, tags });
@@ -287,6 +350,62 @@ async function publishLinkedIn(accessToken, { text }) {
   return {
     success: true,
     platform_post_id: data.id,
+  };
+}
+
+// --- Instagram (Meta Graph API) -----------------------------------------
+
+/**
+ * Instagram Business publishing via Meta Graph API. Two-step flow:
+ *   1) POST /{ig-user-id}/media with image_url + caption → returns creation_id
+ *   2) POST /{ig-user-id}/media_publish with creation_id  → returns post id
+ *
+ * Notes:
+ *   - Requires a public `imageUrl` (Meta fetches it server-side). Captions-only
+ *     (no image) are not supported by Instagram's Content Publishing API.
+ *   - `accessToken` is the Page access token stored at connection time.
+ *   - `igUserId` is the IG Business user id stored in platform_connections.account_id.
+ */
+async function publishInstagram(accessToken, { text, imageUrl, igUserId }) {
+  if (!igUserId) return { success: false, error: 'Instagram connection missing ig_user_id (reconnect account)' };
+  if (!imageUrl) return { success: false, error: 'Instagram requires a public image_url — text-only posts are not supported' };
+
+  // Step 1: create media container
+  const createParams = new URLSearchParams({
+    image_url: imageUrl,
+    caption: text || '',
+    access_token: accessToken,
+  });
+  const createRes = await fetch(
+    `https://graph.facebook.com/v18.0/${encodeURIComponent(igUserId)}/media`,
+    { method: 'POST', body: createParams }
+  );
+  if (!createRes.ok) {
+    const errText = await createRes.text().catch(() => '');
+    return { success: false, error: `Instagram create ${createRes.status}: ${errText.slice(0, 300)}` };
+  }
+  const createData = await createRes.json();
+  const creationId = createData.id;
+  if (!creationId) return { success: false, error: 'Instagram create returned no id' };
+
+  // Step 2: publish the container
+  const publishParams = new URLSearchParams({
+    creation_id: creationId,
+    access_token: accessToken,
+  });
+  const pubRes = await fetch(
+    `https://graph.facebook.com/v18.0/${encodeURIComponent(igUserId)}/media_publish`,
+    { method: 'POST', body: publishParams }
+  );
+  if (!pubRes.ok) {
+    const errText = await pubRes.text().catch(() => '');
+    return { success: false, error: `Instagram publish ${pubRes.status}: ${errText.slice(0, 300)}` };
+  }
+  const pubData = await pubRes.json();
+  return {
+    success: true,
+    platform_post_id: pubData.id,
+    url: pubData.id ? `https://www.instagram.com/p/${pubData.id}/` : null,
   };
 }
 
