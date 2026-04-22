@@ -41,6 +41,31 @@ test('computeCostCents: zero cost for unknown model', () => {
   assert.equal(llm.computeCostCents('fictional-model-x', 1000, 1000), 0);
 });
 
+test('embed: throws helpful error when OPENAI_API_KEY missing', async () => {
+  const orig = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  const llm = freshLlm();
+  await assert.rejects(
+    () => llm.embed('hello'),
+    /OPENAI_API_KEY not configured/
+  );
+  if (orig) process.env.OPENAI_API_KEY = orig;
+});
+
+test('embed: empty input returns empty result without hitting network', async () => {
+  const llm = freshLlm();
+  const r = await llm.embed([]);
+  assert.deepEqual(r, { vectors: [], model: null, dims: 0, usdCents: 0 });
+});
+
+test('embed: rejects unsupported provider', async () => {
+  const llm = freshLlm();
+  await assert.rejects(
+    () => llm.embed('x', { provider: 'anthropic' }),
+    /not supported/
+  );
+});
+
 test('computeCostCents: small values round cleanly', () => {
   const llm = freshLlm();
   // 10000 input + 5000 output on claude-haiku-4

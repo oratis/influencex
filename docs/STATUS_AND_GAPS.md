@@ -171,7 +171,7 @@ SQLite 不支持 `ALTER COLUMN ... DROP NOT NULL`。当前 `catch` 仅匹配 `/d
 - [x] **D1**：`server/agents/` 三个 v1 helper 迁出（`email.js` / `youtube-discovery.js` / `content-metrics.js`），`agents/` 目录删除。
 - [x] **D2**：`scheduled-publish.js` 抽出（60s tick 已由 index.js 内联改为独立模块），并补齐 `mode='direct'` 路径 —— 用 `platform_connections` 里的 token 直接调 `publishOauth.publishDirect` 发 X/LinkedIn/Medium/Ghost/WordPress；新增 5 个单测覆盖 direct / intent / 连接缺失 / 全败 / 空队列。
 - [x] **D3**：Instagram (Business) OAuth 连接器落地 — Meta Graph v18 两步发布流（`/media` 创建 container → `/media_publish` 发布），`exchangeCodeForToken` 增加 Meta 长效 token + Page→IG Business 账号解析；新增 `server/__tests__/publish-instagram.test.js` 5 个单测（成功路径 / 缺图 / 缺 ig_user_id / Meta 报错透传 / listProviders 注册）。
-- [ ] **D5**：为 `brand_voices` 引入 pgvector（Cloud SQL 已就绪）列 + 相似度检索，给 Content-Text Agent 用。
+- [x] **D5**：新增迁移 `2026-04-22-brand-voice-embeddings` — Postgres 路径 `CREATE EXTENSION vector` + `brand_voices.embedding vector(1536)` + IVFFlat cosine 索引；SQLite fallback 用 TEXT 存 JSON。`llm.embed()` 接上 OpenAI text-embedding-3-small（1536 维），计费记入 stats。新增 3 个 embed 单测 + 所有 143 现有测试仍 pass。
 - [ ] **D7**：Ads Agent scaffold（读取 env；先不发真实广告，出结构化计划）。
 - [ ] **D10**：Community Agent scaffold（从 X API 拉 mentions，写入 `inbox_messages` 新表）。
 

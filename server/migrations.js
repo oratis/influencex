@@ -423,6 +423,52 @@ const MIGRATIONS = [
       console.log(`[migration] multitenancy-init complete: ${totalWs?.c || 0} workspaces total`);
     },
   },
+
+  {
+    id: '2026-04-22-brand-voice-embeddings',
+    description: 'pgvector extension + embedding column on brand_voices (Postgres only; SQLite stores JSON floats fallback)',
+    up: async ({ exec }) => {
+      const isPostgres = /^postgres(ql)?:\/\//.test(process.env.DATABASE_URL || '');
+      if (isPostgres) {
+        // pgvector is available on Cloud SQL PG15 as a shared_preload extension.
+        // CREATE EXTENSION requires superuser-ish perms; on Cloud SQL the
+        // `cloudsqlsuperuser` role can run it. If the caller lacks perms we
+        // swallow and fall through — the column add below will fail loudly and
+        // the operator can enable the extension manually.
+        try { await exec('CREATE EXTENSION IF NOT EXISTS vector'); } catch (e) {
+          console.warn('[migration] could not CREATE EXTENSION vector — run it as a superuser:', e.message);
+        }
+        try { await exec('ALTER TABLE brand_voices ADD COLUMN embedding vector(1536)'); } catch (e) {
+          if (!/already exists|duplicate column/i.test(e.message)) throw e;
+        }
+        // IVFFlat index for cosine similarity. Tuning: lists ≈ sqrt(rows); we
+        // start with 100, expecting ≤10K brand_voices per installation.
+        try {
+          await exec(
+            'CREATE INDEX IF NOT EXISTS idx_brand_voices_embedding ON brand_voices USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)'
+          );
+        } catch (e) {
+          // IVFFlat needs rows to build; ignore if table is empty or index driver chokes.
+          if (!/already exists|empty/i.test(e.message)) console.warn('[migration] ivfflat index skipped:', e.message);
+        }
+      } else {
+        // SQLite fallback: store embedding as JSON text; similarity is computed
+        // in-process. Keeps the migration idempotent across drivers — the
+        // column name `embedding` is the same so application code is portable.
+        try { await exec('ALTER TABLE brand_voices ADD COLUMN embedding TEXT'); } catch (e) {
+          if (!/duplicate column/i.test(e.message)) throw e;
+        }
+      }
+      // Dimension + model columns let us migrate to a different embedding
+      // model later without orphaning existing rows.
+      try { await exec('ALTER TABLE brand_voices ADD COLUMN embedding_model TEXT'); } catch (e) {
+        if (!/already exists|duplicate column/i.test(e.message)) throw e;
+      }
+      try { await exec('ALTER TABLE brand_voices ADD COLUMN embedding_dims INTEGER'); } catch (e) {
+        if (!/already exists|duplicate column/i.test(e.message)) throw e;
+      }
+    },
+  },
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

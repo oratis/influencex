@@ -371,8 +371,55 @@ function isConfigured(provider) {
   return !!(process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY || process.env.GOOGLE_AI_API_KEY);
 }
 
+/**
+ * Embed one or more texts as dense vectors. Used by brand-voice similarity
+ * (pgvector) and RAG lookup.
+ *
+ * Currently routes to OpenAI `text-embedding-3-small` (1536-dim) — cheapest
+ * model that covers multilingual content well. Returns { vectors, model,
+ * dims, usdCents }. Callers persist into a pgvector column.
+ *
+ * @param {string|string[]} input   single string or array
+ * @param {object} [opts]
+ * @param {string} [opts.model='text-embedding-3-small']
+ * @param {string} [opts.provider='openai']   only 'openai' supported for now
+ */
+async function embed(input, opts = {}) {
+  const texts = Array.isArray(input) ? input : [input];
+  if (texts.length === 0) return { vectors: [], model: null, dims: 0, usdCents: 0 };
+  const provider = opts.provider || 'openai';
+  if (provider !== 'openai') throw new Error(`Embedding provider not supported: ${provider}`);
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY not configured — cannot embed');
+  const model = opts.model || 'text-embedding-3-small';
+
+  const res = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, input: texts }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`OpenAI embeddings ${res.status}: ${t.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  // $0.02 per 1M tokens for text-embedding-3-small as of 2026-04 → 2 cents / 1M tokens.
+  const inputTokens = data.usage?.total_tokens || 0;
+  const usdCents = (inputTokens / 1_000_000) * 2;
+  recordUsage('openai', model, inputTokens, 0, usdCents);
+  const vectors = (data.data || []).map(d => d.embedding);
+  return {
+    vectors,
+    model,
+    dims: vectors[0]?.length || 0,
+    inputTokens,
+    usdCents,
+  };
+}
+
 module.exports = {
   complete,
+  embed,
   isConfigured,
   getStats,
   resetStats,
