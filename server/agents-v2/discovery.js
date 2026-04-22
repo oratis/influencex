@@ -5,7 +5,7 @@
  * Agent contract: streaming events, cost estimation, typed inputs/outputs.
  */
 
-const legacyDiscovery = require('../agents/discovery-agent');
+const legacyDiscovery = require('../youtube-discovery');
 const quota = require('../youtube-quota');
 
 module.exports = {
