@@ -22,6 +22,7 @@ const csvExport = require('./csv-export');
 const rbac = require('./rbac');
 const notifications = require('./notifications');
 const scheduler = require('./scheduler');
+const scheduledPublish = require('./scheduled-publish');
 const { rateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
@@ -2184,7 +2185,9 @@ app.delete(`${BASE_PATH}/api/scheduled-publishes/:id`, async (req, res) => {
 // Manual trigger for admin — processes all due pending items now
 app.post(`${BASE_PATH}/api/scheduled-publishes/tick`, authMiddleware, rbac.requirePermission('system.manage'), async (req, res) => {
   try {
-    const result = await processDueScheduledPublishes();
+    const result = await scheduledPublish.processDue({
+      query, queryOne, exec, uuidv4, publishOauth, agentRuntime, notifications,
+    });
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -3777,85 +3780,6 @@ app.use(BASE_PATH, (req, res, next) => {
   res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html'));
 });
 
-/**
- * Process all scheduled_publishes rows whose scheduled_at <= now and status=pending.
- * Dispatches to the publisher agent. Supports two modes:
- *   - 'intent' (default): just generates intent URLs; stores them as result
- *   - 'auto':  uses stored platform_connections to post directly (v2; not yet implemented)
- */
-async function processDueScheduledPublishes() {
-  const nowIso = new Date().toISOString();
-  const due = await query(
-    "SELECT * FROM scheduled_publishes WHERE status = 'pending' AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT 20",
-    [nowIso]
-  );
-  const rows = due.rows || [];
-  if (rows.length === 0) return { processed: 0 };
-
-  let ok = 0, failed = 0;
-  for (const row of rows) {
-    try {
-      await exec(
-        "UPDATE scheduled_publishes SET status='running', last_attempt_at=CURRENT_TIMESTAMP, attempts=attempts+1 WHERE id=?",
-        [row.id]
-      );
-      const snapshot = JSON.parse(row.content_snapshot);
-      const platforms = JSON.parse(row.platforms);
-      const content = {
-        title: snapshot.title,
-        body: snapshot.type === 'image' ? (snapshot.title || '') : (snapshot.body || ''),
-        cta: snapshot.metadata?.cta,
-        hashtags: snapshot.metadata?.hashtags || [],
-        image_url: snapshot.type === 'image' ? snapshot.body : snapshot.metadata?.image_url,
-      };
-
-      // Dispatch to publisher agent (intent-URL mode). Auto-posting via
-      // platform_connections is TODO when OAuth is wired up end-to-end.
-      const { runId, stream } = agentRuntime.createRun('publisher', { content, platforms }, {
-        workspaceId: row.workspace_id,
-        db: { query, queryOne, exec },
-        uuidv4,
-      });
-      let finalOutput = null;
-      let finalError = null;
-      await new Promise((resolve) => {
-        stream.on('event', (evt) => {
-          if (evt.type === 'complete') finalOutput = evt.data.output;
-          if (evt.type === 'error') finalError = evt.data?.message;
-          if (evt.type === 'closed') resolve();
-        });
-      });
-
-      if (finalError) {
-        await exec(
-          "UPDATE scheduled_publishes SET status='error', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-          [JSON.stringify({ error: finalError }), row.id]
-        );
-        failed++;
-      } else {
-        await exec(
-          "UPDATE scheduled_publishes SET status='complete', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-          [JSON.stringify(finalOutput), row.id]
-        );
-        ok++;
-        notifications.notify({
-          type: 'publish.scheduled.ready',
-          level: 'success',
-          title: 'Scheduled publish ready',
-          message: `${platforms.length} platform intent URL(s) generated for "${(snapshot.title || snapshot.body || '').slice(0, 60)}"`,
-        });
-      }
-    } catch (e) {
-      await exec(
-        "UPDATE scheduled_publishes SET status='error', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-        [JSON.stringify({ error: e.message }), row.id]
-      ).catch(() => {});
-      failed++;
-    }
-  }
-  return { processed: rows.length, ok, failed };
-}
-
 // ==================== Auto-setup on startup ====================
 async function initializeDefaultData() {
   // Create default admin account from env vars (skip if not configured)
@@ -3893,10 +3817,9 @@ async function initializeDefaultData() {
       const sinks = notifications.getEnabledSinks();
       if (sinks.length) console.log(`[notifications] Active sinks: ${sinks.join(', ')}`);
       scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
-      // Additional tick for scheduled publishes (every 60s)
-      setInterval(() => {
-        processDueScheduledPublishes().catch(e => console.warn('[sched-publish]', e.message));
-      }, 60_000).unref?.();
+      scheduledPublish.start({
+        query, queryOne, exec, uuidv4, publishOauth, agentRuntime, notifications,
+      });
       // Register all v2 agents with the runtime
       const registered = agentsV2.registerAll();
       console.log(`[agents-v2] Registered ${registered.length} agents: ${registered.join(', ')}`);

@@ -49,7 +49,7 @@ e84f4c3 feat: Google SSO + Stripe billing + blog publishers + content calendar
 | **A.多租户** | workspaces / workspace_members，30+ 查询加 scope | ✅ | `server/workspace-middleware.js`、`server/rbac.js`、`workspace-isolation.test.js`、`workspace-scope.test.js`。迁移 `2026-04-18-multitenancy-init` 已写。 |
 | **B · 内容生成 Agents** | Strategy / Research / Content-Text / Content-Visual / Content-Video + Content Studio | ✅ | `server/agents-v2/{strategy,research,content-text,content-visual,content-video,content-voice}.js`；前端 `ContentStudio.jsx`；品牌语音表 `brand_voices`；多 provider。 |
 | **B ➕ 额外 Agents** | — | ➕ | `seo.js`、`competitor-monitor.js`、`review-miner.js`、`kol-outreach.js`、`content-voice.js` — 超出路线图。 |
-| **C · 多渠道 Publisher** | YouTube / TikTok / IG / X / LinkedIn / FB / Threads / Pinterest / Reddit 直发 + 日历 + 审批 + 翻译 | 🟡 | `publisher.js` 做 Intent URL（8 平台）；`publish/oauth.js` 仅实现 **X + LinkedIn** OAuth 与 **Medium / Ghost / WordPress** API-Key 直发；`CalendarPage.jsx` 存在；`scheduled_posts` 表存在。**缺**：YouTube / TikTok / Instagram / Threads / Facebook Graph / Pinterest / Weibo OAuth；调度器未把 scheduled_posts 接入 `scheduler.js`；审批工作流（Editor→Approver→Publisher）；Translate Agent；本地化调优。 |
+| **C · 多渠道 Publisher** | YouTube / TikTok / IG / X / LinkedIn / FB / Threads / Pinterest / Reddit 直发 + 日历 + 审批 + 翻译 | 🟡 | `publisher.js` 做 Intent URL（8 平台）；`publish/oauth.js` 仅实现 **X + LinkedIn** OAuth 与 **Medium / Ghost / WordPress** API-Key 直发；`CalendarPage.jsx` 存在；`scheduled-publish.js` 独立 tick（60s）已在 2026-04-22 接通 direct 模式。**缺**：YouTube / TikTok / Instagram / Threads / Facebook Graph / Pinterest / Weibo OAuth；审批工作流（Editor→Approver→Publisher）；Translate Agent；本地化调优。 |
 | **D · 付费广告编排** | Meta / Google / TikTok / LinkedIn Ads + Budget Optimizer + 创意生成 + 归因 | ❌ | **完全未启动**。无 `ads-agent`，无广告连接器。 |
 | **E · 创作者 v2** | Creator Marketplace、Match / Negotiation Agent、DocuSign、Stripe Connect Escrow、Creator Portal | 🟡 | 沿用 v1 的 `agents/discovery-agent.js` + `kol-outreach.js`；`kol_database`、`campaigns`、`contacts` 链路存在。**缺**：Marketplace 种子数据、Match Agent、Negotiation Agent、DocuSign/Dropbox Sign、Stripe Connect、creators.influencexes.com 独立前端、创作者侧登录。 |
 | **F · 分析 & 优化** | Analytics Agent、多触点归因、优化建议、A/B 框架 | 🟡 | `AnalyticsPage.jsx`、`RoiDashboard.jsx`、`roi-dashboard.js`、`ga4.js`。**缺**：Analytics Agent（目前是 `data-agent.js` 旧版）、归因引擎、Kill/Double-down 建议回路、A/B 测试框架、统一跨渠道 ROI 仪表盘。 |
@@ -169,7 +169,7 @@ SQLite 不支持 `ALTER COLUMN ... DROP NOT NULL`。当前 `catch` 仅匹配 `/d
 - [x] **D0**：修复 `2026-04-19-sso-billing-blog` 迁移语法（SQLite 分支跳过 `ALTER COLUMN ... DROP NOT NULL`），`npm test` 133/133 通过。
 - [ ] **D0**：`git push` 本地 commit 到 origin。
 - [x] **D1**：`server/agents/` 三个 v1 helper 迁出（`email.js` / `youtube-discovery.js` / `content-metrics.js`），`agents/` 目录删除。
-- [ ] **D2**：`scheduler.js` 接 `scheduled_posts` 表，跑出「定时发布」的最小闭环；先用现有 X / LinkedIn。
+- [x] **D2**：`scheduled-publish.js` 抽出（60s tick 已由 index.js 内联改为独立模块），并补齐 `mode='direct'` 路径 —— 用 `platform_connections` 里的 token 直接调 `publishOauth.publishDirect` 发 X/LinkedIn/Medium/Ghost/WordPress；新增 5 个单测覆盖 direct / intent / 连接缺失 / 全败 / 空队列。
 - [ ] **D3**：新增 YouTube 或 Instagram 中的 **一个** OAuth 连接器作为 Phase C 的第二波落地。
 - [ ] **D5**：为 `brand_voices` 引入 pgvector（Cloud SQL 已就绪）列 + 相似度检索，给 Content-Text Agent 用。
 - [ ] **D7**：Ads Agent scaffold（读取 env；先不发真实广告，出结构化计划）。
