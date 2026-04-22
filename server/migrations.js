@@ -152,15 +152,19 @@ const MIGRATIONS = [
       // Google SSO — add a nullable `google_sub` column so we can link
       // an OAuth identity to an existing email-password user or bootstrap
       // a new user without a password.
-      for (const stmt of [
+      const isPostgres = /^postgres(ql)?:\/\//.test(process.env.DATABASE_URL || '');
+      const stmts = [
         'ALTER TABLE users ADD COLUMN google_sub TEXT',
         'ALTER TABLE users ADD COLUMN google_picture TEXT',
-        // Password becomes optional for SSO-only users
-        'ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL',
-      ]) {
+      ];
+      // Postgres enforces NOT NULL; SQLite has no ALTER COLUMN syntax at all,
+      // and columns added later are nullable by default — so we only issue
+      // DROP NOT NULL on Postgres.
+      if (isPostgres) {
+        stmts.push('ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL');
+      }
+      for (const stmt of stmts) {
         try { await exec(stmt); } catch (e) {
-          // Some dialects don't need the DROP NOT NULL; ignore errors
-          // that are either "already exists" or "column already nullable".
           if (!/duplicate|already exists|does not exist|not null constraint/i.test(e.message)) throw e;
         }
       }
