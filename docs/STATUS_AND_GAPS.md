@@ -167,7 +167,7 @@ SQLite 不支持 `ALTER COLUMN ... DROP NOT NULL`。当前 `catch` 仅匹配 `/d
 ## 8. 近期行动建议（下一个 2-week sprint）
 
 - [x] **D0**：修复 `2026-04-19-sso-billing-blog` 迁移语法（SQLite 分支跳过 `ALTER COLUMN ... DROP NOT NULL`），`npm test` 133/133 通过。
-- [ ] **D0**：`git push` 本地 commit 到 origin。
+- [x] **D0**：`git push` 本地 commit 到 origin（2026-04-23 推送 `053dca1..1737eb0`，含 D2/D3/D5/D7/D10 五个 feature commit）。
 - [x] **D1**：`server/agents/` 三个 v1 helper 迁出（`email.js` / `youtube-discovery.js` / `content-metrics.js`），`agents/` 目录删除。
 - [x] **D2**：`scheduled-publish.js` 抽出（60s tick 已由 index.js 内联改为独立模块），并补齐 `mode='direct'` 路径 —— 用 `platform_connections` 里的 token 直接调 `publishOauth.publishDirect` 发 X/LinkedIn/Medium/Ghost/WordPress；新增 5 个单测覆盖 direct / intent / 连接缺失 / 全败 / 空队列。
 - [x] **D3**：Instagram (Business) OAuth 连接器落地 — Meta Graph v18 两步发布流（`/media` 创建 container → `/media_publish` 发布），`exchangeCodeForToken` 增加 Meta 长效 token + Page→IG Business 账号解析；新增 `server/__tests__/publish-instagram.test.js` 5 个单测（成功路径 / 缺图 / 缺 ig_user_id / Meta 报错透传 / listProviders 注册）。
