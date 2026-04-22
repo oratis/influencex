@@ -5,7 +5,7 @@
  * Instagram: uses oEmbed API for basic data
  */
 
-const fetch = require('../proxy-fetch');
+const fetch = require('./proxy-fetch');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 async function scrapeContentUrl(url) {

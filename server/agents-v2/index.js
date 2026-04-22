@@ -19,6 +19,7 @@ function registerAll() {
     require('./seo'),
     require('./competitor-monitor'),
     require('./review-miner'),
+    require('./ads'),
     require('./discovery'),
   ];
   for (const a of agents) {

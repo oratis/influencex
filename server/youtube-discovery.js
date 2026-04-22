@@ -3,8 +3,8 @@
  * Uses YouTube Data API v3 search for channel discovery
  */
 
-const fetch = require('../proxy-fetch');
-const quota = require('../youtube-quota');
+const fetch = require('./proxy-fetch');
+const quota = require('./youtube-quota');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 function detectCategory(text) {
