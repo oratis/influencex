@@ -425,6 +425,47 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-22-inbox-messages',
+    description: 'Community Agent inbox_messages table — unified mentions / comments / DMs across platforms',
+    up: async ({ exec }) => {
+      // One table for all inbound community touchpoints. Platform-specific
+      // columns (thread_id, parent_id) are nullable because not every
+      // platform exposes them. `raw` stores the original payload for
+      // future fields we haven't surfaced yet.
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS inbox_messages (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          external_id TEXT,
+          thread_id TEXT,
+          parent_id TEXT,
+          author_handle TEXT,
+          author_name TEXT,
+          author_avatar_url TEXT,
+          text TEXT,
+          url TEXT,
+          sentiment TEXT,
+          priority TEXT DEFAULT 'normal',
+          status TEXT DEFAULT 'open',
+          assignee_user_id TEXT,
+          draft_reply TEXT,
+          replied_at TIMESTAMP,
+          occurred_at TIMESTAMP,
+          fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          raw TEXT,
+          tags TEXT DEFAULT '[]'
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      // Uniqueness per (workspace, platform, external_id) prevents dup-pulls.
+      try { await exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_messages_ext ON inbox_messages(workspace_id, platform, external_id)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_inbox_messages_ws_status ON inbox_messages(workspace_id, status)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_inbox_messages_occurred ON inbox_messages(workspace_id, occurred_at DESC)'); } catch {}
+    },
+  },
+
+  {
     id: '2026-04-22-brand-voice-embeddings',
     description: 'pgvector extension + embedding column on brand_voices (Postgres only; SQLite stores JSON floats fallback)',
     up: async ({ exec }) => {

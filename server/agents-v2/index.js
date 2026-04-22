@@ -20,6 +20,7 @@ function registerAll() {
     require('./competitor-monitor'),
     require('./review-miner'),
     require('./ads'),
+    require('./community'),
     require('./discovery'),
   ];
   for (const a of agents) {
