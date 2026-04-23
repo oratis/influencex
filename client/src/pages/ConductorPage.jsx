@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
+import { useI18n } from '../i18n';
 
 /**
  * Conductor UI — describe a goal in natural language, Claude produces a
@@ -8,12 +9,13 @@ import { useToast } from '../components/Toast';
  */
 export default function ConductorPage() {
   const [goal, setGoal] = useState('');
-  const [currentPlan, setCurrentPlan] = useState(null); // { planId, plan, estimate }
+  const [currentPlan, setCurrentPlan] = useState(null);
   const [isPlanning, setIsPlanning] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [recentPlans, setRecentPlans] = useState([]);
   const [inspectedPlan, setInspectedPlan] = useState(null);
   const toast = useToast();
+  const { t } = useI18n();
 
   useEffect(() => { loadRecent(); }, []);
 
@@ -43,8 +45,7 @@ export default function ConductorPage() {
     setIsRunning(true);
     try {
       await api.conductorRun(currentPlan.planId);
-      toast.success('Plan approved. Executing in background.');
-      // Poll until complete
+      toast.success(t('conductor.executing_bg'));
       let tries = 0;
       const poll = setInterval(async () => {
         tries++;
@@ -72,16 +73,16 @@ export default function ConductorPage() {
     <div className="page-container fade-in">
       <div className="page-header">
         <div>
-          <h2>Conductor</h2>
-          <p>Describe a goal. Claude builds a plan. You approve. Agents execute.</p>
+          <h2>{t('conductor.title')}</h2>
+          <p>{t('conductor.subtitle')}</p>
         </div>
       </div>
 
       <div className="card">
-        <label className="form-label">Your goal</label>
+        <label className="form-label">{t('conductor.goal')}</label>
         <textarea
           className="form-textarea"
-          placeholder="e.g. Develop a content strategy for our new AI agents feature, then draft a Twitter thread and a LinkedIn post to announce it. Target audience: technical SaaS founders."
+          placeholder={t('conductor.goal_placeholder')}
           value={goal}
           onChange={e => setGoal(e.target.value)}
           style={{ minHeight: 100 }}
@@ -92,18 +93,17 @@ export default function ConductorPage() {
             onClick={handlePlan}
             disabled={isPlanning || !goal.trim()}
           >
-            {isPlanning ? '🧠 Claude is thinking…' : '🧠 Build plan'}
+            {isPlanning ? t('conductor.thinking') : t('conductor.build_plan')}
           </button>
         </div>
       </div>
 
-      {/* Proposed plan */}
       {currentPlan && (
         <div className="card" style={{ marginTop: 16, borderColor: 'var(--accent)' }}>
           <div className="card-header">
-            <h3>Proposed plan</h3>
+            <h3>{t('conductor.proposed_plan')}</h3>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span className="badge badge-purple">{currentPlan.plan.steps?.length || 0} steps</span>
+              <span className="badge badge-purple">{t('conductor.steps_count', { count: currentPlan.plan.steps?.length || 0 })}</span>
               <span className="badge badge-gray" style={{ fontSize: 11 }}>
                 ~{formatMoney(currentPlan.estimate?.totalUsdCents || 0)}
               </span>
@@ -115,7 +115,7 @@ export default function ConductorPage() {
               fontSize: 13, lineHeight: 1.5, marginBottom: 14,
               borderLeft: '3px solid var(--accent)',
             }}>
-              <strong>Rationale:</strong> {currentPlan.plan.rationale}
+              <strong>{t('conductor.rationale')}</strong> {currentPlan.plan.rationale}
             </div>
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
@@ -137,11 +137,11 @@ export default function ConductorPage() {
                       <span style={{ fontWeight: 600 }}>{step.agent}</span>
                       {step.dependsOn?.length > 0 && (
                         <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>
-                          depends on: {step.dependsOn.join(', ')}
+                          {t('conductor.depends_on', { ids: step.dependsOn.join(', ') })}
                         </span>
                       )}
                     </div>
-                    {step.humanApproval && <span className="badge badge-orange" style={{ fontSize: 10 }}>requires approval</span>}
+                    {step.humanApproval && <span className="badge badge-orange" style={{ fontSize: 10 }}>{t('conductor.requires_approval')}</span>}
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
                     <code style={{ fontSize: 11 }}>{JSON.stringify(step.input).slice(0, 160)}...</code>
@@ -152,39 +152,38 @@ export default function ConductorPage() {
           </div>
           {currentPlan.plan.humanApprovalGates?.length > 0 && (
             <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 14 }}>
-              🚦 Approval gates: {currentPlan.plan.humanApprovalGates.join(' · ')}
+              {t('conductor.approval_gates', { gates: currentPlan.plan.humanApprovalGates.join(' · ') })}
             </div>
           )}
           <div className="btn-group">
             <button className="btn btn-primary" onClick={handleApprove} disabled={isRunning}>
-              {isRunning ? '⏳ Running…' : '✅ Approve & run'}
+              {isRunning ? t('conductor.running') : t('conductor.approve_run')}
             </button>
             <button className="btn btn-secondary" onClick={() => { setCurrentPlan(null); setGoal(''); }} disabled={isRunning}>
-              Cancel
+              {t('common.cancel')}
             </button>
           </div>
         </div>
       )}
 
-      {/* Final execution result */}
       {inspectedPlan && inspectedPlan.plan?.stepResults && (
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-header">
-            <h3>Execution result</h3>
+            <h3>{t('conductor.execution_result')}</h3>
             <span className={`badge ${inspectedPlan.status === 'complete' ? 'badge-green' : 'badge-red'}`}>
-              {inspectedPlan.status}
+              {t(`conductor.status_${inspectedPlan.status}`)}
             </span>
           </div>
           {inspectedPlan.plan.stepResults.map((r, i) => (
             <div key={i} style={{ marginBottom: 12, padding: 12, background: 'var(--bg-input)', borderRadius: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                <span style={{ fontWeight: 600 }}>Step {i + 1}: {r.agent}</span>
-                <span className={`badge ${r.status === 'complete' ? 'badge-green' : 'badge-red'}`}>{r.status}</span>
+                <span style={{ fontWeight: 600 }}>{t('conductor.step_n', { n: i + 1, agent: r.agent })}</span>
+                <span className={`badge ${r.status === 'complete' ? 'badge-green' : 'badge-red'}`}>{t(`conductor.status_${r.status}`)}</span>
               </div>
               {r.error && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{r.error}</div>}
               {r.output && (
                 <details style={{ marginTop: 6 }}>
-                  <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>View output</summary>
+                  <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>{t('conductor.view_output')}</summary>
                   <pre style={{
                     fontSize: 11, background: 'var(--bg-primary)', padding: 10,
                     borderRadius: 6, overflow: 'auto', maxHeight: 300,
@@ -197,15 +196,14 @@ export default function ConductorPage() {
         </div>
       )}
 
-      {/* Recent plans */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 style={{ marginBottom: 14 }}>Recent plans ({recentPlans.length})</h3>
+        <h3 style={{ marginBottom: 14 }}>{t('conductor.recent', { count: recentPlans.length })}</h3>
         {recentPlans.length === 0 ? (
-          <div className="empty-state"><p>No plans yet. Describe a goal above.</p></div>
+          <div className="empty-state"><p>{t('conductor.no_plans')}</p></div>
         ) : (
           <div className="table-container">
             <table>
-              <thead><tr><th>Goal</th><th>Status</th><th>Created</th><th></th></tr></thead>
+              <thead><tr><th>{t('conductor.col_goal')}</th><th>{t('conductor.col_status')}</th><th>{t('conductor.col_created')}</th><th></th></tr></thead>
               <tbody>
                 {recentPlans.map(p => (
                   <tr key={p.id}>
@@ -215,7 +213,7 @@ export default function ConductorPage() {
                         p.status === 'complete' ? 'badge-green' :
                         p.status === 'error' ? 'badge-red' :
                         p.status === 'running' ? 'badge-orange' : 'badge-gray'
-                      }`}>{p.status}</span>
+                      }`}>{t(`conductor.status_${p.status}`)}</span>
                     </td>
                     <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{new Date(p.created_at).toLocaleString()}</td>
                     <td>
@@ -224,7 +222,7 @@ export default function ConductorPage() {
                           const full = await api.getConductorPlan(p.id);
                           setInspectedPlan(full);
                         } catch (e) { toast.error(e.message); }
-                      }}>View</button>
+                      }}>{t('conductor.view')}</button>
                     </td>
                   </tr>
                 ))}

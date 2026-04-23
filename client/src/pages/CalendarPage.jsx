@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useI18n } from '../i18n';
 
 const BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -29,6 +30,7 @@ export default function CalendarPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(null);
+  const { t, lang } = useI18n();
 
   const reload = async () => {
     setLoading(true); setError('');
@@ -55,27 +57,28 @@ export default function CalendarPage() {
     return map;
   }, [items]);
 
-  const monthLabel = monthStart.toLocaleString('default', { month: 'long', year: 'numeric' });
+  const monthLabel = monthStart.toLocaleString(lang === 'zh' ? 'zh-CN' : 'default', { month: 'long', year: 'numeric' });
+  const weekdayKeys = ['weekday_sun', 'weekday_mon', 'weekday_tue', 'weekday_wed', 'weekday_thu', 'weekday_fri', 'weekday_sat'];
 
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <h1 style={{ fontSize: 24, margin: 0 }}>📅 Content Calendar</h1>
+        <h1 style={{ fontSize: 24, margin: 0 }}>📅 {t('calendar.title')}</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button onClick={() => setCursor(new Date(monthStart.getFullYear(), monthStart.getMonth() - 1, 1))} style={btnStyle}>‹</button>
           <div style={{ minWidth: 170, textAlign: 'center', fontWeight: 600 }}>{monthLabel}</div>
           <button onClick={() => setCursor(new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1))} style={btnStyle}>›</button>
-          <button onClick={() => setCursor(startOfMonth(new Date()))} style={{ ...btnStyle, marginLeft: 8 }}>Today</button>
+          <button onClick={() => setCursor(startOfMonth(new Date()))} style={{ ...btnStyle, marginLeft: 8 }}>{t('calendar.today')}</button>
           <button onClick={reload} style={{ ...btnStyle, marginLeft: 8 }}>↻</button>
         </div>
       </div>
 
       {error && <div style={{ padding: 10, background: '#2a0f0f', color: '#ef4444', borderRadius: 8, marginBottom: 12 }}>{error}</div>}
-      {loading && <div style={{ color: '#888', marginBottom: 12 }}>Loading…</div>}
+      {loading && <div style={{ color: '#888', marginBottom: 12 }}>{t('common.loading')}</div>}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 1, background: '#1a1a25', borderRadius: 8, overflow: 'hidden' }}>
-        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
-          <div key={d} style={{ padding: 8, background: '#0f0f18', color: '#888', fontSize: 12, textAlign: 'center', fontWeight: 600 }}>{d}</div>
+        {weekdayKeys.map(k => (
+          <div key={k} style={{ padding: 8, background: '#0f0f18', color: '#888', fontSize: 12, textAlign: 'center', fontWeight: 600 }}>{t(`calendar.${k}`)}</div>
         ))}
         {days.map((d, i) => {
           const inMonth = d.getMonth() === monthStart.getMonth();
@@ -100,10 +103,10 @@ export default function CalendarPage() {
                     borderRadius: 3, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>
                   {new Date(it.scheduled_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{' '}
-                  {(it.content_snapshot?.title || it.content_snapshot?.body || '(no title)').slice(0, 26)}
+                  {(it.content_snapshot?.title || it.content_snapshot?.body || t('calendar.no_title')).slice(0, 26)}
                 </div>
               ))}
-              {dayItems.length > 4 && <div style={{ fontSize: 10, color: '#666' }}>+{dayItems.length - 4} more</div>}
+              {dayItems.length > 4 && <div style={{ fontSize: 10, color: '#666' }}>{t('calendar.more', { count: dayItems.length - 4 })}</div>}
             </div>
           );
         })}
@@ -111,7 +114,7 @@ export default function CalendarPage() {
 
       <div style={{ marginTop: 16, fontSize: 12, color: '#888', display: 'flex', gap: 16 }}>
         {Object.entries(STATUS_COLORS).map(([s, c]) => (
-          <span key={s}><span style={{ display: 'inline-block', width: 10, height: 10, background: c, borderRadius: 2, marginRight: 4, verticalAlign: 'middle' }} />{s}</span>
+          <span key={s}><span style={{ display: 'inline-block', width: 10, height: 10, background: c, borderRadius: 2, marginRight: 4, verticalAlign: 'middle' }} />{t(`calendar.status_${s}`)}</span>
         ))}
       </div>
 
@@ -124,20 +127,20 @@ export default function CalendarPage() {
             background: '#0f0f18', border: '1px solid #2a2a35', borderRadius: 12,
             padding: 24, maxWidth: 560, width: '90%', maxHeight: '80vh', overflow: 'auto',
           }}>
-            <h3 style={{ marginTop: 0 }}>{selected.content_snapshot?.title || '(no title)'}</h3>
+            <h3 style={{ marginTop: 0 }}>{selected.content_snapshot?.title || t('calendar.no_title')}</h3>
             <div style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
-              {new Date(selected.scheduled_at).toLocaleString()} · <span style={{ color: STATUS_COLORS[selected.status] }}>{selected.status}</span> · {(selected.platforms || []).join(', ')}
+              {new Date(selected.scheduled_at).toLocaleString()} · <span style={{ color: STATUS_COLORS[selected.status] }}>{t(`calendar.status_${selected.status}`)}</span> · {(selected.platforms || []).join(', ')}
             </div>
             <div style={{ fontSize: 14, color: '#ddd', whiteSpace: 'pre-wrap', padding: 12, background: '#0a0a14', borderRadius: 8 }}>
-              {selected.content_snapshot?.body || '(no body)'}
+              {selected.content_snapshot?.body || t('calendar.no_body')}
             </div>
             {selected.result && (
               <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: 'pointer', color: '#888' }}>Result</summary>
+                <summary style={{ cursor: 'pointer', color: '#888' }}>{t('calendar.result')}</summary>
                 <pre style={{ fontSize: 11, color: '#888', overflow: 'auto' }}>{JSON.stringify(selected.result, null, 2)}</pre>
               </details>
             )}
-            <button onClick={() => setSelected(null)} style={{ marginTop: 16, ...btnStyle }}>Close</button>
+            <button onClick={() => setSelected(null)} style={{ marginTop: 16, ...btnStyle }}>{t('calendar.close')}</button>
           </div>
         </div>
       )}
