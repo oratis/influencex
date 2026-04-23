@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspace } from '../WorkspaceContext';
 import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog';
+import { useI18n } from '../i18n';
 import { api } from '../api/client';
 
 /**
@@ -15,15 +16,16 @@ export default function WorkspaceSwitcher() {
   const toast = useToast();
   const navigate = useNavigate();
   const { prompt: promptDialog } = useConfirm();
+  const { t } = useI18n();
 
   if (!currentWorkspace) return null;
 
   async function handleCreate() {
-    const name = await promptDialog('Name for the new workspace:', { title: 'New Workspace', placeholder: 'Client A / Spring Campaign / ...' });
+    const name = await promptDialog(t('workspace_switcher.prompt_name'), { title: t('workspace_switcher.prompt_title'), placeholder: t('workspace_switcher.prompt_placeholder') });
     if (!name) return;
     try {
       const ws = await api.createWorkspace({ name });
-      toast.success(`Created "${name}"`);
+      toast.success(t('workspace_switcher.created', { name }));
       await refresh();
       switchWorkspace(ws.id);
     } catch (e) {
@@ -55,7 +57,7 @@ export default function WorkspaceSwitcher() {
             {currentWorkspace.name}
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {currentWorkspace.role || 'member'} · {currentWorkspace.plan || 'starter'}
+            {t(`roles.${currentWorkspace.role || 'member'}`)} · {currentWorkspace.plan || 'starter'}
           </div>
         </div>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" style={{ opacity: 0.5, transform: showMenu ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>
@@ -86,7 +88,7 @@ export default function WorkspaceSwitcher() {
             >
               <div>
                 <div style={{ fontWeight: 500 }}>{w.name}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.role}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t(`roles.${w.role || 'member'}`)}</div>
               </div>
               {w.id === currentId && <span style={{ fontSize: 12 }}>✓</span>}
             </div>
@@ -101,7 +103,7 @@ export default function WorkspaceSwitcher() {
             onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-card)'}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
           >
-            + New workspace
+            {t('workspace_switcher.new_workspace')}
           </div>
           <div
             onClick={() => { setShowMenu(false); navigate('/workspace/settings'); }}
@@ -112,7 +114,7 @@ export default function WorkspaceSwitcher() {
             onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-card)'}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
           >
-            ⚙ Workspace settings
+            {t('workspace_switcher.settings')}
           </div>
         </div>
       )}
