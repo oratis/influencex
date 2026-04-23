@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
+import { useI18n } from '../i18n';
 
 function ScoreBadge({ score }) {
   const color = score >= 80 ? 'var(--success)' : score >= 60 ? 'var(--warning)' : 'var(--danger)';
@@ -16,6 +17,7 @@ function ScoreBadge({ score }) {
 }
 
 export default function CampaignDetail() {
+  const { t } = useI18n();
   const { id } = useParams();
   const navigate = useNavigate();
   const [campaign, setCampaign] = useState(null);
@@ -51,7 +53,7 @@ export default function CampaignDetail() {
     setCollecting(true);
     try {
       const result = await api.collectKols(id);
-      toast.success(`Collected ${result.collected} KOLs with AI scoring`);
+      toast.success(t('campaigns.collected_msg', { count: result.collected }));
       loadData();
     } catch (e) { toast.error(e.message); }
     setCollecting(false);
@@ -80,8 +82,8 @@ export default function CampaignDetail() {
     else setSelected(new Set(sortedKols.map(k => k.id)));
   };
 
-  if (loading) return <div className="page-container"><p>Loading...</p></div>;
-  if (!campaign) return <div className="page-container"><p>Campaign not found</p></div>;
+  if (loading) return <div className="page-container"><p>{t('campaigns.loading_detail')}</p></div>;
+  if (!campaign) return <div className="page-container"><p>{t('campaigns.not_found')}</p></div>;
 
   const stats = {
     total: kols.length,
@@ -104,29 +106,29 @@ export default function CampaignDetail() {
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '4px' }}>
-            <button className="btn-icon" onClick={() => navigate('/campaigns')} title="Back">
+            <button className="btn-icon" onClick={() => navigate('/campaigns')} title={t('campaigns.back')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg>
             </button>
             <h2>{campaign.name}</h2>
-            <span className={`badge ${campaign.status === 'active' ? 'badge-green' : 'badge-gray'}`}>{campaign.status}</span>
+            <span className={`badge ${campaign.status === 'active' ? 'badge-green' : 'badge-gray'}`}>{t(`campaigns.status_${campaign.status}`)}</span>
           </div>
           <p style={{ marginLeft: '42px' }}>
-            {campaign.description || 'No description'}
-            {campaign.budget > 0 && <span style={{ marginLeft: '16px', color: 'var(--accent)', fontWeight: '600' }}>Budget: ${campaign.budget.toLocaleString()}</span>}
+            {campaign.description || t('campaigns.no_description')}
+            {campaign.budget > 0 && <span style={{ marginLeft: '16px', color: 'var(--accent)', fontWeight: '600' }}>{t('campaigns.budget_label', { amount: campaign.budget.toLocaleString() })}</span>}
           </p>
         </div>
         <div className="btn-group">
           <button className="btn btn-secondary" onClick={async () => {
-            try { await api.downloadCsv(`/campaigns/${id}/kols/export`, `kols-${campaign?.name || 'campaign'}.csv`); toast.success('Exported campaign KOLs'); }
+            try { await api.downloadCsv(`/campaigns/${id}/kols/export`, `kols-${campaign?.name || 'campaign'}.csv`); toast.success(t('campaigns.export_success')); }
             catch (e) { toast.error(e.message); }
           }} disabled={kols.length === 0}>
-            📤 Export CSV
+            📤 {t('campaigns.export_csv')}
           </button>
           <button className="btn btn-primary" onClick={handleCollect} disabled={collecting}>
-            {collecting ? '⏳ AI Collecting...' : '🤖 AI Collect KOLs'}
+            {collecting ? `⏳ ${t('campaigns.ai_collecting')}` : `🤖 ${t('campaigns.ai_collect')}`}
           </button>
           <button className="btn btn-success" onClick={() => navigate('/contacts')}>
-            📧 Go to Contact
+            📧 {t('campaigns.go_to_contact')}
           </button>
         </div>
       </div>
@@ -134,33 +136,33 @@ export default function CampaignDetail() {
       <div className="stats-grid">
         <div className="stat-card">
           <div className="stat-icon purple">📊</div>
-          <div><div className="stat-value">{stats.total}</div><div className="stat-label">Total Collected</div></div>
+          <div><div className="stat-value">{stats.total}</div><div className="stat-label">{t('campaigns.stat_total')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon blue">🤖</div>
-          <div><div className="stat-value">{stats.avgScore}</div><div className="stat-label">Avg AI Score</div></div>
+          <div><div className="stat-value">{stats.avgScore}</div><div className="stat-label">{t('campaigns.stat_avg_score')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon orange">⏳</div>
-          <div><div className="stat-value">{stats.pending}</div><div className="stat-label">Pending Review</div></div>
+          <div><div className="stat-value">{stats.pending}</div><div className="stat-label">{t('campaigns.stat_pending')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon green">✅</div>
-          <div><div className="stat-value">{stats.approved}</div><div className="stat-label">Approved</div></div>
+          <div><div className="stat-value">{stats.approved}</div><div className="stat-label">{t('campaigns.stat_approved')}</div></div>
         </div>
       </div>
 
       <div className="card">
         <div className="filter-bar">
-          <input className="form-input search-input" placeholder="Search KOLs..." value={filter.search} onChange={e => setFilter(f => ({ ...f, search: e.target.value }))} />
+          <input className="form-input search-input" placeholder={t('campaigns.filter_search')} value={filter.search} onChange={e => setFilter(f => ({ ...f, search: e.target.value }))} />
           <select className="form-select" value={filter.status} onChange={e => setFilter(f => ({ ...f, status: e.target.value }))}>
-            <option value="">All Status</option>
-            <option value="pending">Pending</option>
-            <option value="approved">Approved</option>
-            <option value="rejected">Rejected</option>
+            <option value="">{t('campaigns.filter_status_all')}</option>
+            <option value="pending">{t('campaigns.filter_status_pending')}</option>
+            <option value="approved">{t('campaigns.filter_status_approved')}</option>
+            <option value="rejected">{t('campaigns.filter_status_rejected')}</option>
           </select>
           <select className="form-select" value={filter.platform} onChange={e => setFilter(f => ({ ...f, platform: e.target.value }))}>
-            <option value="">All Platforms</option>
+            <option value="">{t('campaigns.filter_platform_all')}</option>
             <option value="tiktok">TikTok</option>
             <option value="youtube">YouTube</option>
             <option value="instagram">Instagram</option>
@@ -168,24 +170,24 @@ export default function CampaignDetail() {
             <option value="x">X</option>
           </select>
           <select className="form-select" value={sortBy} onChange={e => setSortBy(e.target.value)} style={{ minWidth: '140px' }}>
-            <option value="ai_score">Sort: AI Score</option>
-            <option value="followers">Sort: Followers</option>
-            <option value="engagement">Sort: Engagement</option>
-            <option value="cpm">Sort: CPM (Low→High)</option>
+            <option value="ai_score">{t('campaigns.sort_score')}</option>
+            <option value="followers">{t('campaigns.sort_followers')}</option>
+            <option value="engagement">{t('campaigns.sort_engagement')}</option>
+            <option value="cpm">{t('campaigns.sort_cpm')}</option>
           </select>
           {selected.size > 0 && (
             <>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{selected.size} selected</span>
-              <button className="btn btn-success btn-sm" onClick={() => handleBatchAction('approved')}>✅ Approve</button>
-              <button className="btn btn-danger btn-sm" onClick={() => handleBatchAction('rejected')}>❌ Reject</button>
+              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{t('campaigns.selected_count', { count: selected.size })}</span>
+              <button className="btn btn-success btn-sm" onClick={() => handleBatchAction('approved')}>✅ {t('campaigns.btn_approve')}</button>
+              <button className="btn btn-danger btn-sm" onClick={() => handleBatchAction('rejected')}>❌ {t('campaigns.btn_reject')}</button>
             </>
           )}
         </div>
 
         {sortedKols.length === 0 ? (
           <div className="empty-state">
-            <h4>No KOLs collected yet</h4>
-            <p>Click "AI Collect KOLs" to discover and score influencers automatically</p>
+            <h4>{t('campaigns.empty_kols')}</h4>
+            <p>{t('campaigns.empty_kols_hint')}</p>
           </div>
         ) : (
           <div className="table-container">
@@ -195,16 +197,16 @@ export default function CampaignDetail() {
                   <th style={{ width: '40px' }}>
                     <div className={`checkbox ${selected.size === sortedKols.length ? 'checked' : ''}`} onClick={toggleAll} />
                   </th>
-                  <th>AI Score</th>
-                  <th>KOL</th>
-                  <th>Platform</th>
-                  <th>Followers</th>
-                  <th>Engagement</th>
-                  <th>Avg Views</th>
-                  <th>Est. CPM</th>
-                  <th>Category</th>
-                  <th>Status</th>
-                  <th>Actions</th>
+                  <th>{t('campaigns.col_ai_score')}</th>
+                  <th>{t('campaigns.col_kol')}</th>
+                  <th>{t('campaigns.col_platform')}</th>
+                  <th>{t('campaigns.col_followers')}</th>
+                  <th>{t('campaigns.col_engagement')}</th>
+                  <th>{t('campaigns.col_avg_views')}</th>
+                  <th>{t('campaigns.col_cpm')}</th>
+                  <th>{t('campaigns.col_category')}</th>
+                  <th>{t('campaigns.col_status')}</th>
+                  <th>{t('campaigns.col_actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -235,7 +237,7 @@ export default function CampaignDetail() {
                     <td><span className="badge badge-blue">{kol.category}</span></td>
                     <td>
                       <span className={`badge ${kol.status === 'approved' ? 'badge-green' : kol.status === 'rejected' ? 'badge-red' : 'badge-orange'}`}>
-                        {kol.status}
+                        {t(`campaigns.kol_status_${kol.status}`)}
                       </span>
                     </td>
                     <td>

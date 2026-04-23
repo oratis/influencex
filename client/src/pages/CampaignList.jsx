@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
+import { useI18n } from '../i18n';
 
 const PLATFORM_OPTIONS = [
   { id: 'tiktok', label: 'TikTok', color: '#ff0050' },
@@ -12,6 +13,7 @@ const PLATFORM_OPTIONS = [
 ];
 
 export default function CampaignList() {
+  const { t } = useI18n();
   const [campaigns, setCampaigns] = useState([]);
   const [showCreate, setShowCreate] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -31,23 +33,23 @@ export default function CampaignList() {
     <div className="page-container fade-in">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h2>Campaigns</h2>
-          <p>Create and manage KOL collection campaigns</p>
+          <h2>{t('campaigns.title')}</h2>
+          <p>{t('campaigns.subtitle')}</p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          New Campaign
+          {t('campaigns.new_campaign')}
         </button>
       </div>
 
       {loading ? (
-        <div className="empty-state"><p>Loading campaigns...</p></div>
+        <div className="empty-state"><p>{t('campaigns.loading')}</p></div>
       ) : campaigns.length === 0 ? (
         <div className="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-          <h4>No Campaigns Yet</h4>
-          <p>Create your first campaign to start collecting KOL data</p>
-          <button className="btn btn-primary" onClick={() => setShowCreate(true)}>Create Campaign</button>
+          <h4>{t('campaigns.no_campaigns')}</h4>
+          <p>{t('campaigns.no_campaigns_hint')}</p>
+          <button className="btn btn-primary" onClick={() => setShowCreate(true)}>{t('campaigns.create_campaign')}</button>
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '16px' }}>
@@ -56,10 +58,10 @@ export default function CampaignList() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
                 <div>
                   <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '4px' }}>{c.name}</h3>
-                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>{c.description || 'No description'}</p>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>{c.description || t('campaigns.no_description')}</p>
                 </div>
                 <span className={`badge ${c.status === 'active' ? 'badge-green' : 'badge-gray'}`}>
-                  {c.status}
+                  {t(`campaigns.status_${c.status}`)}
                 </span>
               </div>
               <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', flexWrap: 'wrap' }}>
@@ -71,9 +73,9 @@ export default function CampaignList() {
                 ))}
               </div>
               <div style={{ display: 'flex', gap: '16px', fontSize: '13px', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
-                <span>📊 {c.kol_total || 0} KOLs</span>
-                <span>✅ {c.kol_approved || 0} approved</span>
-                <span>🎯 {c.daily_target}/day</span>
+                <span>📊 {t('campaigns.kols_total', { count: c.kol_total || 0 })}</span>
+                <span>✅ {t('campaigns.kols_approved', { count: c.kol_approved || 0 })}</span>
+                <span>🎯 {t('campaigns.daily_target_hint', { count: c.daily_target })}</span>
                 {c.budget > 0 && <span>💰 ${Number(c.budget).toLocaleString()}</span>}
               </div>
             </div>
@@ -89,6 +91,7 @@ export default function CampaignList() {
 }
 
 function CreateCampaignModal({ onClose, onCreated }) {
+  const { t } = useI18n();
   const [form, setForm] = useState({
     name: '', description: '', platforms: [], daily_target: 10, budget: 0,
     filter_criteria: { min_followers: 10000, min_engagement: 1, categories: '' }
@@ -118,21 +121,21 @@ function CreateCampaignModal({ onClose, onCreated }) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>Create New Campaign</h3>
+          <h3>{t('campaigns.create_modal_title')}</h3>
           <button className="btn-icon" onClick={onClose}>✕</button>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="modal-body">
             <div className="form-group">
-              <label className="form-label">Campaign Name *</label>
-              <input className="form-input" placeholder="e.g., Hakko AI Q2 Push" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+              <label className="form-label">{t('campaigns.form_name')}</label>
+              <input className="form-input" placeholder={t('campaigns.form_name_placeholder')} value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
             </div>
             <div className="form-group">
-              <label className="form-label">Description</label>
-              <textarea className="form-textarea" placeholder="What's this campaign about?" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} style={{ minHeight: '80px' }} />
+              <label className="form-label">{t('campaigns.form_description')}</label>
+              <textarea className="form-textarea" placeholder={t('campaigns.form_description_placeholder')} value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} style={{ minHeight: '80px' }} />
             </div>
             <div className="form-group">
-              <label className="form-label">Target Platforms</label>
+              <label className="form-label">{t('campaigns.form_platforms')}</label>
               <div className="platform-checks">
                 {PLATFORM_OPTIONS.map(p => (
                   <label key={p.id} className={`platform-check ${form.platforms.includes(p.id) ? 'active' : ''}`} onClick={() => togglePlatform(p.id)}>
@@ -144,33 +147,33 @@ function CreateCampaignModal({ onClose, onCreated }) {
             </div>
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Daily Collection Target</label>
+                <label className="form-label">{t('campaigns.form_daily_target')}</label>
                 <input type="number" className="form-input" value={form.daily_target} onChange={e => setForm(f => ({ ...f, daily_target: parseInt(e.target.value) || 10 }))} min="1" max="100" />
               </div>
               <div className="form-group">
-                <label className="form-label">Campaign Budget ($)</label>
-                <input type="number" className="form-input" placeholder="e.g., 10000" value={form.budget || ''} onChange={e => setForm(f => ({ ...f, budget: parseFloat(e.target.value) || 0 }))} min="0" />
+                <label className="form-label">{t('campaigns.form_budget')}</label>
+                <input type="number" className="form-input" placeholder={t('campaigns.form_budget_placeholder')} value={form.budget || ''} onChange={e => setForm(f => ({ ...f, budget: parseFloat(e.target.value) || 0 }))} min="0" />
               </div>
             </div>
-            <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', marginTop: '8px' }}>Filter Criteria</h4>
+            <h4 style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', marginTop: '8px' }}>{t('campaigns.filter_criteria')}</h4>
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Min Followers</label>
+                <label className="form-label">{t('campaigns.form_min_followers')}</label>
                 <input type="number" className="form-input" value={form.filter_criteria.min_followers} onChange={e => setForm(f => ({ ...f, filter_criteria: { ...f.filter_criteria, min_followers: parseInt(e.target.value) || 0 } }))} />
               </div>
               <div className="form-group">
-                <label className="form-label">Min Engagement Rate (%)</label>
+                <label className="form-label">{t('campaigns.form_min_engagement')}</label>
                 <input type="number" step="0.1" className="form-input" value={form.filter_criteria.min_engagement} onChange={e => setForm(f => ({ ...f, filter_criteria: { ...f.filter_criteria, min_engagement: parseFloat(e.target.value) || 0 } }))} />
               </div>
             </div>
             <div className="form-group">
-              <label className="form-label">Content Categories (comma-separated)</label>
-              <input className="form-input" placeholder="e.g., Gaming, Tech, Entertainment" value={form.filter_criteria.categories} onChange={e => setForm(f => ({ ...f, filter_criteria: { ...f.filter_criteria, categories: e.target.value } }))} />
+              <label className="form-label">{t('campaigns.form_categories')}</label>
+              <input className="form-input" placeholder={t('campaigns.form_categories_placeholder')} value={form.filter_criteria.categories} onChange={e => setForm(f => ({ ...f, filter_criteria: { ...f.filter_criteria, categories: e.target.value } }))} />
             </div>
           </div>
           <div className="modal-footer">
-            <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create Campaign'}</button>
+            <button type="button" className="btn btn-secondary" onClick={onClose}>{t('common.cancel')}</button>
+            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? t('campaigns.creating') : t('campaigns.create_campaign')}</button>
           </div>
         </form>
       </div>
