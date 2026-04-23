@@ -2,16 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
-
-const FORMATS = [
-  { id: 'twitter', label: 'Twitter / X', emoji: '𝕏', hint: 'Single tweet or thread', kind: 'text' },
-  { id: 'linkedin', label: 'LinkedIn', emoji: 'in', hint: '150–300 word post', kind: 'text' },
-  { id: 'blog', label: 'Blog post', emoji: '✎', hint: '600–1200 word article', kind: 'text' },
-  { id: 'email', label: 'Email', emoji: '✉', hint: 'Subject + body', kind: 'text' },
-  { id: 'caption', label: 'Caption', emoji: '#', hint: '<150 chars + hashtags', kind: 'text' },
-  { id: 'youtube-short', label: 'YouTube Short', emoji: '▷', hint: '60s video script', kind: 'text' },
-  { id: 'image', label: 'Image', emoji: '🖼', hint: 'AI-generated illustration', kind: 'image' },
-];
+import { useI18n } from '../i18n';
 
 export default function ContentStudio() {
   const [format, setFormat] = useState('twitter');
@@ -21,6 +12,17 @@ export default function ContentStudio() {
   const [cta, setCta] = useState('');
   const [imageSize, setImageSize] = useState('2k');
   const [enrichPrompt, setEnrichPrompt] = useState(true);
+  const { t } = useI18n();
+
+  const FORMATS = [
+    { id: 'twitter', label: t('studio.format_twitter'), emoji: '𝕏', hint: t('studio.hint_twitter'), kind: 'text' },
+    { id: 'linkedin', label: t('studio.format_linkedin'), emoji: 'in', hint: t('studio.hint_linkedin'), kind: 'text' },
+    { id: 'blog', label: t('studio.format_blog'), emoji: '✎', hint: t('studio.hint_blog'), kind: 'text' },
+    { id: 'email', label: t('studio.format_email'), emoji: '✉', hint: t('studio.hint_email'), kind: 'text' },
+    { id: 'caption', label: t('studio.format_caption'), emoji: '#', hint: t('studio.hint_caption'), kind: 'text' },
+    { id: 'youtube-short', label: t('studio.format_youtube_short'), emoji: '▷', hint: t('studio.hint_youtube_short'), kind: 'text' },
+    { id: 'image', label: t('studio.format_image'), emoji: '🖼', hint: t('studio.hint_image'), kind: 'image' },
+  ];
 
   const currentFormat = FORMATS.find(f => f.id === format);
   const isImage = currentFormat?.kind === 'image';
@@ -60,12 +62,12 @@ export default function ContentStudio() {
   function applyPreset(preset) {
     setBrief(preset.prompt);
     api.usePromptPreset(preset.id).catch(() => {});
-    toast.success(`Applied "${preset.name}"`);
+    toast.success(t('studio.applied_preset', { name: preset.name }));
   }
 
   async function saveAsPreset() {
     if (!brief.trim()) return;
-    const name = window.prompt(`Save this ${isImage ? 'image' : 'text'} brief as a preset. Name:`);
+    const name = window.prompt(isImage ? t('studio.save_preset_prompt_image') : t('studio.save_preset_prompt_text'));
     if (!name) return;
     try {
       await api.createPromptPreset({
@@ -74,7 +76,7 @@ export default function ContentStudio() {
         type: isImage ? 'image' : 'text',
         agent_id: isImage ? 'content-visual' : 'content-text',
       });
-      toast.success(`Saved preset "${name}"`);
+      toast.success(t('studio.saved_preset', { name }));
       loadPresets();
     } catch (e) {
       toast.error(e.message);
@@ -98,7 +100,7 @@ export default function ContentStudio() {
         content,
         mode: 'intent',
       });
-      toast.success('Scheduled');
+      toast.success(t('studio.scheduled'));
       setShowScheduleModal(false);
     } catch (e) {
       toast.error(e.message);
@@ -120,7 +122,7 @@ export default function ContentStudio() {
 
   async function handleGenerate() {
     if (!brief.trim()) {
-      toast.error('Describe what you want written (the "brief")');
+      toast.error(t('studio.brief_required'));
       return;
     }
     setIsGenerating(true);
@@ -166,7 +168,7 @@ export default function ContentStudio() {
               setIsGenerating(false);
             }
             if (ev === 'error') {
-              toast.error(parsed.data?.message || 'Agent failed');
+              toast.error(parsed.data?.message || t('studio.publisher_failed'));
               setIsGenerating(false);
             }
           } catch { /* ignore */ }
@@ -183,17 +185,15 @@ export default function ContentStudio() {
     if (!currentOutput) return;
     try {
       if (isImage) {
-        // Persist the image now — the source URL expires in 24h.
-        // Fetch via our server (avoids CORS) and store as a data URL.
         let persistedUrl = currentOutput.url;
         let persistedBytes = null;
         try {
-          toast.info('Persisting image (downloading bytes)...', 2000);
+          toast.info(t('studio.persisting_image'), 2000);
           const r = await api.fetchAsDataUrl(currentOutput.url);
           persistedUrl = r.data_url;
           persistedBytes = r.byte_size;
         } catch (e) {
-          toast.error('Could not persist image bytes — saving URL (will expire): ' + e.message);
+          toast.error(t('studio.persist_failed', { error: e.message }));
         }
         await api.createContentPiece({
           type: 'image',
@@ -225,7 +225,7 @@ export default function ContentStudio() {
           created_by_agent_run_id: activeRunId,
         });
       }
-      toast.success('Saved to your library');
+      toast.success(t('studio.saved_library'));
       await loadPieces();
     } catch (e) {
       toast.error(e.message);
@@ -238,7 +238,7 @@ export default function ContentStudio() {
       ? `${currentOutput.title}\n\n${currentOutput.body}${currentOutput.hashtags?.length ? '\n\n' + currentOutput.hashtags.join(' ') : ''}`
       : currentOutput.body;
     navigator.clipboard.writeText(text);
-    toast.success('Copied to clipboard');
+    toast.success(t('studio.copied'));
   }
 
   async function handlePublish(platforms) {
@@ -254,7 +254,6 @@ export default function ContentStudio() {
             hashtags: currentOutput.hashtags || [],
           };
       const r = await api.runAgent('publisher', { content, platforms });
-      // Poll for completion — publisher is synchronous and fast
       let tries = 0;
       while (tries < 20) {
         await new Promise(res => setTimeout(res, 500));
@@ -264,7 +263,7 @@ export default function ContentStudio() {
           break;
         }
         if (run.status === 'error') {
-          throw new Error(run.error || 'Publisher failed');
+          throw new Error(run.error || t('studio.publisher_failed'));
         }
         tries++;
       }
@@ -276,11 +275,11 @@ export default function ContentStudio() {
   }
 
   async function handleDelete(pieceId) {
-    const ok = await confirmDialog('Delete this piece?', { danger: true, confirmText: 'Delete' });
+    const ok = await confirmDialog(t('studio.delete_piece'), { danger: true, confirmText: t('common.delete') });
     if (!ok) return;
     try {
       await api.deleteContentPiece(pieceId);
-      toast.success('Deleted');
+      toast.success(t('studio.deleted'));
       loadPieces();
     } catch (e) {
       toast.error(e.message);
@@ -291,17 +290,16 @@ export default function ContentStudio() {
     <div className="page-container fade-in">
       <div className="page-header">
         <div>
-          <h2>Content Studio</h2>
-          <p>Describe what you want written. AI writes. You polish.</p>
+          <h2>{t('studio.title')}</h2>
+          <p>{t('studio.subtitle')}</p>
         </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-        {/* Left: input form */}
         <div className="card">
-          <h3 style={{ marginBottom: 14 }}>Brief</h3>
+          <h3 style={{ marginBottom: 14 }}>{t('studio.brief')}</h3>
 
-          <label className="form-label">Format</label>
+          <label className="form-label">{t('studio.format')}</label>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 16 }}>
             {FORMATS.map(f => (
               <button
@@ -324,7 +322,7 @@ export default function ContentStudio() {
 
           {presets.length > 0 && (
             <div style={{ marginBottom: 14 }}>
-              <label className="form-label" style={{ fontSize: 12 }}>Your presets (click to apply)</label>
+              <label className="form-label" style={{ fontSize: 12 }}>{t('studio.your_presets')}</label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {presets.map(p => (
                   <button
@@ -346,7 +344,7 @@ export default function ContentStudio() {
 
           <div className="form-group">
             <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>{isImage ? 'What should the image show?' : 'What should this say?'}</span>
+              <span>{isImage ? t('studio.brief_label_image') : t('studio.brief_label_text')}</span>
               {brief.trim() && (
                 <button
                   onClick={saveAsPreset}
@@ -354,15 +352,13 @@ export default function ContentStudio() {
                     fontSize: 11, color: 'var(--accent)', background: 'none',
                     border: 'none', cursor: 'pointer', padding: 0,
                   }}
-                  title="Save this brief as a reusable preset"
-                >💾 Save preset</button>
+                  title={t('studio.save_preset_tip')}
+                >{t('studio.save_preset')}</button>
               )}
             </label>
             <textarea
               className="form-textarea"
-              placeholder={isImage
-                ? 'e.g. A minimalist dashboard screenshot of our product, soft pastel palette, isometric view, floating over a clean gradient background'
-                : 'e.g. Announce our new AI agents feature. Focus on how it saves solo founders 20 hours/week. Include a self-deprecating hook.'}
+              placeholder={isImage ? t('studio.brief_placeholder_image') : t('studio.brief_placeholder_text')}
               value={brief}
               onChange={e => setBrief(e.target.value)}
               style={{ minHeight: 110 }}
@@ -372,17 +368,17 @@ export default function ContentStudio() {
           {isImage && (
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Size</label>
+                <label className="form-label">{t('studio.size')}</label>
                 <select className="form-select" value={imageSize} onChange={e => setImageSize(e.target.value)}>
-                  <option value="2k">2K (balanced, ~¢4)</option>
-                  <option value="3k">3K (high-res, ~¢8)</option>
+                  <option value="2k">{t('studio.size_2k')}</option>
+                  <option value="3k">{t('studio.size_3k')}</option>
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">Prompt enrichment</label>
+                <label className="form-label">{t('studio.prompt_enrichment')}</label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, padding: '10px 0', cursor: 'pointer' }}>
                   <input type="checkbox" checked={enrichPrompt} onChange={e => setEnrichPrompt(e.target.checked)} />
-                  Expand brief via Claude first (+¢2)
+                  {t('studio.enrich_hint')}
                 </label>
               </div>
             </div>
@@ -390,14 +386,14 @@ export default function ContentStudio() {
 
           <div className="form-row">
             <div className="form-group">
-              <label className="form-label">{isImage ? 'Aspect/use (optional)' : 'Audience (optional)'}</label>
-              <input className="form-input" placeholder={isImage ? 'Instagram post / blog hero / Twitter card' : 'SaaS founders'} value={audience} onChange={e => setAudience(e.target.value)} />
+              <label className="form-label">{isImage ? t('studio.aspect') : t('studio.audience')}</label>
+              <input className="form-input" placeholder={isImage ? t('studio.aspect_placeholder') : t('studio.audience_placeholder')} value={audience} onChange={e => setAudience(e.target.value)} />
             </div>
             <div className="form-group">
-              <label className="form-label">Brand voice</label>
+              <label className="form-label">{t('studio.brand_voice')}</label>
               <select className="form-select" value={voiceId} onChange={e => setVoiceId(e.target.value)}>
-                <option value="">None (default)</option>
-                {voices.map(v => <option key={v.id} value={v.id}>{v.name}{v.is_default ? ' (default)' : ''}</option>)}
+                <option value="">{t('studio.brand_voice_none')}</option>
+                {voices.map(v => <option key={v.id} value={v.id}>{v.name}{v.is_default ? t('studio.brand_voice_default_suffix') : ''}</option>)}
               </select>
             </div>
           </div>
@@ -405,12 +401,12 @@ export default function ContentStudio() {
           {!isImage && (
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Keywords (comma-sep)</label>
-                <input className="form-input" placeholder="ai, marketing, automation" value={keywords} onChange={e => setKeywords(e.target.value)} />
+                <label className="form-label">{t('studio.keywords')}</label>
+                <input className="form-input" placeholder={t('studio.keywords_placeholder')} value={keywords} onChange={e => setKeywords(e.target.value)} />
               </div>
               <div className="form-group">
-                <label className="form-label">Call to action (optional)</label>
-                <input className="form-input" placeholder="Sign up for early access" value={cta} onChange={e => setCta(e.target.value)} />
+                <label className="form-label">{t('studio.cta')}</label>
+                <input className="form-input" placeholder={t('studio.cta_placeholder')} value={cta} onChange={e => setCta(e.target.value)} />
               </div>
             </div>
           )}
@@ -421,19 +417,18 @@ export default function ContentStudio() {
             disabled={isGenerating || !brief.trim()}
             style={{ width: '100%', fontSize: 15, padding: 12 }}
           >
-            {isGenerating ? '⏳ Writing…' : '✨ Generate'}
+            {isGenerating ? t('studio.generating') : t('studio.generate')}
           </button>
         </div>
 
-        {/* Right: output */}
         <div className="card">
-          <h3 style={{ marginBottom: 14 }}>Output</h3>
+          <h3 style={{ marginBottom: 14 }}>{t('studio.output')}</h3>
 
           {isGenerating && (
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 13, color: 'var(--accent)' }}>
                 <div className="loading-pulse" style={{ width: 8, height: 8, borderRadius: 4, background: 'var(--accent)' }} />
-                Writing with Claude…
+                {t('studio.writing_with_claude')}
               </div>
               <div style={{
                 maxHeight: 200, overflowY: 'auto', fontFamily: 'monospace',
@@ -451,7 +446,7 @@ export default function ContentStudio() {
 
           {!isGenerating && !currentOutput && (
             <div className="empty-state" style={{ padding: 40 }}>
-              <p>Fill in the brief on the left and click Generate.</p>
+              <p>{t('studio.empty_output')}</p>
             </div>
           )}
 
@@ -467,7 +462,7 @@ export default function ContentStudio() {
               />
               <details style={{ marginBottom: 12 }}>
                 <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>
-                  Prompt used ({currentOutput.prompt?.length || 0} chars)
+                  {t('studio.prompt_used', { count: currentOutput.prompt?.length || 0 })}
                 </summary>
                 <div style={{
                   fontSize: 12, color: 'var(--text-secondary)', marginTop: 6,
@@ -477,15 +472,15 @@ export default function ContentStudio() {
                 </div>
               </details>
               <div className="btn-group">
-                <button className="btn btn-primary btn-sm" onClick={handleSave}>💾 Save</button>
+                <button className="btn btn-primary btn-sm" onClick={handleSave}>{t('studio.save')}</button>
                 <a
                   className="btn btn-secondary btn-sm"
                   href={currentOutput.url}
                   target="_blank"
                   rel="noreferrer"
                   download
-                >⬇ Open / download</a>
-                <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>🔄 Regenerate</button>
+                >{t('studio.open_download')}</a>
+                <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>{t('studio.regenerate')}</button>
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
                 {currentOutput.size} · {currentOutput.provider} · {currentOutput.model}
@@ -514,29 +509,29 @@ export default function ContentStudio() {
               )}
               {currentOutput.reasoning && (
                 <details style={{ marginBottom: 12 }}>
-                  <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>Reasoning</summary>
+                  <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>{t('studio.reasoning')}</summary>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6, lineHeight: 1.5 }}>
                     {currentOutput.reasoning}
                   </div>
                 </details>
               )}
               <div className="btn-group">
-                <button className="btn btn-primary btn-sm" onClick={handleSave}>💾 Save</button>
-                <button className="btn btn-secondary btn-sm" onClick={handleCopy}>📋 Copy</button>
-                <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>🔄 Regenerate</button>
+                <button className="btn btn-primary btn-sm" onClick={handleSave}>{t('studio.save')}</button>
+                <button className="btn btn-secondary btn-sm" onClick={handleCopy}>{t('studio.copy')}</button>
+                <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>{t('studio.regenerate')}</button>
                 <button className="btn btn-secondary btn-sm" onClick={() => handlePublish(defaultPlatformsFor(format))} disabled={isPublishing}>
-                  {isPublishing ? '...' : '🚀 Publish'}
+                  {isPublishing ? '...' : t('studio.publish')}
                 </button>
                 <button className="btn btn-secondary btn-sm" onClick={() => {
                   const now = new Date();
                   now.setHours(now.getHours() + 1, 0, 0, 0);
                   setScheduleAt(now.toISOString().slice(0, 16));
                   setShowScheduleModal(true);
-                }}>📅 Schedule</button>
+                }}>{t('studio.schedule')}</button>
               </div>
               {currentOutput.word_count && (
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
-                  {currentOutput.word_count} words
+                  {t('studio.words', { count: currentOutput.word_count })}
                 </div>
               )}
             </div>
@@ -544,15 +539,14 @@ export default function ContentStudio() {
         </div>
       </div>
 
-      {/* Publish results panel */}
       {publishResults && publishResults.length > 0 && (
         <div className="card" style={{ marginTop: 20 }}>
           <div className="card-header">
-            <h3>Publish package ({publishResults.length} platform{publishResults.length > 1 ? 's' : ''})</h3>
-            <button className="btn-icon" onClick={() => setPublishResults(null)} title="Close">✕</button>
+            <h3>{t('studio.publish_package', { count: publishResults.length })}</h3>
+            <button className="btn-icon" onClick={() => setPublishResults(null)} title={t('common.close')}>✕</button>
           </div>
           <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 14px' }}>
-            Each card opens that platform's composer with your text pre-filled. Review + post in the native UI.
+            {t('studio.publish_note')}
           </p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 12 }}>
             {publishResults.map(r => (
@@ -578,11 +572,11 @@ export default function ContentStudio() {
                     {r.tweets && r.tweets.length > 1 && (
                       <details style={{ marginBottom: 8, fontSize: 11 }}>
                         <summary style={{ color: 'var(--text-muted)', cursor: 'pointer' }}>
-                          Full thread ({r.tweets.length} tweets)
+                          {t('studio.full_thread', { count: r.tweets.length })}
                         </summary>
                         <ol style={{ paddingLeft: 20, marginTop: 6 }}>
-                          {r.tweets.map((t, i) => (
-                            <li key={i} style={{ marginBottom: 6, color: 'var(--text-secondary)' }}>{t}</li>
+                          {r.tweets.map((tw, i) => (
+                            <li key={i} style={{ marginBottom: 6, color: 'var(--text-secondary)' }}>{tw}</li>
                           ))}
                         </ol>
                       </details>
@@ -600,13 +594,13 @@ export default function ContentStudio() {
                         rel="noreferrer"
                         style={{ flex: 1, textAlign: 'center', textDecoration: 'none' }}
                       >
-                        Open in {r.platform}
+                        {t('studio.open_in', { platform: r.platform })}
                       </a>
                       <button
                         className="btn btn-secondary btn-sm"
                         onClick={() => {
                           navigator.clipboard.writeText(r.text);
-                          toast.success(`Copied ${r.platform} version`);
+                          toast.success(t('studio.copied_platform', { platform: r.platform }));
                         }}
                       >
                         📋
@@ -620,11 +614,10 @@ export default function ContentStudio() {
         </div>
       )}
 
-      {/* Recent library */}
       <div className="card" style={{ marginTop: 20 }}>
-        <h3 style={{ marginBottom: 14 }}>Your library ({pieces.length})</h3>
+        <h3 style={{ marginBottom: 14 }}>{t('studio.library', { count: pieces.length })}</h3>
         {pieces.length === 0 ? (
-          <div className="empty-state"><p>Save a piece with the 💾 button above to build your library.</p></div>
+          <div className="empty-state"><p>{t('studio.library_empty')}</p></div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
             {pieces.map(p => (
@@ -659,20 +652,19 @@ export default function ContentStudio() {
         )}
       </div>
 
-      {/* Schedule modal */}
       {showScheduleModal && (
         <div className="modal-overlay" onClick={() => setShowScheduleModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
             <div className="modal-header">
-              <h3>Schedule publish</h3>
+              <h3>{t('studio.schedule_publish')}</h3>
               <button className="btn-icon" onClick={() => setShowScheduleModal(false)}>✕</button>
             </div>
             <div className="modal-body">
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
-                The Publisher agent will generate intent URLs at the chosen time and notify you. Platforms:{' '}
+                {t('studio.schedule_note')}
                 <strong>{defaultPlatformsFor(format).join(', ')}</strong>
               </p>
-              <label className="form-label">Scheduled time (local)</label>
+              <label className="form-label">{t('studio.scheduled_time')}</label>
               <input
                 type="datetime-local"
                 className="form-input"
@@ -681,9 +673,9 @@ export default function ContentStudio() {
               />
             </div>
             <div className="modal-footer">
-              <button className="btn btn-secondary" onClick={() => setShowScheduleModal(false)}>Cancel</button>
+              <button className="btn btn-secondary" onClick={() => setShowScheduleModal(false)}>{t('common.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSchedule} disabled={!scheduleAt}>
-                Schedule
+                {t('common.schedule')}
               </button>
             </div>
           </div>
@@ -702,7 +694,6 @@ export default function ContentStudio() {
 }
 
 function defaultPlatformsFor(format) {
-  // Map Content Studio format → reasonable default publishing targets.
   const map = {
     twitter: ['twitter'],
     linkedin: ['linkedin'],
