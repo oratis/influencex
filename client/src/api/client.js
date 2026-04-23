@@ -285,4 +285,7 @@ export const api = {
 
   // Ads strategist — synchronous plan generation.
   createAdsPlan: (data) => request('/ads/plan', { method: 'POST', body: data }),
+
+  // Translate — batched multi-language localization.
+  translate: (data) => request('/translate', { method: 'POST', body: data }),
 };

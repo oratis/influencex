@@ -2556,6 +2556,66 @@ app.post(`${BASE_PATH}/api/ads/plan`, async (req, res) => {
   }
 });
 
+// POST /api/translate — synchronous wrapper around the translate agent.
+// Mirrors /api/ads/plan: persists run + traces, resolves on 'complete',
+// rejects on 'error' or timeout. Returns { translations, source_language,
+// cost, runId }.
+app.post(`${BASE_PATH}/api/translate`, async (req, res) => {
+  const AGENT_ID = 'translate';
+  const TIMEOUT_MS = 120_000;
+  try {
+    const agent = agentRuntime.getAgent(AGENT_ID);
+    if (!agent) return res.status(404).json({ error: 'Translate agent not registered' });
+
+    const estimate = agentRuntime.estimateCost(AGENT_ID, req.body) || {};
+    const { runId, stream } = agentRuntime.createRun(AGENT_ID, req.body, {
+      workspaceId: req.workspace?.id,
+      userId: req.user?.id,
+      db: { query, queryOne, exec },
+      uuidv4,
+    });
+
+    await exec(
+      'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status, cost_usd_cents) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [runId, req.workspace?.id || null, AGENT_ID, req.user?.id || null, JSON.stringify(req.body || {}), 'running', estimate.usdCents || 0]
+    );
+
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Object.assign(new Error('Translate timed out'), { status: 504 })), TIMEOUT_MS);
+      stream.on('event', async (evt) => {
+        try {
+          await exec(
+            'INSERT INTO agent_traces (id, run_id, event_type, data) VALUES (?, ?, ?, ?)',
+            [uuidv4(), runId, evt.type, JSON.stringify(evt.data || {})]
+          );
+        } catch (persistErr) {
+          console.warn('[translate] trace persist error:', persistErr.message);
+        }
+        if (evt.type === 'complete') {
+          clearTimeout(timer);
+          const cost = evt.data?.cost || {};
+          await exec(
+            `UPDATE agent_runs SET status=?, output=?, cost_usd_cents=?, input_tokens=?, output_tokens=?, duration_ms=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
+            ['complete', JSON.stringify(evt.data.output || {}), cost.usdCents || 0, cost.inputTokens || 0, cost.outputTokens || 0, evt.data.durationMs || null, runId]
+          );
+          resolve({ ...(evt.data.output || {}), cost, runId });
+        } else if (evt.type === 'error') {
+          clearTimeout(timer);
+          await exec(
+            "UPDATE agent_runs SET status='error', error=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+            [evt.data?.message || 'unknown', runId]
+          );
+          reject(Object.assign(new Error(evt.data?.message || 'translate agent error'), { status: 400 }));
+        }
+      });
+    });
+
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // Conductor — build a plan from a goal
 app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
   try {
