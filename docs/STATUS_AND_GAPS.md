@@ -113,10 +113,10 @@ SQLite 不支持 `ALTER COLUMN ... DROP NOT NULL`。当前 `catch` 仅匹配 `/d
 
 1. **修 migration 错误**，恢复 CI 护栏（§4.1）。
 2. **推送未同步的 2 个 commit** 到 GitHub origin/main。
-3. **Publisher Agent v2**：把直发收敛进 Agent 接口，补 TikTok / Instagram（已搭 OAuth，未验证）/ Threads / Facebook OAuth；把 `scheduled_posts` 接进 `scheduler.js` 真正定时发。（YouTube OAuth + Data API v3 resumable upload 已在 2026-04-23 接通。）
-4. ~~**Translate Agent**（Phase C 承诺）：内容 localize 12+ 语言。~~ ✅ 2026-04-23 骨架已落地（`server/agents-v2/translate.js`，`translate.batch` capability，单次 LLM 批量输出 N 语言）；尚需前端 UI 与内容管道接入。
+3. **Publisher Agent v2**：把直发收敛进一个 Agent 接口（把 intent/direct 收敛成一路）。OAuth 侧：2026-04-23 TikTok / Threads / Facebook (Pages) / Pinterest / Reddit provider 已补齐（+ YouTube OAuth + Data API v3 resumable upload）。定时派发侧：2026-04-23 retry-with-backoff 上线（`next_retry_at` + `max_attempts` + 指数退避 2/10/30/120 min），transient 失败（429 / 5xx / 网络超时）自动重试直到 `max_attempts`。
+4. ~~**Translate Agent**（Phase C 承诺）：内容 localize 12+ 语言。~~ ✅ 2026-04-23 agent + `/api/translate` + `/translate` UI 全链路打通（`server/agents-v2/translate.js`，`translate.batch` capability，单次 LLM 批量输出 N 语言）。
 5. ~~**Ads Agent MVP**（Phase D 起步）：至少 Meta Ads + Google Ads + 统一 UTMs/归因表，即便最初只在 dashboard 聚合。~~ ✅ 2026-04-23 Ads Strategist Agent + `/api/ads/plan` + UI 已上线（离线规划，暂无实盘下单）。
-6. **Analytics Agent**（Phase F）：把 `data-agent.js` 迁到 v2，产出周报 + Kill/Double-down 建议。
+6. ~~**Analytics Agent**（Phase F）：把 `data-agent.js` 迁到 v2，产出周报 + Kill/Double-down 建议。~~ ✅ 2026-04-23 骨架已落地（`server/agents-v2/analytics.js`，`analytics.interpret` capability，消费现有 `/api/analytics/*` 聚合、产出 insights + anomalies + ranked recommendations with `suggested_agent` 映射）；尚需前端报告 UI + Conductor 定期跑。
 7. ~~**Community Agent MVP**（Phase G）：先对接 X + LinkedIn comment/DM 抓取 + 草稿回复；统一 inbox 表结构。~~ ✅ 2026-04-23 Community Inbox UI + inbox API + Agent fetch/classify/draft 已上线。
 8. **数据层收尾**：pgvector 引入（品牌语音 embedding）、Redis/BullMQ 替换 in-process 队列、OpenTelemetry trace。
 9. **Plugin API spec**（Phase H 依赖）、**Usage metering** 精确到 tokens / API calls，而非仅 usdCents。

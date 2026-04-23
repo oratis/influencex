@@ -510,6 +510,29 @@ const MIGRATIONS = [
       }
     },
   },
+
+  {
+    id: '2026-04-23-sched-publish-retry',
+    description: 'next_retry_at + max_attempts + error_message on scheduled_publishes for retry-with-backoff',
+    up: async ({ exec }) => {
+      // Backoff window persisted per-row so we survive server restarts.
+      // A row stays 'pending' across retries and only flips to 'error' when
+      // attempts ≥ max_attempts. The due-query treats next_retry_at as the
+      // effective scheduled_at (coalesce in scheduled-publish.js).
+      for (const stmt of [
+        'ALTER TABLE scheduled_publishes ADD COLUMN next_retry_at TIMESTAMP',
+        'ALTER TABLE scheduled_publishes ADD COLUMN max_attempts INTEGER DEFAULT 3',
+        'ALTER TABLE scheduled_publishes ADD COLUMN error_message TEXT',
+      ]) {
+        try { await exec(stmt); } catch (e) {
+          if (!/already exists|duplicate column/i.test(e.message)) throw e;
+        }
+      }
+      try {
+        await exec('CREATE INDEX IF NOT EXISTS idx_sched_pub_retry ON scheduled_publishes(status, next_retry_at)');
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+    },
+  },
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

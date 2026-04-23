@@ -19,6 +19,29 @@
  */
 
 const DEFAULT_INTERVAL_MS = parseInt(process.env.SCHED_PUBLISH_TICK_MS) || 60_000;
+const DEFAULT_MAX_ATTEMPTS = parseInt(process.env.SCHED_PUBLISH_MAX_ATTEMPTS) || 3;
+
+// Exponential backoff: 2min, 10min, 30min, then cap at 2h for any further
+// attempts. Keeps the tight first retry for transient network blips while
+// still yielding a sensible ceiling for ratelimit / provider-outage scenarios.
+const BACKOFF_SCHEDULE_MINUTES = [2, 10, 30, 120];
+
+function nextRetryDelayMs(attempts) {
+  const idx = Math.min(Math.max(attempts - 1, 0), BACKOFF_SCHEDULE_MINUTES.length - 1);
+  return BACKOFF_SCHEDULE_MINUTES[idx] * 60_000;
+}
+
+// Not every failure should be retried. Input-level errors (missing image_url,
+// invalid subreddit) won't magically succeed later — we fail them fast.
+// Transient signals: 429 ratelimit, 5xx upstream, network timeouts.
+function isRetryable(errorMessage) {
+  if (!errorMessage) return false;
+  const msg = errorMessage.toLowerCase();
+  if (/\b(429|5\d\d)\b/.test(msg)) return true;
+  if (/timeout|timedout|timed out|econnreset|enotfound|econnrefused|network/i.test(msg)) return true;
+  if (/rate[- ]?limit|too many requests/i.test(msg)) return true;
+  return false;
+}
 
 let timer = null;
 let ticking = false;
@@ -41,8 +64,11 @@ async function processDue(deps) {
   const limit = deps.limit || 20;
 
   const nowIso = new Date().toISOString();
+  // A row is due when its scheduled_at (first run) or next_retry_at (subsequent
+  // retries) is in the past. COALESCE keeps the query portable between SQLite
+  // and Postgres; the index idx_sched_pub_retry covers (status, next_retry_at).
   const due = await query(
-    "SELECT * FROM scheduled_publishes WHERE status = 'pending' AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT ?",
+    "SELECT * FROM scheduled_publishes WHERE status = 'pending' AND COALESCE(next_retry_at, scheduled_at) <= ? ORDER BY COALESCE(next_retry_at, scheduled_at) ASC LIMIT ?",
     [nowIso, limit]
   );
   const rows = due.rows || [];
@@ -116,11 +142,25 @@ async function processDue(deps) {
       }
 
       if (finalError) {
-        await exec(
-          "UPDATE scheduled_publishes SET status='error', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-          [JSON.stringify({ error: finalError, output: finalOutput }), row.id]
-        );
-        failed++;
+        const attemptsSoFar = (row.attempts || 0) + 1; // we incremented above
+        const maxAttempts = row.max_attempts || DEFAULT_MAX_ATTEMPTS;
+        const canRetry = isRetryable(finalError) && attemptsSoFar < maxAttempts;
+
+        if (canRetry) {
+          const nextRetryAt = new Date(Date.now() + nextRetryDelayMs(attemptsSoFar)).toISOString();
+          await exec(
+            "UPDATE scheduled_publishes SET status='pending', next_retry_at=?, error_message=?, result=? WHERE id=?",
+            [nextRetryAt, finalError.slice(0, 500), JSON.stringify({ error: finalError, output: finalOutput, attempt: attemptsSoFar }), row.id]
+          );
+          // We count it as failed for this tick, but it'll be retried.
+          failed++;
+        } else {
+          await exec(
+            "UPDATE scheduled_publishes SET status='error', result=?, error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+            [JSON.stringify({ error: finalError, output: finalOutput, final_attempt: attemptsSoFar }), finalError.slice(0, 500), row.id]
+          );
+          failed++;
+        }
       } else {
         await exec(
           "UPDATE scheduled_publishes SET status='complete', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -146,9 +186,12 @@ async function processDue(deps) {
         }
       }
     } catch (e) {
+      // Thrown exceptions (parse errors, DB-level failures) are unusual —
+      // keep the short-circuit error state and surface the message. Retries
+      // for transient exceptions are handled above via the isRetryable path.
       await exec(
-        "UPDATE scheduled_publishes SET status='error', result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-        [JSON.stringify({ error: e.message }), row.id]
+        "UPDATE scheduled_publishes SET status='error', result=?, error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+        [JSON.stringify({ error: e.message }), (e.message || '').slice(0, 500), row.id]
       ).catch(() => {});
       failed++;
     }
@@ -176,4 +219,4 @@ function stop() {
   if (timer) { clearInterval(timer); timer = null; }
 }
 
-module.exports = { processDue, start, stop };
+module.exports = { processDue, start, stop, isRetryable, nextRetryDelayMs, BACKOFF_SCHEDULE_MINUTES };

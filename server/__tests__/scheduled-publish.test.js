@@ -14,7 +14,17 @@ function makeFakeDb({ scheduledRows = [], connections = [] } = {}) {
   async function query(sql, params) {
     if (/FROM scheduled_publishes/i.test(sql) && /status = 'pending'/.test(sql)) {
       const now = params[0];
-      return { rows: state.scheduled.filter(r => r.status === 'pending' && r.scheduled_at <= now) };
+      // Return shallow copies so caller can't observe mid-flight mutations
+      // made by subsequent UPDATEs — a real DB returns values, not refs.
+      return {
+        rows: state.scheduled
+          .filter(r => {
+            if (r.status !== 'pending') return false;
+            const effective = r.next_retry_at || r.scheduled_at;
+            return effective <= now;
+          })
+          .map(r => ({ ...r })),
+      };
     }
     return { rows: [] };
   }
@@ -30,9 +40,21 @@ function makeFakeDb({ scheduledRows = [], connections = [] } = {}) {
     if (/UPDATE scheduled_publishes SET status='running'/.test(sql)) {
       const row = state.scheduled.find(r => r.id === params[0]);
       if (row) { row.status = 'running'; row.attempts = (row.attempts || 0) + 1; }
+    } else if (/UPDATE scheduled_publishes SET status='pending'/.test(sql)) {
+      // Retry path: status=pending, next_retry_at=?, error_message=?, result=? WHERE id=?
+      const row = state.scheduled.find(r => r.id === params[3]);
+      if (row) {
+        row.status = 'pending';
+        row.next_retry_at = params[0];
+        row.error_message = params[1];
+        row.result = params[2];
+      }
     } else if (/UPDATE scheduled_publishes SET status='error'/.test(sql)) {
-      const row = state.scheduled.find(r => r.id === params[1]);
-      if (row) { row.status = 'error'; row.result = params[0]; }
+      // Two shapes: 4 params (result, error_message, id + completed_at literal)
+      // and 3 params (result, error_message, id). Find id by last param.
+      const id = params[params.length - 1];
+      const row = state.scheduled.find(r => r.id === id);
+      if (row) { row.status = 'error'; row.result = params[0]; row.error_message = params[1]; }
     } else if (/UPDATE scheduled_publishes SET status='complete'/.test(sql)) {
       const row = state.scheduled.find(r => r.id === params[1]);
       if (row) { row.status = 'complete'; row.result = params[0]; }
@@ -94,18 +116,19 @@ test('direct mode: posts to every platform and marks complete when at least one 
   assert.equal(saved.results[1].success, false);
 });
 
-test('direct mode: marks row as error when every platform fails', async () => {
+test('direct mode: marks row as error when every platform fails with non-retryable error', async () => {
   const db = makeFakeDb({
     scheduledRows: [{
       id: 'sp-2', workspace_id: 'ws-1', mode: 'direct', status: 'pending',
-      scheduled_at: nowIso,
+      scheduled_at: nowIso, max_attempts: 3,
       platforms: JSON.stringify(['twitter']),
       content_snapshot: JSON.stringify({ body: 'test', type: 'text' }),
     }],
     connections: [{ id: 'c1', workspace_id: 'ws-1', platform: 'twitter', access_token: 'tok' }],
   });
+  // Non-retryable — malformed request won't succeed on a second attempt.
   const publishOauth = makePublishOauth({
-    publishImpl: async () => ({ success: false, error: 'rate limited' }),
+    publishImpl: async () => ({ success: false, error: 'Bad Request: malformed payload' }),
   });
 
   const r = await processDue({
@@ -114,9 +137,9 @@ test('direct mode: marks row as error when every platform fails', async () => {
   });
 
   assert.equal(r.failed, 1);
-  assert.equal(db.state.scheduled[0].status, 'error');
+  assert.equal(db.state.scheduled[0].status, 'error', 'non-retryable error should end in error status');
   const saved = JSON.parse(db.state.scheduled[0].result);
-  assert.ok(/twitter: rate limited/.test(saved.error));
+  assert.ok(/twitter:.*malformed/.test(saved.error));
 });
 
 test('direct mode: missing platform_connection records a per-platform error without crashing', async () => {
@@ -181,4 +204,107 @@ test('intent mode: routes through publisher agent and marks complete', async () 
   });
   assert.equal(r.ok, 1);
   assert.equal(db.state.scheduled[0].status, 'complete');
+});
+
+// --- Retry-with-backoff tests ---------------------------------------------
+
+const { isRetryable, nextRetryDelayMs } = require('../scheduled-publish');
+
+test('isRetryable: transient signals return true, input errors return false', () => {
+  // Retryable
+  assert.equal(isRetryable('rate limited'), true);
+  assert.equal(isRetryable('Too Many Requests'), true);
+  assert.equal(isRetryable('Twitter API 429: ...'), true);
+  assert.equal(isRetryable('LinkedIn API 503: upstream down'), true);
+  assert.equal(isRetryable('fetch failed: ETIMEDOUT'), true);
+  assert.equal(isRetryable('ECONNRESET'), true);
+  // Not retryable
+  assert.equal(isRetryable('Bad Request: missing image_url'), false);
+  assert.equal(isRetryable('medium not connected for this workspace'), false);
+  assert.equal(isRetryable('Reddit: title is required'), false);
+  assert.equal(isRetryable(''), false);
+  assert.equal(isRetryable(null), false);
+});
+
+test('nextRetryDelayMs: 2min → 10min → 30min → 120min cap', () => {
+  assert.equal(nextRetryDelayMs(1), 2 * 60_000);
+  assert.equal(nextRetryDelayMs(2), 10 * 60_000);
+  assert.equal(nextRetryDelayMs(3), 30 * 60_000);
+  assert.equal(nextRetryDelayMs(4), 120 * 60_000);
+  assert.equal(nextRetryDelayMs(99), 120 * 60_000); // capped
+});
+
+test('direct mode: transient failure reschedules row as pending with next_retry_at', async () => {
+  const db = makeFakeDb({
+    scheduledRows: [{
+      id: 'sp-retry-1', workspace_id: 'ws-1', mode: 'direct', status: 'pending',
+      scheduled_at: nowIso, max_attempts: 3, attempts: 0,
+      platforms: JSON.stringify(['twitter']),
+      content_snapshot: JSON.stringify({ body: 'hi', type: 'text' }),
+    }],
+    connections: [{ id: 'c1', workspace_id: 'ws-1', platform: 'twitter', access_token: 'tok' }],
+  });
+  const publishOauth = makePublishOauth({
+    publishImpl: async () => ({ success: false, error: 'Twitter API 429: rate limited' }),
+  });
+
+  const beforeTick = Date.now();
+  const r = await processDue({
+    query: db.query, queryOne: db.queryOne, exec: db.exec,
+    uuidv4: () => 'x', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+  });
+
+  assert.equal(r.failed, 1, 'counted as failed for this tick');
+  const row = db.state.scheduled[0];
+  assert.equal(row.status, 'pending', 'row should stay pending for retry');
+  assert.ok(row.next_retry_at, 'next_retry_at must be set');
+  const retryAtMs = new Date(row.next_retry_at).getTime();
+  // First retry uses the 2-minute schedule. Allow ±5s jitter for test timing.
+  assert.ok(retryAtMs - beforeTick >= 2 * 60_000 - 5000, 'next_retry_at should be ≥ 2min away');
+  assert.ok(retryAtMs - beforeTick <= 2 * 60_000 + 5000, 'next_retry_at should be ≤ 2min+jitter');
+  assert.match(row.error_message, /rate limited/);
+});
+
+test('direct mode: retryable failure at max_attempts flips row to error', async () => {
+  const db = makeFakeDb({
+    scheduledRows: [{
+      id: 'sp-retry-final', workspace_id: 'ws-1', mode: 'direct', status: 'pending',
+      scheduled_at: nowIso, max_attempts: 3, attempts: 2, // one more attempt to hit the cap
+      platforms: JSON.stringify(['twitter']),
+      content_snapshot: JSON.stringify({ body: 'hi', type: 'text' }),
+    }],
+    connections: [{ id: 'c1', workspace_id: 'ws-1', platform: 'twitter', access_token: 'tok' }],
+  });
+  const publishOauth = makePublishOauth({
+    publishImpl: async () => ({ success: false, error: 'Twitter API 429: still rate limited' }),
+  });
+  const r = await processDue({
+    query: db.query, queryOne: db.queryOne, exec: db.exec,
+    uuidv4: () => 'x', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+  });
+  assert.equal(r.failed, 1);
+  const row = db.state.scheduled[0];
+  assert.equal(row.status, 'error', 'should flip to error once attempts ≥ max_attempts');
+  const saved = JSON.parse(row.result);
+  assert.equal(saved.final_attempt, 3);
+});
+
+test('direct mode: row with next_retry_at in the future is NOT picked up', async () => {
+  const future = new Date(Date.now() + 60_000).toISOString();
+  const db = makeFakeDb({
+    scheduledRows: [{
+      id: 'sp-future', workspace_id: 'ws-1', mode: 'direct', status: 'pending',
+      scheduled_at: new Date(Date.now() - 300_000).toISOString(),
+      next_retry_at: future,
+      platforms: JSON.stringify(['twitter']),
+      content_snapshot: JSON.stringify({ body: 'hi', type: 'text' }),
+    }],
+  });
+  const r = await processDue({
+    query: db.query, queryOne: db.queryOne, exec: db.exec,
+    uuidv4: () => 'x', publishOauth: makePublishOauth({ publishImpl: async () => ({}) }),
+    agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+  });
+  assert.deepEqual(r, { processed: 0, ok: 0, failed: 0 });
+  assert.equal(db.state.scheduled[0].status, 'pending', 'row should remain pending');
 });
