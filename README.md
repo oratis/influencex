@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/oratis/influencex/actions/workflows/ci.yml/badge.svg)](https://github.com/oratis/influencex/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node ≥18](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)](https://nodejs.org)
+[![Node ≥20](https://img.shields.io/badge/node-%E2%89%A520-brightgreen)](https://nodejs.org)
 [![Tests: 65](https://img.shields.io/badge/tests-65%20passing-brightgreen)](./server/__tests__)
 [![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI-3.1-blue)](./server/openapi.js)
 
@@ -149,7 +149,7 @@ docker run -p 8080:8080 --env-file .env influencex
 
 ## Tech stack
 
-- **Backend:** Node.js 18+, Express 5, PostgreSQL 15 or SQLite
+- **Backend:** Node.js 20+, Express 5, PostgreSQL 15 or SQLite
 - **Frontend:** React 18, Vite, Recharts (lazy-loaded)
 - **Email:** Resend (with SMTP fallback via nodemailer)
 - **External:** YouTube Data API, Hunter.io, Apify, GA4, Feishu Open Platform
