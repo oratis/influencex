@@ -12,7 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
+        # Runtime is Node 20 (see Dockerfile). Tests rely on globals like
+        # `File` that are 20+, and the test runner's glob expansion behaves
+        # differently on 18; keeping 18 in the matrix adds noise without
+        # matching any real deployment.
+        node-version: [20.x]
 
     steps:
       - uses: actions/checkout@v4

@@ -8,8 +8,8 @@
     "dev": "node server/index.js",
     "build": "cd client && npm install && npx vite build",
     "dev:client": "cd client && npx vite",
-    "test": "node --test 'server/__tests__/*.test.js'",
-    "test:watch": "node --test --watch 'server/__tests__/*.test.js'",
+    "test": "node --test server/__tests__/*.test.js",
+    "test:watch": "node --test --watch server/__tests__/*.test.js",
     "seed": "node server/seed-demo.js"
   },
   "keywords": [
