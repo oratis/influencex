@@ -282,4 +282,7 @@ export const api = {
     return request(`/inbox-messages${q ? '?' + q : ''}`);
   },
   updateInboxMessage: (id, data) => request(`/inbox-messages/${id}`, { method: 'PATCH', body: data }),
+
+  // Ads strategist — synchronous plan generation.
+  createAdsPlan: (data) => request('/ads/plan', { method: 'POST', body: data }),
 };

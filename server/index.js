@@ -2496,6 +2496,66 @@ app.patch(`${BASE_PATH}/api/inbox-messages/:id`, async (req, res) => {
   }
 });
 
+// POST /api/ads/plan — synchronous wrapper around the ads agent.
+// Returns { plan, cost, runId } once the agent finishes, or 400 on validation /
+// 504 on timeout. The underlying run is still persisted to agent_runs /
+// agent_traces for audit parity with the generic /api/agents/:id/run path.
+app.post(`${BASE_PATH}/api/ads/plan`, async (req, res) => {
+  const AGENT_ID = 'ads';
+  const TIMEOUT_MS = 120_000;
+  try {
+    const agent = agentRuntime.getAgent(AGENT_ID);
+    if (!agent) return res.status(404).json({ error: 'Ads agent not registered' });
+
+    const estimate = agentRuntime.estimateCost(AGENT_ID, req.body) || {};
+    const { runId, stream } = agentRuntime.createRun(AGENT_ID, req.body, {
+      workspaceId: req.workspace?.id,
+      userId: req.user?.id,
+      db: { query, queryOne, exec },
+      uuidv4,
+    });
+
+    await exec(
+      'INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status, cost_usd_cents) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [runId, req.workspace?.id || null, AGENT_ID, req.user?.id || null, JSON.stringify(req.body || {}), 'running', estimate.usdCents || 0]
+    );
+
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Object.assign(new Error('Ads plan timed out'), { status: 504 })), TIMEOUT_MS);
+      stream.on('event', async (evt) => {
+        try {
+          await exec(
+            'INSERT INTO agent_traces (id, run_id, event_type, data) VALUES (?, ?, ?, ?)',
+            [uuidv4(), runId, evt.type, JSON.stringify(evt.data || {})]
+          );
+        } catch (persistErr) {
+          console.warn('[ads.plan] trace persist error:', persistErr.message);
+        }
+        if (evt.type === 'complete') {
+          clearTimeout(timer);
+          const cost = evt.data?.cost || {};
+          await exec(
+            `UPDATE agent_runs SET status=?, output=?, cost_usd_cents=?, input_tokens=?, output_tokens=?, duration_ms=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
+            ['complete', JSON.stringify(evt.data.output || {}), cost.usdCents || 0, cost.inputTokens || 0, cost.outputTokens || 0, evt.data.durationMs || null, runId]
+          );
+          resolve({ plan: evt.data.output, cost, runId });
+        } else if (evt.type === 'error') {
+          clearTimeout(timer);
+          await exec(
+            "UPDATE agent_runs SET status='error', error=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+            [evt.data?.message || 'unknown', runId]
+          );
+          reject(Object.assign(new Error(evt.data?.message || 'ads agent error'), { status: 400 }));
+        }
+      });
+    });
+
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // Conductor — build a plan from a goal
 app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
   try {
