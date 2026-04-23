@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../AuthContext';
+import { useI18n } from '../i18n';
 
 export default function AuthPage() {
   const [mode, setMode] = useState('login'); // 'login' or 'register'
@@ -8,24 +9,23 @@ export default function AuthPage() {
   const [loading, setLoading] = useState(false);
   const [googleConfigured, setGoogleConfigured] = useState(false);
   const { login, register } = useAuth();
+  const { t } = useI18n();
 
   useEffect(() => {
-    // Show SSO error from URL (e.g. after Google callback failure)
     const params = new URLSearchParams(window.location.search);
     const ssoErr = params.get('sso_error');
     if (ssoErr) {
-      setError(`Google sign-in failed: ${decodeURIComponent(ssoErr)}`);
+      setError(t('auth.google_failed', { error: decodeURIComponent(ssoErr) }));
       history.replaceState(null, '', window.location.pathname);
     }
-    // Check SSO availability
     fetch('/api/auth/google/status').then(r => r.json()).then(d => setGoogleConfigured(!!d.configured)).catch(() => {});
-  }, []);
+  }, [t]);
 
   const handleGoogleSignIn = async () => {
     try {
       const r = await fetch('/api/auth/google/init').then(r => r.json());
       if (r.url) window.location.href = r.url;
-      else setError(r.error || 'Google sign-in not available');
+      else setError(r.error || t('auth.google_unavailable'));
     } catch (e) { setError(e.message); }
   };
 
@@ -37,8 +37,8 @@ export default function AuthPage() {
       if (mode === 'login') {
         await login(form.email, form.password);
       } else {
-        if (!form.name.trim()) { setError('Please enter your name'); setLoading(false); return; }
-        if (form.password.length < 6) { setError('Password must be at least 6 characters'); setLoading(false); return; }
+        if (!form.name.trim()) { setError(t('auth.please_enter_name')); setLoading(false); return; }
+        if (form.password.length < 6) { setError(t('auth.password_too_short')); setLoading(false); return; }
         await register(form.email, form.password, form.name);
       }
     } catch (e) {
@@ -55,7 +55,7 @@ export default function AuthPage() {
             <span className="auth-logo-icon">🎯</span>
             <h1>InfluenceX</h1>
           </div>
-          <p className="auth-subtitle">KOL Marketing Automation Platform</p>
+          <p className="auth-subtitle">{t('auth.subtitle')}</p>
         </div>
 
         <div className="auth-card">
@@ -64,13 +64,13 @@ export default function AuthPage() {
               className={`auth-tab ${mode === 'login' ? 'active' : ''}`}
               onClick={() => { setMode('login'); setError(''); }}
             >
-              Sign In
+              {t('auth.sign_in')}
             </button>
             <button
               className={`auth-tab ${mode === 'register' ? 'active' : ''}`}
               onClick={() => { setMode('register'); setError(''); }}
             >
-              Sign Up
+              {t('auth.sign_up')}
             </button>
           </div>
 
@@ -93,11 +93,11 @@ export default function AuthPage() {
                   <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
                   <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
                 </svg>
-                Continue with Google
+                {t('auth.continue_google')}
               </button>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: '#888', fontSize: 12 }}>
                 <div style={{ flex: 1, height: 1, background: '#333' }} />
-                <span>OR</span>
+                <span>{t('auth.divider_or')}</span>
                 <div style={{ flex: 1, height: 1, background: '#333' }} />
               </div>
             </>
@@ -106,11 +106,11 @@ export default function AuthPage() {
           <form onSubmit={handleSubmit}>
             {mode === 'register' && (
               <div className="form-group">
-                <label className="form-label">Name</label>
+                <label className="form-label">{t('auth.name')}</label>
                 <input
                   className="form-input"
                   type="text"
-                  placeholder="Your name"
+                  placeholder={t('auth.name_placeholder')}
                   value={form.name}
                   onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                   autoComplete="name"
@@ -118,11 +118,11 @@ export default function AuthPage() {
               </div>
             )}
             <div className="form-group">
-              <label className="form-label">Email</label>
+              <label className="form-label">{t('auth.email')}</label>
               <input
                 className="form-input"
                 type="email"
-                placeholder="you@company.com"
+                placeholder={t('auth.email_placeholder')}
                 value={form.email}
                 onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
                 autoComplete="email"
@@ -130,11 +130,11 @@ export default function AuthPage() {
               />
             </div>
             <div className="form-group">
-              <label className="form-label">Password</label>
+              <label className="form-label">{t('auth.password')}</label>
               <input
                 className="form-input"
                 type="password"
-                placeholder={mode === 'register' ? 'At least 6 characters' : 'Enter password'}
+                placeholder={mode === 'register' ? t('auth.password_new_placeholder') : t('auth.password_placeholder')}
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
                 autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
@@ -150,20 +150,20 @@ export default function AuthPage() {
             )}
 
             <button type="submit" className="btn btn-primary auth-submit" disabled={loading}>
-              {loading ? (mode === 'login' ? 'Signing in...' : 'Creating account...') : (mode === 'login' ? 'Sign In' : 'Create Account')}
+              {loading ? (mode === 'login' ? t('auth.signing_in') : t('auth.creating_account')) : (mode === 'login' ? t('auth.sign_in') : t('auth.create_account'))}
             </button>
           </form>
 
           <div className="auth-footer">
             {mode === 'login' ? (
-              <p>Don't have an account? <button className="auth-link" onClick={() => { setMode('register'); setError(''); }}>Sign up</button></p>
+              <p>{t('auth.no_account')} <button className="auth-link" onClick={() => { setMode('register'); setError(''); }}>{t('auth.sign_up')}</button></p>
             ) : (
-              <p>Already have an account? <button className="auth-link" onClick={() => { setMode('login'); setError(''); }}>Sign in</button></p>
+              <p>{t('auth.have_account')} <button className="auth-link" onClick={() => { setMode('login'); setError(''); }}>{t('auth.sign_in')}</button></p>
             )}
           </div>
         </div>
 
-        <p className="auth-credit">Powered by InfluenceX v1.0</p>
+        <p className="auth-credit">{t('auth.powered_by')}</p>
       </div>
     </div>
   );
