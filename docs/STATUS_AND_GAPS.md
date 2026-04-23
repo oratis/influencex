@@ -9,7 +9,7 @@
 ## 0. TL;DR
 
 - Phase A (Agent runtime + 多租户) 与 Phase B (内容生成 Agents) 基本完成，并**超出路线图**额外交付了 SEO / Competitor Monitor / Review Miner / KOL-Outreach / Content-Voice 等 Agent 以及 Gemini / OpenAI / Anthropic 三线 LLM 抽象。
-- Phase C (Publisher) 完成约 40%：已有 8 个平台的 Intent URL + X/LinkedIn OAuth + Medium/Ghost/WordPress 直发；但 YouTube / TikTok / Instagram / Threads 的 OAuth 连接器、调度发布后台进程、审批工作流、Translate Agent 仍缺失。
+- Phase C (Publisher) 完成约 55%：已有 8 个平台的 Intent URL + X/LinkedIn/YouTube OAuth + Medium/Ghost/WordPress 直发 + Translate Agent 骨架；但 TikTok / Instagram（OAuth 已搭但未验证）/ Threads / Facebook Graph / Pinterest / Weibo OAuth、审批工作流 (Editor→Approver→Publisher) 仍缺失。
 - Phase D / G 基本未启动（Ads、Community 均无 Agent）；Phase E 仍停留在旧版 KOL 发现/外联，未进入 Marketplace / Match / Negotiation / Escrow。
 - **阻塞问题**：`npm test` 因 migration `2026-04-19-sso-billing-blog` 在 SQLite 下使用了 `ALTER COLUMN ... DROP NOT NULL`（SQLite 不支持）而**全量失败** — 这破坏了 CI 护栏，需要优先修复。
 - **同步状态**：本地领先 origin/main **2 个 commit**（Google SSO+Stripe+blog publishers+calendar；real-data grounding+Conductor 并行）— 尚未 `git push`。GitHub 最近 push 时间为 2026-04-18。
@@ -113,11 +113,11 @@ SQLite 不支持 `ALTER COLUMN ... DROP NOT NULL`。当前 `catch` 仅匹配 `/d
 
 1. **修 migration 错误**，恢复 CI 护栏（§4.1）。
 2. **推送未同步的 2 个 commit** 到 GitHub origin/main。
-3. **Publisher Agent v2**：把直发收敛进 Agent 接口，补 YouTube / TikTok / Instagram / Threads / Facebook OAuth；把 `scheduled_posts` 接进 `scheduler.js` 真正定时发。
-4. **Translate Agent**（Phase C 承诺）：内容 localize 12+ 语言。
-5. **Ads Agent MVP**（Phase D 起步）：至少 Meta Ads + Google Ads + 统一 UTMs/归因表，即便最初只在 dashboard 聚合。
+3. **Publisher Agent v2**：把直发收敛进 Agent 接口，补 TikTok / Instagram（已搭 OAuth，未验证）/ Threads / Facebook OAuth；把 `scheduled_posts` 接进 `scheduler.js` 真正定时发。（YouTube OAuth + Data API v3 resumable upload 已在 2026-04-23 接通。）
+4. ~~**Translate Agent**（Phase C 承诺）：内容 localize 12+ 语言。~~ ✅ 2026-04-23 骨架已落地（`server/agents-v2/translate.js`，`translate.batch` capability，单次 LLM 批量输出 N 语言）；尚需前端 UI 与内容管道接入。
+5. ~~**Ads Agent MVP**（Phase D 起步）：至少 Meta Ads + Google Ads + 统一 UTMs/归因表，即便最初只在 dashboard 聚合。~~ ✅ 2026-04-23 Ads Strategist Agent + `/api/ads/plan` + UI 已上线（离线规划，暂无实盘下单）。
 6. **Analytics Agent**（Phase F）：把 `data-agent.js` 迁到 v2，产出周报 + Kill/Double-down 建议。
-7. **Community Agent MVP**（Phase G）：先对接 X + LinkedIn comment/DM 抓取 + 草稿回复；统一 inbox 表结构。
+7. ~~**Community Agent MVP**（Phase G）：先对接 X + LinkedIn comment/DM 抓取 + 草稿回复；统一 inbox 表结构。~~ ✅ 2026-04-23 Community Inbox UI + inbox API + Agent fetch/classify/draft 已上线。
 8. **数据层收尾**：pgvector 引入（品牌语音 embedding）、Redis/BullMQ 替换 in-process 队列、OpenTelemetry trace。
 9. **Plugin API spec**（Phase H 依赖）、**Usage metering** 精确到 tokens / API calls，而非仅 usdCents。
 10. **Creator Marketplace 种子工程** — 需求明确（自爬方案已在 Roadmap §9 敲定），但尚无代码。
@@ -149,8 +149,8 @@ SQLite 不支持 `ALTER COLUMN ... DROP NOT NULL`。当前 `catch` 仅匹配 `/d
 | Calendar | `CalendarPage.jsx` | ✅ |
 | Creators (原 KolDatabase) | `KolDatabase.jsx` | 🟡 未改名 |
 | Publisher | — | ❌ 功能并入 Connections / Calendar |
-| Ads | — | ❌ |
-| Community | — | ❌ |
+| Ads | `AdsPage.jsx` | ✅（2026-04-23，Ads Strategist UI + `POST /api/ads/plan`） |
+| Community | `CommunityInboxPage.jsx` | ✅（2026-04-23，Community Inbox UI + inbox-messages API） |
 | Analytics | `AnalyticsPage.jsx` | ✅ |
 | Agents | `AgentsPage.jsx` | ✅ |
 | Conductor | `ConductorPage.jsx` | ✅ |
