@@ -71,7 +71,56 @@ function makePublishOauth({ publishImpl }) {
   };
 }
 
-const dummyAgentRuntime = { createRun: () => ({ stream: { on: () => {} } }) };
+// Fake agent runtime that mirrors what the real publisher agent does. For
+// direct mode it uses the injected publishOauth fake to simulate per-platform
+// results; for intent mode it returns a trivial intent-url package. This is
+// what the processor talks to now (collapsed to one agent regardless of mode).
+function makeFakePublisherRuntime({ publishOauth, queryOne } = {}) {
+  return {
+    createRun: (agentId, input, ctx) => {
+      const listeners = [];
+      const stream = { on: (evt, cb) => { if (evt === 'event') listeners.push(cb); } };
+      const emit = (evt) => { for (const cb of listeners) cb(evt); };
+      const run = async () => {
+        try {
+          let output;
+          if (input.mode === 'direct') {
+            const results = [];
+            for (const platform of input.platforms) {
+              const conn = await queryOne(
+                'SELECT * FROM platform_connections WHERE workspace_id = ? AND platform = ?',
+                [ctx.workspaceId, platform]
+              );
+              if (!conn) {
+                results.push({ platform, success: false, error: `${platform} not connected for this workspace` });
+                continue;
+              }
+              try {
+                const r = await publishOauth.publishDirect(platform, conn.access_token, {
+                  text: input.content.body || input.content.title || '',
+                });
+                results.push({ platform, ...r });
+              } catch (e) {
+                results.push({ platform, success: false, error: e.message });
+              }
+            }
+            output = { mode: 'direct', results };
+          } else {
+            output = { mode: 'intent', results: input.platforms.map(p => ({ platform: p, intent_url: `https://${p}/intent` })) };
+          }
+          emit({ type: 'complete', data: { output } });
+          emit({ type: 'closed', data: {} });
+        } catch (e) {
+          emit({ type: 'error', data: { message: e.message } });
+          emit({ type: 'closed', data: {} });
+        }
+      };
+      setImmediate(run);
+      return { runId: 'r1', stream };
+    },
+  };
+}
+
 const dummyNotifications = { notify: () => {} };
 const nowIso = new Date().toISOString();
 
@@ -99,7 +148,9 @@ test('direct mode: posts to every platform and marks complete when at least one 
 
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'fake-uuid', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'fake-uuid', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
 
   assert.equal(r.processed, 1);
@@ -133,7 +184,9 @@ test('direct mode: marks row as error when every platform fails with non-retryab
 
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'x', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'x', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
 
   assert.equal(r.failed, 1);
@@ -156,7 +209,9 @@ test('direct mode: missing platform_connection records a per-platform error with
 
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'x', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'x', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
 
   assert.equal(r.failed, 1);
@@ -166,10 +221,12 @@ test('direct mode: missing platform_connection records a per-platform error with
 
 test('empty queue returns zero-work result', async () => {
   const db = makeFakeDb();
+  const publishOauth = makePublishOauth({ publishImpl: async () => ({}) });
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'x', publishOauth: makePublishOauth({ publishImpl: async () => ({}) }),
-    agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'x', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
   assert.deepEqual(r, { processed: 0, ok: 0, failed: 0 });
 });
@@ -251,7 +308,9 @@ test('direct mode: transient failure reschedules row as pending with next_retry_
   const beforeTick = Date.now();
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'x', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'x', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
 
   assert.equal(r.failed, 1, 'counted as failed for this tick');
@@ -280,7 +339,9 @@ test('direct mode: retryable failure at max_attempts flips row to error', async 
   });
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'x', publishOauth, agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'x', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
   assert.equal(r.failed, 1);
   const row = db.state.scheduled[0];
@@ -300,10 +361,12 @@ test('direct mode: row with next_retry_at in the future is NOT picked up', async
       content_snapshot: JSON.stringify({ body: 'hi', type: 'text' }),
     }],
   });
+  const publishOauth = makePublishOauth({ publishImpl: async () => ({}) });
   const r = await processDue({
     query: db.query, queryOne: db.queryOne, exec: db.exec,
-    uuidv4: () => 'x', publishOauth: makePublishOauth({ publishImpl: async () => ({}) }),
-    agentRuntime: dummyAgentRuntime, notifications: dummyNotifications,
+    uuidv4: () => 'x', publishOauth,
+    agentRuntime: makeFakePublisherRuntime({ publishOauth, queryOne: db.queryOne }),
+    notifications: dummyNotifications,
   });
   assert.deepEqual(r, { processed: 0, ok: 0, failed: 0 });
   assert.equal(db.state.scheduled[0].status, 'pending', 'row should remain pending');

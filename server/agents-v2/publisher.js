@@ -1,23 +1,27 @@
 /**
  * Publisher Agent — takes a content piece and adapts it for one or more
- * target platforms, producing a "publish package":
- *   - platform-optimized text (respects char limits + format conventions)
- *   - 1-click intent URL that opens the platform composer pre-filled
- *   - image URL (if applicable, pass-through)
- *   - suggested hashtags
+ * target platforms. Supports two dispatch modes in one interface:
  *
- * v1 is manual handoff — no OAuth, no scheduled posting. The user clicks
- * the intent URL, reviews the draft in the platform's native composer,
- * and posts. This is deliberate:
- *   - No platform API approval required
- *   - No token refresh / revocation headaches
- *   - Respects user agency (they always see the final before posting)
+ *   mode: 'intent' (default)
+ *     Produces a platform-optimized text + 1-click intent URL per platform.
+ *     The user clicks the URL to open the native composer and post. No OAuth
+ *     required. Respects user agency.
  *
- * v2 will add OAuth connectors for fully-automated posting. Same agent,
- * different mode.
+ *   mode: 'direct'
+ *     Posts through each platform's OAuth API using credentials stored in
+ *     platform_connections. Requires ctx.workspaceId and ctx.db. Per-platform
+ *     success is independent — returns an array of { platform, success,
+ *     platform_post_id?, url?, error? }.
  *
- * Supported platforms: twitter, linkedin, facebook, pinterest, reddit,
- * threads, bluesky, weibo (Chinese). Others via generic URL share.
+ * The scheduled-publish processor always calls this agent regardless of mode,
+ * so there's one dispatch path to wire into Conductor, RBAC, and metering.
+ *
+ * Supported platforms:
+ *   - Intent mode: twitter, linkedin, facebook, pinterest, reddit, threads,
+ *     bluesky, weibo
+ *   - Direct mode: any provider registered in publish/oauth.js (twitter,
+ *     linkedin, instagram, youtube, facebook, threads, tiktok, pinterest,
+ *     reddit, medium, ghost, wordpress)
  */
 
 const PLATFORM_LIMITS = {
@@ -151,6 +155,84 @@ function adaptForPlatform(platform, content, opts = {}) {
   };
 }
 
+/**
+ * Direct-mode dispatch. Looks up a platform_connections row per target
+ * platform (workspace-scoped via ctx.workspaceId), then delegates to
+ * publishOauth.publishDirect which knows the per-provider API shape.
+ *
+ * Each platform succeeds or fails independently. The run as a whole
+ * returns successfully as long as the dispatch completed — callers read
+ * per-platform success flags in `results[]`.
+ */
+async function runDirect(input, ctx) {
+  if (!ctx?.db?.queryOne) {
+    throw new Error('direct-mode publishing requires ctx.db.queryOne');
+  }
+  if (!ctx.workspaceId) {
+    throw new Error('direct-mode publishing requires ctx.workspaceId (for credential scoping)');
+  }
+  // Required lazily so intent-mode callers don't pay the oauth module's
+  // side-effects (proxy-fetch import, provider registry).
+  const publishOauth = require('../publish/oauth');
+  const { queryOne, exec } = ctx.db;
+
+  ctx.emit('progress', {
+    step: 'dispatching',
+    message: `Direct-posting to ${input.platforms.length} platform(s)...`,
+  });
+
+  const content = input.content || {};
+  const results = [];
+  for (const platform of input.platforms) {
+    ctx.emit('progress', { step: `posting ${platform}`, message: `Posting to ${platform}...` });
+
+    const conn = await queryOne(
+      'SELECT * FROM platform_connections WHERE workspace_id = ? AND platform = ?',
+      [ctx.workspaceId, platform]
+    );
+    if (!conn) {
+      results.push({ platform, success: false, error: `${platform} not connected for this workspace` });
+      continue;
+    }
+    const provider = publishOauth.getProvider(platform);
+    const credentials = provider?.kind === 'api_key'
+      ? (() => { try { return JSON.parse(conn.metadata || '{}'); } catch { return {}; } })()
+      : conn.access_token;
+
+    try {
+      const r = await publishOauth.publishDirect(platform, credentials, {
+        text: content.body || content.title || '',
+        title: content.title,
+        imageUrl: content.image_url,
+        video_url: content.video_url,
+        link_url: content.link_url,
+        subreddit: content.subreddit,
+        board_id: content.board_id,
+        tags: content.hashtags,
+        accountId: conn.account_id,
+      });
+      results.push({ platform, ...r });
+      if (exec) {
+        await exec('UPDATE platform_connections SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', [conn.id]).catch(() => {});
+      }
+    } catch (e) {
+      results.push({ platform, success: false, error: e.message });
+    }
+  }
+
+  const okCount = results.filter(r => r.success).length;
+  ctx.emit('progress', {
+    step: 'complete',
+    message: `${okCount}/${results.length} platforms posted successfully`,
+  });
+
+  return {
+    mode: 'direct',
+    results,
+    cost: { inputTokens: 0, outputTokens: 0, usdCents: 0 },
+  };
+}
+
 module.exports = {
   id: 'publisher',
   name: 'Publisher',
@@ -171,14 +253,24 @@ module.exports = {
           cta: { type: 'string' },
           hashtags: { type: 'array', items: { type: 'string' } },
           image_url: { type: 'string' },
+          video_url: { type: 'string' },
+          link_url: { type: 'string' },
+          subreddit: { type: 'string' },
+          board_id: { type: 'string' },
         },
       },
       platforms: {
         type: 'array',
-        description: 'Target platforms (e.g. ["twitter", "linkedin"])',
-        items: { type: 'string', enum: Object.keys(PLATFORM_LIMITS) },
+        description: 'Target platforms. In intent mode: from the PLATFORM_LIMITS list. In direct mode: any provider registered in publish/oauth.js.',
+        items: { type: 'string' },
       },
-      share_url: { type: 'string', description: 'Optional URL to attach (for link shares)' },
+      mode: {
+        type: 'string',
+        enum: ['intent', 'direct'],
+        default: 'intent',
+        description: 'intent = produce composer URLs (no OAuth); direct = post via platform APIs using stored credentials',
+      },
+      share_url: { type: 'string', description: 'Optional URL to attach (for link shares — intent mode only)' },
     },
   },
 
@@ -211,6 +303,12 @@ module.exports = {
       throw new Error('platforms must be a non-empty array');
     }
 
+    const mode = input.mode === 'direct' ? 'direct' : 'intent';
+
+    if (mode === 'direct') {
+      return runDirect(input, ctx);
+    }
+
     ctx.emit('progress', { step: 'adapting', message: `Adapting for ${input.platforms.length} platform(s)...` });
 
     const results = input.platforms.map(p => {
@@ -221,6 +319,7 @@ module.exports = {
     ctx.emit('progress', { step: 'complete', message: `${results.length} platform packages ready` });
 
     return {
+      mode: 'intent',
       results,
       source_content: { title: input.content.title, word_count: (input.content.body || '').split(/\s+/).length },
       cost: { inputTokens: 0, outputTokens: 0, usdCents: 0 },

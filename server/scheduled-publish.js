@@ -1,18 +1,17 @@
 /**
  * Scheduled-publish processor.
  *
- * Pulls `scheduled_publishes` rows whose `scheduled_at <= now` and `status =
- * 'pending'`, then dispatches them in one of two modes:
+ * Pulls `scheduled_publishes` rows whose effective due time (either
+ * `next_retry_at` if set, else `scheduled_at`) has passed and `status =
+ * 'pending'`, then dispatches every row through the `publisher` agent
+ * with the row's stored `mode` (intent|direct). The agent owns the
+ * per-mode logic:
+ *   - intent: returns composer URLs per platform
+ *   - direct: looks up platform_connections and posts via the OAuth APIs
  *
- *   - mode='intent' (default): run the `publisher` agent which produces
- *     per-platform intent URLs the user will click to open each native
- *     composer. Nothing is posted automatically.
- *
- *   - mode='direct': look up a stored `platform_connections` row per target
- *     platform and call `publishOauth.publishDirect` to post via the
- *     platform's API. Per-platform success is independent — the row is
- *     marked 'complete' if at least one platform succeeded; 'error' if all
- *     failed.
+ * Post-agent: if every platform in direct mode failed, the row is treated
+ * as failed (may retry with backoff if the error is transient); if at
+ * least one platform succeeded, the row is marked 'complete'.
  *
  * Deps are injected so this module can be unit-tested without a real DB or
  * live platform APIs.
@@ -54,9 +53,10 @@ let ticking = false;
  * @param {function} deps.queryOne    async (sql, params) => row | null
  * @param {function} deps.exec        async (sql, params) => { rowCount? }
  * @param {function} deps.uuidv4      () => string
- * @param {object}   deps.publishOauth   module from ./publish/oauth
  * @param {object}   deps.agentRuntime   module from ./agent-runtime
  * @param {object}   deps.notifications  module from ./notifications
+ * @param {object}  [deps.publishOauth]  legacy dep — no longer used directly,
+ *                                       the publisher agent loads it itself.
  * @param {number}  [deps.limit=20]
  */
 async function processDue(deps) {
@@ -94,40 +94,13 @@ async function processDue(deps) {
       let finalOutput = null;
       let finalError = null;
 
-      if (row.mode === 'direct') {
-        const perPlatform = [];
-        for (const platform of platforms) {
-          const conn = await queryOne(
-            'SELECT * FROM platform_connections WHERE workspace_id = ? AND platform = ?',
-            [row.workspace_id, platform]
-          );
-          if (!conn) {
-            perPlatform.push({ platform, success: false, error: `${platform} not connected for this workspace` });
-            continue;
-          }
-          const provider = publishOauth.getProvider(platform);
-          const credentials = provider?.kind === 'api_key'
-            ? (() => { try { return JSON.parse(conn.metadata || '{}'); } catch { return {}; } })()
-            : conn.access_token;
-          try {
-            const r = await publishOauth.publishDirect(platform, credentials, {
-              text: content.body || content.title || '',
-              title: content.title,
-              imageUrl: content.image_url,
-              tags: content.hashtags,
-              accountId: conn.account_id,
-            });
-            perPlatform.push({ platform, ...r });
-            await exec('UPDATE platform_connections SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', [conn.id]).catch(() => {});
-          } catch (e) {
-            perPlatform.push({ platform, success: false, error: e.message });
-          }
-        }
-        const anyOk = perPlatform.some(r => r.success);
-        finalOutput = { mode: 'direct', results: perPlatform };
-        if (!anyOk) finalError = perPlatform.map(r => `${r.platform}: ${r.error || 'failed'}`).join('; ');
-      } else {
-        const { stream } = agentRuntime.createRun('publisher', { content, platforms }, {
+      // Both 'direct' and 'intent' modes now flow through the publisher agent
+      // — the agent looks up platform_connections for direct mode and builds
+      // composer URLs for intent mode. This collapses the two dispatch paths
+      // into one code path so Conductor, metering, and RBAC only have to
+      // think about one agent.
+      {
+        const { stream } = agentRuntime.createRun('publisher', { content, platforms, mode: row.mode }, {
           workspaceId: row.workspace_id,
           db: { query, queryOne, exec },
           uuidv4,
@@ -139,6 +112,19 @@ async function processDue(deps) {
             if (evt.type === 'closed') resolve();
           });
         });
+      }
+
+      // Direct mode: agent succeeds as long as it dispatched, but individual
+      // platforms may have failed. If every platform failed, promote it to a
+      // row-level error so the retry path engages. Intent mode doesn't have
+      // per-platform success — its results are URL packages.
+      if (!finalError && row.mode === 'direct' && finalOutput?.results?.length) {
+        const anyOk = finalOutput.results.some(r => r.success);
+        if (!anyOk) {
+          finalError = finalOutput.results
+            .map(r => `${r.platform}: ${r.error || 'failed'}`)
+            .join('; ');
+        }
       }
 
       if (finalError) {
