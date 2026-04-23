@@ -90,8 +90,12 @@ app.use(compression({
 // Resend webhook needs raw body for signature verification
 const crypto = require('crypto');
 const { Buffer } = require('buffer');
+const RESEND_WEBHOOK_PATHS = new Set([
+  `${BASE_PATH}/api/webhooks/resend/inbound`,
+  `${BASE_PATH}/api/webhooks/resend/events`,
+]);
 app.use((req, res, next) => {
-  if (req.path === `${BASE_PATH}/api/webhooks/resend/inbound`) {
+  if (RESEND_WEBHOOK_PATHS.has(req.path)) {
     express.json({
       verify: (req, _res, buf) => { req.rawBody = buf; }
     })(req, res, next);
@@ -1002,6 +1006,109 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
     res.json({ success: true, contactId, pipelineJobId });
   } catch (e) {
     console.error('[Inbound Email] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Resend Delivery Events Webhook ====================
+// Resend POSTs per-send lifecycle events here: email.sent, email.delivered,
+// email.delivery_delayed, email.bounced, email.complained, email.opened,
+// email.clicked, email.failed. Payload shape:
+//   { type, created_at, data: { email_id, to, from, subject, ... } }
+//
+// We persist every event to email_events for audit, resolve the outbound
+// email_replies row by resend_email_id to attach workspace + contact +
+// pipeline_job scoping, and denormalize bounce/complaint onto contacts so
+// the UI can flag bad recipients without joining the event log.
+//
+// Idempotency: Resend retries on non-2xx, so respond 200 even when an event
+// references an unknown email_id — we record the orphan row (contact_id=null)
+// so it's recoverable, rather than pushing Resend into a retry loop.
+
+// Status updates we derive from event types. `complained` is a hard signal
+// (user hit "mark as spam"); we also treat it as a bounce equivalent for
+// outreach suppression purposes.
+const RESEND_EVENT_UPDATES = {
+  'email.bounced':    { contactStatus: 'bounced',   timestampColumn: 'bounced_at' },
+  'email.complained': { contactStatus: 'bounced',   timestampColumn: 'complained_at' },
+  'email.failed':     { contactStatus: 'bounced',   timestampColumn: 'bounced_at' },
+};
+
+app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
+  if (RESEND_WEBHOOK_SECRET && !verifyResendSignature(req)) {
+    console.warn('[Resend Events] Invalid webhook signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  try {
+    const { type, created_at, data } = req.body || {};
+    if (!type || !data) {
+      // Respond 200 to prevent Resend retrying a payload we'll never accept.
+      return res.status(200).json({ success: false, error: 'Missing type or data' });
+    }
+
+    const providerEmailId = data.email_id || data.id || null;
+    const toField = data.to;
+    const recipient = Array.isArray(toField) ? toField[0] : (typeof toField === 'string' ? toField : (toField?.email || null));
+    const reason = data.reason || data.bounce?.message || data.click?.link || null;
+    const occurredAt = created_at ? new Date(created_at).toISOString() : null;
+
+    // Match to the outbound send record so we can scope the event to a
+    // workspace/contact. direction='outbound' filters out the inbound rows
+    // that reuse the column for in-reply-to tracking.
+    let workspaceId = null, contactId = null, pipelineJobId = null;
+    if (providerEmailId) {
+      const reply = await queryOne(
+        "SELECT workspace_id, contact_id, pipeline_job_id FROM email_replies WHERE resend_email_id = ? AND direction = 'outbound' ORDER BY received_at DESC LIMIT 1",
+        [providerEmailId]
+      );
+      if (reply) {
+        workspaceId = reply.workspace_id || null;
+        contactId = reply.contact_id || null;
+        pipelineJobId = reply.pipeline_job_id || null;
+      }
+    }
+
+    await exec(
+      'INSERT INTO email_events (id, workspace_id, provider, event_type, provider_email_id, contact_id, pipeline_job_id, recipient, reason, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [uuidv4(), workspaceId, 'resend', type, providerEmailId, contactId, pipelineJobId, recipient, reason, JSON.stringify(data), occurredAt]
+    );
+
+    // Side effects: flag the contact on bounce/complaint. We only touch the
+    // contact if we matched one — orphaned events stay in email_events and a
+    // future replay/reconciliation job can fix them up.
+    const update = RESEND_EVENT_UPDATES[type];
+    if (update && contactId && workspaceId) {
+      // Safe template: timestampColumn is from a fixed literal allow-list (RESEND_EVENT_UPDATES),
+      // never user-provided, so SQL injection isn't a concern here.
+      await exec(
+        `UPDATE contacts SET status = ?, ${update.timestampColumn} = CURRENT_TIMESTAMP WHERE id = ? AND workspace_id = ?`,
+        [update.contactStatus, contactId, workspaceId]
+      );
+    }
+
+    res.json({ success: true, matched: !!contactId });
+  } catch (e) {
+    console.error('[Resend Events] Error:', e.message);
+    // Still 200 — Resend's retry window is short and failed rows are a data
+    // problem on our side, not something they can fix by retrying. Log + move on.
+    res.status(200).json({ success: false, error: e.message });
+  }
+});
+
+// Read delivery events for a contact. Used by the UI to badge sent/delivered/
+// bounced status next to an outreach row. Scoped to the caller's workspace
+// via scoped() — guarantees one tenant can't read another's event log even
+// if a contact id leaks.
+app.get(`${BASE_PATH}/api/contacts/:id/events`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const rows = await s.query(
+      'SELECT id, event_type, recipient, reason, occurred_at, received_at FROM email_events WHERE contact_id = ? AND workspace_id = ? ORDER BY COALESCE(occurred_at, received_at) ASC',
+      [req.params.id, req.workspace.id]
+    );
+    res.json({ events: rows.rows || [] });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
