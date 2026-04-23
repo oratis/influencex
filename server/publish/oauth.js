@@ -59,6 +59,24 @@ const PROVIDERS = {
     clientIdEnv: 'META_APP_ID',
     clientSecretEnv: 'META_APP_SECRET',
   },
+  youtube: {
+    id: 'youtube',
+    label: 'YouTube',
+    kind: 'oauth',
+    // Google OAuth 2.0. Separate client from Google SSO (GOOGLE_OAUTH_*) because
+    // YouTube requires Data API v3 + YouTube Analytics API enabled on the GCP
+    // project and the scopes below, which we don't want to grant for plain SSO.
+    authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    // channels.list(mine=true) returns the connected channel's id + snippet.title.
+    userInfoUrl: 'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+    scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly',
+    usesPKCE: true,
+    clientIdEnv: 'YOUTUBE_CLIENT_ID',
+    clientSecretEnv: 'YOUTUBE_CLIENT_SECRET',
+    // Google only issues a refresh_token when access_type=offline + prompt=consent.
+    extraAuthParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+  },
   // --- API-key-based blog platforms. No OAuth dance — the user provides
   // credentials directly and we store them in platform_connections. The
   // "configured" flag is always true; configuration happens per-user.
@@ -156,6 +174,10 @@ function buildAuthorizeUrl(providerName, { workspaceId, userId, redirectUri }) {
     codeVerifier = verifier;
     params.set('code_challenge', challenge);
     params.set('code_challenge_method', 'S256');
+  }
+
+  if (p.extraAuthParams) {
+    for (const [k, v] of Object.entries(p.extraAuthParams)) params.set(k, v);
   }
 
   return {
@@ -260,6 +282,17 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
         } else if (providerName === 'linkedin') {
           accountId = user.sub;
           accountName = user.name || user.email;
+        } else if (providerName === 'youtube') {
+          const channel = (user.items || [])[0];
+          if (channel) {
+            accountId = channel.id;
+            accountName = channel.snippet?.title || channel.snippet?.customUrl || null;
+            metadata = {
+              channel_id: channel.id,
+              channel_handle: channel.snippet?.customUrl || null,
+              country: channel.snippet?.country || null,
+            };
+          }
         }
       }
     } catch { /* ok, optional */ }
@@ -289,6 +322,7 @@ async function publishDirect(providerName, credentials, payload) {
   if (providerName === 'twitter')   return publishTwitter(credentials, { text });
   if (providerName === 'linkedin')  return publishLinkedIn(credentials, { text });
   if (providerName === 'instagram') return publishInstagram(credentials, { text, imageUrl, igUserId: accountId });
+  if (providerName === 'youtube')   return publishYouTube(credentials, { title, text, videoUrl: payload?.video_url || payload?.videoUrl, tags, privacyStatus: payload?.privacy_status || payload?.privacyStatus });
   if (providerName === 'medium')    return publishMedium(credentials, { text, title, tags });
   if (providerName === 'ghost')     return publishGhost(credentials, { text, title, tags });
   if (providerName === 'wordpress') return publishWordPress(credentials, { text, title, tags });
@@ -406,6 +440,93 @@ async function publishInstagram(accessToken, { text, imageUrl, igUserId }) {
     success: true,
     platform_post_id: pubData.id,
     url: pubData.id ? `https://www.instagram.com/p/${pubData.id}/` : null,
+  };
+}
+
+// --- YouTube (Data API v3 resumable upload) -----------------------------
+
+/**
+ * YouTube video publish via resumable upload.
+ *
+ *   1. Fetch the video from the caller-provided public URL (a Cloud Storage
+ *      signed URL, S3, etc). The agent-runtime deliverables all resolve to
+ *      an HTTP URL so we keep the upload path URL-based for symmetry.
+ *   2. Initiate a resumable session: POST /upload/youtube/v3/videos?uploadType=resumable
+ *      with the snippet+status JSON and Content-Length hints. Google returns
+ *      a Location header (the upload URL).
+ *   3. PUT the video bytes to the upload URL. On 200/201 we parse the body
+ *      for the video id.
+ *
+ * Scopes required on the stored token: https://www.googleapis.com/auth/youtube.upload
+ * Privacy defaults to `private` so the user can verify before going public.
+ */
+async function publishYouTube(accessToken, { title, text, videoUrl, tags, privacyStatus }) {
+  if (!videoUrl) {
+    return {
+      success: false,
+      error: 'YouTube publishing requires a public video_url (direct MP4 / WebM). Text-only posts are not supported.',
+    };
+  }
+
+  // 1. Fetch the video file to upload.
+  const videoRes = await fetch(videoUrl);
+  if (!videoRes.ok) {
+    return { success: false, error: `Failed to fetch video_url (${videoRes.status})` };
+  }
+  const contentType = videoRes.headers.get('content-type') || 'video/*';
+  const contentLength = videoRes.headers.get('content-length');
+  const videoBuf = Buffer.from(await videoRes.arrayBuffer());
+
+  const metadata = {
+    snippet: {
+      title: (title || (text || '').split('\n')[0] || 'Untitled').slice(0, 100),
+      description: text || '',
+      tags: Array.isArray(tags) ? tags.slice(0, 15) : undefined,
+      categoryId: '22', // "People & Blogs" — safe default
+    },
+    status: {
+      privacyStatus: privacyStatus || 'private',
+      selfDeclaredMadeForKids: false,
+    },
+  };
+
+  // 2. Initiate resumable upload session.
+  const initRes = await fetch(
+    'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': contentType,
+        ...(contentLength ? { 'X-Upload-Content-Length': contentLength } : {}),
+      },
+      body: JSON.stringify(metadata),
+    }
+  );
+  if (!initRes.ok) {
+    const errText = await initRes.text().catch(() => '');
+    return { success: false, error: `YouTube init ${initRes.status}: ${errText.slice(0, 300)}` };
+  }
+  const uploadUrl = initRes.headers.get('location');
+  if (!uploadUrl) return { success: false, error: 'YouTube did not return an upload Location header' };
+
+  // 3. PUT the video bytes.
+  const uploadRes = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': contentType, 'Content-Length': String(videoBuf.length) },
+    body: videoBuf,
+  });
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text().catch(() => '');
+    return { success: false, error: `YouTube upload ${uploadRes.status}: ${errText.slice(0, 300)}` };
+  }
+  const data = await uploadRes.json().catch(() => ({}));
+  const videoId = data.id;
+  return {
+    success: true,
+    platform_post_id: videoId || null,
+    url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
   };
 }
 
