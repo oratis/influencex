@@ -512,6 +512,138 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-23-outreach-email-upgrade',
+    description: 'Outreach email upgrade: contacts tracking columns, email_templates, mailbox_accounts, email_events',
+    up: async ({ exec }) => {
+      // 1. Extend contacts with tracking fields
+      const contactCols = [
+        'ALTER TABLE contacts ADD COLUMN delivered_at TIMESTAMP',
+        'ALTER TABLE contacts ADD COLUMN first_opened_at TIMESTAMP',
+        'ALTER TABLE contacts ADD COLUMN last_opened_at TIMESTAMP',
+        'ALTER TABLE contacts ADD COLUMN bounce_reason TEXT',
+        'ALTER TABLE contacts ADD COLUMN send_error TEXT',
+        'ALTER TABLE contacts ADD COLUMN send_attempts INTEGER DEFAULT 0',
+        'ALTER TABLE contacts ADD COLUMN last_send_attempt_at TIMESTAMP',
+        'ALTER TABLE contacts ADD COLUMN mailbox_account_id TEXT',
+        'ALTER TABLE contacts ADD COLUMN provider_message_id TEXT',
+      ];
+      for (const stmt of contactCols) {
+        try { await exec(stmt); } catch (e) {
+          if (!/already exists|duplicate column/i.test(e.message)) throw e;
+        }
+      }
+
+      // 2. Custom email templates (built-in defaults stay in code)
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS email_templates (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          language TEXT DEFAULT 'en',
+          cooperation_type TEXT,
+          subject TEXT NOT NULL,
+          body TEXT NOT NULL,
+          variables TEXT DEFAULT '[]',
+          is_default INTEGER DEFAULT 0,
+          created_by TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_email_templates_workspace ON email_templates(workspace_id)'); } catch {}
+
+      // 3. Per-workspace mailbox accounts (Resend / SMTP / future OAuth).
+      // credentials_encrypted holds JSON blob {api_key?, smtp_host?, ...}.
+      // For a first cut we store as-is; a later migration can wrap with
+      // libsodium sealed boxes once we have a workspace-scoped key.
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS mailbox_accounts (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          from_email TEXT NOT NULL,
+          from_name TEXT,
+          reply_to TEXT,
+          signature_html TEXT,
+          credentials_encrypted TEXT,
+          status TEXT DEFAULT 'active',
+          is_default INTEGER DEFAULT 0,
+          last_verified_at TIMESTAMP,
+          last_error TEXT,
+          created_by TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_mailbox_accounts_workspace ON mailbox_accounts(workspace_id)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_mailbox_accounts_default ON mailbox_accounts(workspace_id, is_default)'); } catch {}
+
+      // 4. Email delivery/open/bounce events (Resend webhook feed)
+      try {
+        await exec(`CREATE TABLE IF NOT EXISTS email_events (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT,
+          contact_id TEXT,
+          provider_message_id TEXT,
+          event_type TEXT NOT NULL,
+          payload TEXT,
+          occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+      } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_email_events_contact ON email_events(contact_id)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_email_events_msgid ON email_events(provider_message_id)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_email_events_workspace ON email_events(workspace_id)'); } catch {}
+    },
+  },
+
+  {
+    id: '2026-04-23-kol-email-blocked',
+    description: 'Hard-bounce auto-disable: kols.email_blocked_at / email_blocked_reason',
+    up: async ({ exec }) => {
+      for (const stmt of [
+        'ALTER TABLE kols ADD COLUMN email_blocked_at TIMESTAMP',
+        'ALTER TABLE kols ADD COLUMN email_blocked_reason TEXT',
+      ]) {
+        try { await exec(stmt); }
+        catch (e) { if (!/already exists|duplicate column/i.test(e.message)) throw e; }
+      }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_kols_email_blocked ON kols(email_blocked_at)'); } catch {}
+    },
+  },
+
+  {
+    id: '2026-04-23-ab-winner',
+    description: 'A/B auto-winner: email_templates.winner_variant_id',
+    up: async ({ exec }) => {
+      try { await exec('ALTER TABLE email_templates ADD COLUMN winner_variant_id TEXT'); }
+      catch (e) { if (!/already exists|duplicate column/i.test(e.message)) throw e; }
+    },
+  },
+
+  {
+    id: '2026-04-23-ab-template-variants',
+    description: 'A/B template variants: email_templates.variant_of/variant_label + contacts.template_id/variant_id',
+    up: async ({ exec }) => {
+      // Parent template has variant_of = NULL; children reference their parent.
+      // variant_label is a short tag like "A", "B", or "shorter-subject".
+      for (const stmt of [
+        'ALTER TABLE email_templates ADD COLUMN variant_of TEXT',
+        'ALTER TABLE email_templates ADD COLUMN variant_label TEXT',
+        'ALTER TABLE contacts ADD COLUMN template_id TEXT',
+        'ALTER TABLE contacts ADD COLUMN variant_id TEXT',
+      ]) {
+        try { await exec(stmt); } catch (e) {
+          if (!/already exists|duplicate column/i.test(e.message)) throw e;
+        }
+      }
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_email_templates_variant_of ON email_templates(variant_of)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_contacts_template_id ON contacts(template_id)'); } catch {}
+      try { await exec('CREATE INDEX IF NOT EXISTS idx_contacts_variant_id ON contacts(variant_id)'); } catch {}
+    },
+  },
+
+  {
     id: '2026-04-23-sched-publish-retry',
     description: 'next_retry_at + max_attempts + error_message on scheduled_publishes for retry-with-backoff',
     up: async ({ exec }) => {

@@ -52,6 +52,8 @@ export default function PipelinePage() {
   const [selectedDiscovery, setSelectedDiscovery] = useState(null);
   const [discovering, setDiscovering] = useState(false);
   const [threadData, setThreadData] = useState(null);
+  const [outreachTasks, setOutreachTasks] = useState({ pending: [], recent: [] });
+  const [emailQueueStats, setEmailQueueStats] = useState(null);
 
   const loadJobs = useCallback(async () => {
     try {
@@ -67,15 +69,44 @@ export default function PipelinePage() {
     } catch (e) { console.error(e); }
   }, []);
 
+  const loadOutreachTasks = useCallback(async () => {
+    try {
+      const [tasks, stats] = await Promise.all([
+        api.getOutreachTasks(),
+        api.getEmailQueueStats().catch(() => null),
+      ]);
+      setOutreachTasks(tasks || { pending: [], recent: [] });
+      setEmailQueueStats(stats);
+    } catch (e) { /* ok */ }
+  }, []);
+
   useEffect(() => {
     loadJobs();
     loadDiscoveryJobs();
+    loadOutreachTasks();
     const interval = setInterval(() => {
       loadJobs();
       loadDiscoveryJobs();
+      loadOutreachTasks();
     }, 5000);
     return () => clearInterval(interval);
-  }, [loadJobs, loadDiscoveryJobs]);
+  }, [loadJobs, loadDiscoveryJobs, loadOutreachTasks]);
+
+  const handleRetryOutreach = async (contactId) => {
+    try {
+      await api.retryEmail(contactId);
+      toast.success(t('pipeline.email_retry_queued'));
+      loadOutreachTasks();
+    } catch (e) { toast.error(e.message); }
+  };
+
+  const handleSyncStatus = async () => {
+    try {
+      await api.syncEmailStatus();
+      toast.success(t('pipeline.email_sync_status_queued'));
+      setTimeout(() => loadOutreachTasks(), 1500);
+    } catch (e) { toast.error(e.message); }
+  };
 
   const handleStartPipeline = async () => {
     if (!url.trim()) return;
@@ -170,6 +201,7 @@ export default function PipelinePage() {
       <div className="tabs" style={{ marginBottom: '20px' }}>
         {[
           { key: 'pipeline', label: t('pipeline.tab_pipeline', { count: jobs.length }) },
+          { key: 'email', label: t('pipeline.tab_email_tasks', { count: (outreachTasks.pending || []).length }) },
           { key: 'discovery', label: t('pipeline.tab_discovery', { count: discoveryJobs.length }) },
         ].map(tt => (
           <button key={tt.key} className={`tab ${tab === tt.key ? 'active' : ''}`} onClick={() => setTab(tt.key)}>
@@ -277,6 +309,16 @@ export default function PipelinePage() {
             )}
           </div>
         </>
+      )}
+
+      {tab === 'email' && (
+        <EmailTasksPane
+          tasks={outreachTasks}
+          stats={emailQueueStats}
+          onRetry={handleRetryOutreach}
+          onSyncStatus={handleSyncStatus}
+          t={t}
+        />
       )}
 
       {tab === 'discovery' && (
@@ -548,4 +590,189 @@ function formatNumber(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
   return String(n);
+}
+
+function EmailTasksPane({ tasks, stats, onRetry, onSyncStatus, t }) {
+  const pending = tasks.pending || [];
+  const recent = tasks.recent || [];
+  const scheduled = tasks.scheduled || [];
+
+  return (
+    <div>
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)', marginBottom: 20 }}>
+        <div className="stat-card">
+          <div><div className="stat-value">{stats?.pending || 0}</div>
+          <div className="stat-label">{t('pipeline.email_stat_queued')}</div></div>
+        </div>
+        <div className="stat-card">
+          <div><div className="stat-value" style={{ color: 'var(--accent)' }}>{stats?.running || 0}</div>
+          <div className="stat-label">{t('pipeline.email_stat_running')}</div></div>
+        </div>
+        <div className="stat-card">
+          <div><div className="stat-value" style={{ color: '#a29bfe' }}>{scheduled.length}</div>
+          <div className="stat-label">{t('pipeline.email_stat_scheduled')}</div></div>
+        </div>
+        <div className="stat-card">
+          <div><div className="stat-value" style={{ color: 'var(--warning)' }}>{stats?.retried || 0}</div>
+          <div className="stat-label">{t('pipeline.email_stat_retried')}</div></div>
+        </div>
+        <div className="stat-card">
+          <div><div className="stat-value" style={{ color: 'var(--danger)' }}>{stats?.failed || 0}</div>
+          <div className="stat-label">{t('pipeline.email_stat_failed')}</div></div>
+        </div>
+      </div>
+
+      {onSyncStatus && (
+        <div style={{ marginBottom: 12, textAlign: 'right' }}>
+          <button className="btn btn-secondary btn-sm" onClick={onSyncStatus}>
+            🧹 {t('pipeline.email_sync_status')}
+          </button>
+        </div>
+      )}
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-header">
+          <h3>{t('pipeline.email_needs_attention', { count: pending.length })}</h3>
+        </div>
+        {pending.length === 0 ? (
+          <div className="empty-state" style={{ padding: 16 }}>
+            <p>{t('pipeline.email_no_issues')}</p>
+          </div>
+        ) : (
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t('pipeline.col_creator')}</th>
+                  <th>{t('pipeline.email_col_campaign')}</th>
+                  <th>{t('pipeline.email_col_status')}</th>
+                  <th>{t('pipeline.email_col_attempts')}</th>
+                  <th>{t('pipeline.email_col_error')}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {pending.map(c => (
+                  <tr key={c.id}>
+                    <td>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {c.avatar_url && <img src={c.avatar_url} alt="" style={{ width: 28, height: 28, borderRadius: '50%' }} />}
+                        <div>
+                          <div style={{ fontWeight: 500 }}>{c.display_name || c.username}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{c.kol_email}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style={{ fontSize: 12 }}>{c.campaign_name || '-'}</td>
+                    <td>
+                      <span className={`badge ${c.status === 'pending' ? 'badge-orange' : 'badge-red'}`}>
+                        {t(`contacts.email_status_${c.status}`) || c.status}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 12 }}>{c.send_attempts || 0}</td>
+                    <td style={{ fontSize: 11, color: 'var(--danger)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.send_error || c.bounce_reason}>
+                      {c.send_error || c.bounce_reason || '-'}
+                    </td>
+                    <td>
+                      {(c.status === 'failed' || c.status === 'bounced') && (
+                        <button className="btn btn-secondary btn-sm" onClick={() => onRetry(c.id)}>
+                          🔁 {t('pipeline.email_retry')}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-header">
+          <h3>{t('pipeline.email_scheduled', { count: scheduled.length })}</h3>
+        </div>
+        {scheduled.length === 0 ? (
+          <div className="empty-state" style={{ padding: 16 }}>
+            <p>{t('pipeline.email_scheduled_empty')}</p>
+          </div>
+        ) : (
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t('pipeline.col_creator')}</th>
+                  <th>{t('pipeline.email_col_campaign')}</th>
+                  <th>{t('pipeline.email_col_subject')}</th>
+                  <th>{t('pipeline.email_col_scheduled_for')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scheduled.map(c => (
+                  <tr key={c.id}>
+                    <td style={{ fontSize: 13 }}>
+                      <div style={{ fontWeight: 500 }}>{c.display_name || c.username}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{c.kol_email}</div>
+                    </td>
+                    <td style={{ fontSize: 12 }}>{c.campaign_name || '-'}</td>
+                    <td style={{ fontSize: 12, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email_subject}</td>
+                    <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                      🕒 {new Date(c.scheduled_send_at).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h3>{t('pipeline.email_recent_sent', { count: recent.length })}</h3>
+        </div>
+        {recent.length === 0 ? (
+          <div className="empty-state" style={{ padding: 16 }}>
+            <p>{t('pipeline.email_recent_empty')}</p>
+          </div>
+        ) : (
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t('pipeline.col_creator')}</th>
+                  <th>{t('pipeline.email_col_campaign')}</th>
+                  <th>{t('pipeline.email_col_subject')}</th>
+                  <th>{t('pipeline.email_col_status')}</th>
+                  <th>{t('pipeline.email_col_when')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map(c => (
+                  <tr key={c.id}>
+                    <td style={{ fontSize: 13 }}>
+                      <div style={{ fontWeight: 500 }}>{c.display_name || c.username}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{c.kol_email}</div>
+                    </td>
+                    <td style={{ fontSize: 12 }}>{c.campaign_name || '-'}</td>
+                    <td style={{ fontSize: 12, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.email_subject}</td>
+                    <td>
+                      <span className={`badge ${c.status === 'opened' ? 'badge-purple' : c.status === 'delivered' ? 'badge-green' : 'badge-blue'}`}>
+                        {t(`contacts.email_status_${c.status}`) || c.status}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                      {c.last_opened_at ? `👀 ${new Date(c.last_opened_at).toLocaleString()}` :
+                       c.delivered_at ? `📬 ${new Date(c.delivered_at).toLocaleString()}` :
+                       c.sent_at ? `📤 ${new Date(c.sent_at).toLocaleString()}` : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

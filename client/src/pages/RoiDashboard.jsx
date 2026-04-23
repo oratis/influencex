@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useI18n } from '../i18n';
 
-const FUNNEL_COLORS = ['#6c5ce7', '#74b9ff', '#00d2a0', '#fdcb6e', '#ff9ff3', '#00b894'];
+const FUNNEL_COLORS = ['#6c5ce7', '#74b9ff', '#54a0ff', '#a29bfe', '#00d2a0', '#fdcb6e', '#ff9ff3', '#00b894'];
 
 function formatNumber(n) {
   if (!n && n !== 0) return '-';
@@ -65,10 +65,12 @@ export default function RoiDashboard() {
     );
   }
 
-  const { campaign, kols, funnel, content_performance: perf, roi: roiMetrics } = roi;
+  const { campaign, kols, funnel, content_performance: perf, roi: roiMetrics, email_timeline: emailTimeline = [] } = roi;
   const funnelSteps = [
     { label: t('roi.funnel_total_contacts'), value: funnel.total_contacts, rate: '100%' },
     { label: t('roi.funnel_sent'), value: funnel.sent_or_beyond, rate: funnel.total_contacts > 0 ? ((funnel.sent_or_beyond / funnel.total_contacts) * 100).toFixed(1) + '%' : '0%' },
+    { label: t('roi.funnel_delivered'), value: funnel.delivered ?? 0, rate: (funnel.rates.delivery_rate ?? '0.0') + '%' },
+    { label: t('roi.funnel_opened'), value: funnel.opened ?? 0, rate: (funnel.rates.open_rate ?? '0.0') + '%' },
     { label: t('roi.funnel_replied'), value: funnel.replied, rate: funnel.rates.reply_rate + '%' },
     { label: t('roi.funnel_contracted'), value: funnel.signed_contracts, rate: funnel.rates.contract_rate + '%' },
     { label: t('roi.funnel_content_done'), value: funnel.content_done, rate: funnel.rates.completion_rate + '%' },
@@ -144,7 +146,15 @@ export default function RoiDashboard() {
             </BarChart>
           </ResponsiveContainer>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginTop: '16px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '10px', marginTop: '16px' }}>
+          <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: '#74b9ff' }}>{funnel.rates.delivery_rate ?? '0.0'}%</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.delivery_rate')}</div>
+          </div>
+          <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: '#a29bfe' }}>{funnel.rates.open_rate ?? '0.0'}%</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.open_rate')}</div>
+          </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
             <div style={{ fontSize: '20px', fontWeight: '700', color: '#6c5ce7' }}>{funnel.rates.reply_rate}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.reply_rate')}</div>
@@ -163,6 +173,31 @@ export default function RoiDashboard() {
           </div>
         </div>
       </div>
+
+      {emailTimeline.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-header">
+            <h3>{t('roi.email_timeline_title')}</h3>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('roi.email_timeline_subtitle')}</span>
+          </div>
+          <div className="chart-container" style={{ height: 260 }}>
+            <ResponsiveContainer>
+              <LineChart data={emailTimeline}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="day" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} allowDecimals={false} />
+                <Tooltip contentStyle={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 13 }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="sent" stroke="#6c5ce7" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_sent')} />
+                <Line type="monotone" dataKey="delivered" stroke="#74b9ff" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_delivered')} />
+                <Line type="monotone" dataKey="opened" stroke="#a29bfe" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_opened')} />
+                <Line type="monotone" dataKey="replied" stroke="#00d2a0" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_replied')} />
+                <Line type="monotone" dataKey="failed" stroke="#ff6b6b" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_failed')} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px' }}>
         <div className="card">

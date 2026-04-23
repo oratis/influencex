@@ -32,6 +32,10 @@ const conductor = require('./agent-runtime/conductor');
 const agentsV2 = require('./agents-v2');
 const llm = require('./llm');
 const { createQueue } = require('./job-queue');
+const emailJobs = require('./email-jobs');
+const gmailOAuth = require('./mailbox-oauth-gmail');
+const secrets = require('./secrets');
+const abSig = require('./ab-significance');
 const { defaultCache } = require('./cache');
 const apify = require('./apify-client');
 
@@ -141,6 +145,16 @@ const authLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many
 const discoveryLimiter = rateLimit({ max: 5, windowMs: 60 * 1000, message: 'Discovery rate limit reached' });
 const exportLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many exports' });
 const sendEmailLimiter = rateLimit({ max: 20, windowMs: 60 * 1000, message: 'Email send rate limit reached' });
+// Per-workspace cap on outbound sends. Uses a sliding 1-minute window; batch
+// sends cost 1 "ticket" per contact enqueued. Tunable via env — default
+// EMAIL_SEND_WORKSPACE_RPM=120 (i.e. 2 sends/sec sustained).
+const EMAIL_SEND_WORKSPACE_RPM = parseInt(process.env.EMAIL_SEND_WORKSPACE_RPM) || 120;
+const sendEmailWorkspaceLimiter = rateLimit({
+  max: EMAIL_SEND_WORKSPACE_RPM,
+  windowMs: 60 * 1000,
+  keyFn: (req) => `ws:${req.workspace?.id || 'anon'}`,
+  message: `Workspace email send rate limit reached (${EMAIL_SEND_WORKSPACE_RPM}/min). Batch operations will be rejected — try again shortly.`,
+});
 
 // ==================== Auth API ====================
 
@@ -469,11 +483,15 @@ app.delete(`${BASE_PATH}/api/workspaces/:id/members/:userId`, authMiddleware, as
 app.use(`${BASE_PATH}/api`, (req, res, next) => {
   // Skip auth routes
   if (req.path.startsWith('/auth/')) return next();
+  // Inbound webhooks (Resend email events, Stripe, etc.) authenticate via
+  // their own signature checks, not bearer tokens.
+  if (req.path.startsWith('/webhooks/')) return next();
   // SSE streams authenticate via query-string (EventSource can't set headers)
   if (/^\/agents\/runs\/[^/]+\/stream$/.test(req.path)) return next();
   // OAuth callbacks — the provider redirects here without auth; the state
   // table acts as the authenticity check.
   if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
+  if (req.path === '/mailboxes/oauth/gmail/callback') return next();
   authMiddleware(req, res, next);
 });
 
@@ -489,8 +507,9 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
 const WORKSPACE_SKIP_PREFIXES = [
   '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
   '/notifications/', '/quota/', '/cache/', '/queue/', '/apify/',
-  '/query/', '/scheduler/', '/email-templates', '/stats',
+  '/query/', '/scheduler/', '/stats',
   '/publish/oauth/', // OAuth callbacks resolve workspace from state row
+  '/mailboxes/oauth/gmail/callback', // Gmail OAuth callback resolves workspace from state
 ];
 app.use(`${BASE_PATH}/api`, (req, res, next) => {
   if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
@@ -754,7 +773,8 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, async (req, res) => {
   try {
     const { status } = req.query;
     const s = scoped(req.workspace.id);
-    let sql = `SELECT c.*, k.username, k.display_name, k.platform, k.avatar_url, k.followers, k.email as kol_email
+    let sql = `SELECT c.*, k.id as kol_row_id, k.username, k.display_name, k.platform, k.avatar_url,
+                 k.followers, k.email as kol_email, k.email_blocked_at, k.email_blocked_reason
       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.workspace_id = ? AND c.campaign_id = ?`;
     const params = [req.workspace.id, req.params.campaignId];
     if (status) { sql += ' AND c.status = ?'; params.push(status); }
@@ -792,18 +812,29 @@ app.put(`${BASE_PATH}/api/contacts/:id`, async (req, res) => {
   try {
     const { email_subject, email_body, cooperation_type, price_quote, notes,
             contract_status, contract_url, content_status, content_url, content_due_date,
-            payment_amount, payment_status } = req.body;
+            payment_amount, payment_status, mailbox_account_id } = req.body;
     const s = scoped(req.workspace.id);
+    // mailbox_account_id: undefined = leave as-is, null = clear, id = set.
+    // We use a three-value handling via sentinel because COALESCE can't
+    // distinguish "unset" from "set to null".
+    const mailboxClause = mailbox_account_id === undefined ? 'mailbox_account_id=mailbox_account_id' : 'mailbox_account_id=?';
+    const params = [
+      email_subject, email_body, cooperation_type, price_quote, notes,
+      contract_status || null, contract_url || null,
+      content_status || null, content_url || null, content_due_date || null,
+      payment_amount || null, payment_status || null,
+    ];
+    if (mailbox_account_id !== undefined) params.push(mailbox_account_id || null);
+    params.push(req.params.id, req.workspace.id);
     const result = await s.exec(
       `UPDATE contacts SET email_subject=?, email_body=?, cooperation_type=?, price_quote=?, notes=?,
        contract_status=COALESCE(?, contract_status), contract_url=COALESCE(?, contract_url),
        content_status=COALESCE(?, content_status), content_url=COALESCE(?, content_url),
        content_due_date=COALESCE(?, content_due_date),
-       payment_amount=COALESCE(?, payment_amount), payment_status=COALESCE(?, payment_status) WHERE id=? AND workspace_id=?`,
-      [email_subject, email_body, cooperation_type, price_quote, notes,
-        contract_status || null, contract_url || null,
-        content_status || null, content_url || null, content_due_date || null,
-        payment_amount || null, payment_status || null, req.params.id, req.workspace.id]
+       payment_amount=COALESCE(?, payment_amount), payment_status=COALESCE(?, payment_status),
+       ${mailboxClause}
+       WHERE id=? AND workspace_id=?`,
+      params
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
@@ -822,7 +853,6 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
       if (req.body[f] !== undefined) { updates.push(`${f}=?`); params.push(req.body[f]); }
     }
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
-    params.push(req.params.id);
     params.push(req.workspace.id, req.params.id);
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -836,13 +866,14 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
   }
 });
 
-// Send email (actually send via Resend/SMTP)
-app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res) => {
+// Enqueue an email send. Returns immediately with status='pending'; the
+// background job performs the actual provider call, records events, and
+// handles retries. Polling the contact's status shows progress.
+app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
-    // Load contact + KOL email address (scoped to current workspace)
     const contact = await s.queryOne(
-      `SELECT c.*, k.email as kol_email, k.display_name, k.username
+      `SELECT c.*, k.email as kol_email
        FROM contacts c JOIN kols k ON c.kol_id = k.id
        WHERE c.id = ? AND c.workspace_id = ?`,
       [req.params.id, req.workspace.id]
@@ -850,50 +881,164 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
     const emailTo = req.body.email_to || contact.kol_email;
-    if (!emailTo) {
-      return res.status(400).json({ error: 'No recipient email address found for this KOL' });
-    }
+    if (!emailTo) return res.status(400).json({ error: 'No recipient email address found for this KOL' });
     if (!contact.email_subject || !contact.email_body) {
       return res.status(400).json({ error: 'Email subject/body is empty — generate or edit first' });
     }
 
-    // If email provider not configured, fall back to marking as sent (dev mode)
-    if (!mailAgent.isConfigured()) {
-      await s.exec(
-        "UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
-        [req.params.id, req.workspace.id]
-      );
-      return res.json({
-        success: true,
-        message: 'Email marked as sent (email provider not configured — no actual send)',
-        dryRun: true,
-      });
-    }
-
-    // Actually send
-    const sendResult = await mailAgent.sendEmail({
-      to: emailTo,
-      subject: contact.email_subject,
-      body: contact.email_body,
-      workspaceId: req.workspace.id,
-    });
-
-    if (!sendResult.success) {
-      return res.status(502).json({ error: sendResult.error || 'Email provider rejected the send' });
-    }
-
-    // Update contact + record outbound email in thread
+    // Mark pending so UI reflects in-flight state immediately.
     await s.exec(
-      "UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      `UPDATE contacts SET status='pending', send_error=NULL WHERE id=? AND workspace_id=?`,
       [req.params.id, req.workspace.id]
     );
-    const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.SMTP_USER || 'noreply@localhost';
+
+    const jobId = jobQueue.push('email.send', {
+      contactId: req.params.id,
+      toOverride: req.body.email_to || null,
+    }, { maxRetries: 3 });
+
+    res.json({ success: true, queued: true, jobId, status: 'pending' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Force-retry a failed send. Clears the error and re-enqueues.
+app.post(`${BASE_PATH}/api/contacts/:id/retry`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const contact = await s.queryOne(
+      'SELECT id FROM contacts WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
     await s.exec(
-      "INSERT INTO email_replies (id, workspace_id, contact_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-      [uuidv4(), req.workspace.id, req.params.id, fromEmail, emailTo, contact.email_subject, contact.email_body, sendResult.messageId]
+      `UPDATE contacts SET status='pending', send_error=NULL WHERE id=? AND workspace_id=?`,
+      [req.params.id, req.workspace.id]
+    );
+    const jobId = jobQueue.push('email.send', { contactId: req.params.id }, { maxRetries: 3 });
+    res.json({ success: true, queued: true, jobId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Batch send: enqueue sends for a list of contact ids (scoped to campaign/workspace).
+// Optional body.template_id: apply this template (with per-KOL variable
+// rendering + A/B variant pick) to every contact before enqueuing. This lets
+// users go from "selected 30 drafts" → "fire one template across all" in one
+// action, matching the plan's "批量发送" flow.
+app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmailLimiter, async (req, res) => {
+  try {
+    const { contact_ids = [], template_id } = req.body || {};
+    if (!Array.isArray(contact_ids) || contact_ids.length === 0) {
+      return res.status(400).json({ error: 'contact_ids required (non-empty array)' });
+    }
+    // Reject up-front if the batch exceeds the per-workspace RPM budget.
+    // This is a best-effort guard — the actual queue spreads sends over time
+    // so an over-cap batch might still drain fine, but returning 429 here
+    // gives users clear feedback before we mark rows as pending.
+    if (contact_ids.length > EMAIL_SEND_WORKSPACE_RPM) {
+      return res.status(429).json({
+        error: `Batch size ${contact_ids.length} exceeds workspace rate limit ${EMAIL_SEND_WORKSPACE_RPM}/min. Split into smaller batches.`,
+      });
+    }
+    const s = scoped(req.workspace.id);
+    const placeholders = contact_ids.map(() => '?').join(',');
+    const result = await s.query(
+      `SELECT c.id, c.email_subject, c.email_body, c.status, c.cooperation_type, c.price_quote,
+              c.campaign_id,
+              k.email as kol_email, k.display_name, k.username, k.platform, k.followers, k.category
+       FROM contacts c JOIN kols k ON c.kol_id = k.id
+       WHERE c.workspace_id = ? AND c.campaign_id = ? AND c.id IN (${placeholders})`,
+      [req.workspace.id, req.params.campaignId, ...contact_ids]
     );
 
-    res.json({ success: true, messageId: sendResult.messageId, provider: sendResult.provider });
+    // If a template was supplied, preload the parent + its variants once so
+    // we can spread the picks across contacts without refetching per-row.
+    let templatePool = null;
+    let templateIsCustom = false;
+    if (template_id) {
+      const builtin = emailTemplates.listTemplates().find(t => t.id === template_id);
+      if (builtin) {
+        templatePool = [{ id: template_id, isBuiltin: true }];
+      } else {
+        const parent = await s.queryOne(
+          'SELECT * FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+          [template_id, req.workspace.id]
+        );
+        if (!parent) return res.status(404).json({ error: 'Template not found' });
+        const vrs = await s.query(
+          'SELECT * FROM email_templates WHERE variant_of = ? AND workspace_id = ?',
+          [template_id, req.workspace.id]
+        );
+        templatePool = [parent, ...(vrs.rows || [])].map(t => ({ ...t, isBuiltin: false }));
+        templateIsCustom = true;
+      }
+    }
+
+    const campaign = await s.queryOne(
+      'SELECT name FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [req.params.campaignId, req.workspace.id]
+    );
+
+    const eligible = [];
+    const skipped = [];
+    for (const c of result.rows) {
+      if (!c.kol_email) { skipped.push({ id: c.id, reason: 'no_email' }); continue; }
+      if (['sent', 'delivered', 'opened', 'replied'].includes(c.status)) { skipped.push({ id: c.id, reason: 'already_' + c.status }); continue; }
+
+      // Apply template if provided. Render variables per-contact and write
+      // the resulting subject/body + A/B attribution onto the contact row.
+      if (templatePool && templatePool.length > 0) {
+        const chosen = templatePool[Math.floor(Math.random() * templatePool.length)];
+        const vars = {
+          kol_name: c.display_name || c.username,
+          kol_handle: c.username,
+          platform: c.platform || '',
+          followers: emailTemplates.formatFollowers(c.followers),
+          category: c.category || '',
+          campaign_name: campaign?.name || '',
+          sender_name: process.env.SENDER_NAME || 'The Team',
+          product_name: process.env.PRODUCT_NAME || campaign?.name || '',
+          cooperation_type: c.cooperation_type || '',
+          price_quote: c.price_quote || '',
+        };
+        let subject, body;
+        if (chosen.isBuiltin) {
+          const r = emailTemplates.renderEmail(chosen.id, vars);
+          subject = r.subject; body = r.body;
+        } else {
+          subject = emailTemplates.renderTemplate(chosen.subject, vars);
+          body = emailTemplates.renderTemplate(chosen.body, vars);
+        }
+        await s.exec(
+          `UPDATE contacts SET email_subject = ?, email_body = ?, template_id = ?, variant_id = ? WHERE id = ? AND workspace_id = ?`,
+          [subject, body,
+            templateIsCustom ? template_id : null,
+            templateIsCustom && chosen.id !== template_id ? chosen.id : null,
+            c.id, req.workspace.id]
+        );
+      } else if (!c.email_subject || !c.email_body) {
+        skipped.push({ id: c.id, reason: 'empty_body' }); continue;
+      }
+
+      eligible.push(c.id);
+    }
+
+    if (eligible.length === 0) {
+      return res.status(400).json({ error: 'No eligible contacts', skipped });
+    }
+
+    // Mark all eligible as pending in one statement.
+    const markPlaceholders = eligible.map(() => '?').join(',');
+    await s.exec(
+      `UPDATE contacts SET status='pending', send_error=NULL WHERE workspace_id = ? AND id IN (${markPlaceholders})`,
+      [req.workspace.id, ...eligible]
+    );
+
+    const jobId = jobQueue.push('email.batch_send', { contactIds: eligible }, { maxRetries: 0 });
+    res.json({ success: true, queued: eligible.length, skipped, jobId, templateApplied: !!template_id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -982,6 +1127,18 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
       if (contact) contactId = contact.id;
     }
 
+    // Resolve workspace_id from the matched contact or pipeline_job so the
+    // saved reply is visible through scoped() queries.
+    let workspaceId = null;
+    if (contactId) {
+      const c = await queryOne('SELECT workspace_id FROM contacts WHERE id = ?', [contactId]);
+      workspaceId = c?.workspace_id || null;
+    }
+    if (!workspaceId && pipelineJobId) {
+      const pj = await queryOne('SELECT workspace_id FROM pipeline_jobs WHERE id = ?', [pipelineJobId]);
+      workspaceId = pj?.workspace_id || null;
+    }
+
     // Update contact status
     if (contactId) {
       await exec("UPDATE contacts SET status='replied', reply_content=?, reply_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -990,8 +1147,8 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
 
     // Save the full reply
     await exec(
-      "INSERT INTO email_replies (id, contact_id, pipeline_job_id, direction, from_email, to_email, subject, body_text, body_html, in_reply_to, received_at) VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-      [uuidv4(), contactId, pipelineJobId, fromEmail, toEmail, subject || '', bodyText, bodyHtml, inReplyTo]
+      "INSERT INTO email_replies (id, workspace_id, contact_id, pipeline_job_id, direction, from_email, to_email, subject, body_text, body_html, in_reply_to, received_at) VALUES (?, ?, ?, ?, 'inbound', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+      [uuidv4(), workspaceId, contactId, pipelineJobId, fromEmail, toEmail, subject || '', bodyText, bodyHtml, inReplyTo]
     );
 
     console.log(`[Inbound Email] Saved. contact_id=${contactId}, pipeline_job_id=${pipelineJobId}`);
@@ -1010,130 +1167,205 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
   }
 });
 
-// ==================== Resend Delivery Events Webhook ====================
-// Resend POSTs per-send lifecycle events here: email.sent, email.delivered,
-// email.delivery_delayed, email.bounced, email.complained, email.opened,
-// email.clicked, email.failed. Payload shape:
-//   { type, created_at, data: { email_id, to, from, subject, ... } }
-//
-// We persist every event to email_events for audit, resolve the outbound
-// email_replies row by resend_email_id to attach workspace + contact +
-// pipeline_job scoping, and denormalize bounce/complaint onto contacts so
-// the UI can flag bad recipients without joining the event log.
-//
-// Idempotency: Resend retries on non-2xx, so respond 200 even when an event
-// references an unknown email_id — we record the orphan row (contact_id=null)
-// so it's recoverable, rather than pushing Resend into a retry loop.
-
-// Status updates we derive from event types. `complained` is a hard signal
-// (user hit "mark as spam"); we also treat it as a bounce equivalent for
-// outreach suppression purposes.
-const RESEND_EVENT_UPDATES = {
-  'email.bounced':    { contactStatus: 'bounced',   timestampColumn: 'bounced_at' },
-  'email.complained': { contactStatus: 'bounced',   timestampColumn: 'complained_at' },
-  'email.failed':     { contactStatus: 'bounced',   timestampColumn: 'bounced_at' },
-};
-
+// ==================== Resend Events Webhook ====================
+// Handles delivered / opened / bounced / complained / clicked events. Resend
+// sends the same signed-Svix envelope as the inbound webhook; same secret
+// is expected (set RESEND_WEBHOOK_SECRET).
 app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
   if (RESEND_WEBHOOK_SECRET && !verifyResendSignature(req)) {
-    console.warn('[Resend Events] Invalid webhook signature');
+    console.warn('[Email Events] Invalid webhook signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
-
   try {
-    const { type, created_at, data } = req.body || {};
-    if (!type || !data) {
-      // Respond 200 to prevent Resend retrying a payload we'll never accept.
-      return res.status(200).json({ success: false, error: 'Missing type or data' });
-    }
+    const events = Array.isArray(req.body) ? req.body : [req.body];
+    let recorded = 0;
 
-    const providerEmailId = data.email_id || data.id || null;
-    const toField = data.to;
-    const recipient = Array.isArray(toField) ? toField[0] : (typeof toField === 'string' ? toField : (toField?.email || null));
-    const reason = data.reason || data.bounce?.message || data.click?.link || null;
-    const occurredAt = created_at ? new Date(created_at).toISOString() : null;
+    for (const ev of events) {
+      // Resend event shape: { type: 'email.delivered', data: { email_id, to, ... } }
+      const type = ev.type || ev.event || 'unknown';
+      const data = ev.data || ev;
+      const messageId = data.email_id || data.message_id || data.id;
+      if (!messageId) continue;
 
-    // Match to the outbound send record so we can scope the event to a
-    // workspace/contact. direction='outbound' filters out the inbound rows
-    // that reuse the column for in-reply-to tracking.
-    let workspaceId = null, contactId = null, pipelineJobId = null;
-    if (providerEmailId) {
-      const reply = await queryOne(
-        "SELECT workspace_id, contact_id, pipeline_job_id FROM email_replies WHERE resend_email_id = ? AND direction = 'outbound' ORDER BY received_at DESC LIMIT 1",
-        [providerEmailId]
+      // Locate contact by provider_message_id or by outbound email_replies.resend_email_id
+      let contactId = null;
+      let workspaceId = null;
+      const fromContacts = await queryOne(
+        'SELECT id, workspace_id FROM contacts WHERE provider_message_id = ?',
+        [messageId]
       );
-      if (reply) {
-        workspaceId = reply.workspace_id || null;
-        contactId = reply.contact_id || null;
-        pipelineJobId = reply.pipeline_job_id || null;
+      if (fromContacts) {
+        contactId = fromContacts.id;
+        workspaceId = fromContacts.workspace_id;
+      } else {
+        const fromReplies = await queryOne(
+          "SELECT contact_id, workspace_id FROM email_replies WHERE resend_email_id = ? AND direction='outbound' LIMIT 1",
+          [messageId]
+        );
+        if (fromReplies) {
+          contactId = fromReplies.contact_id;
+          workspaceId = fromReplies.workspace_id;
+        }
+      }
+
+      // Short type key for downstream consumers
+      const shortType = type.replace(/^email\./, '');
+      await exec(
+        `INSERT INTO email_events (id, workspace_id, contact_id, provider_message_id, event_type, payload)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), workspaceId, contactId, messageId, shortType, JSON.stringify(ev)]
+      );
+      recorded += 1;
+
+      if (!contactId) continue;
+
+      // Mirror notable events into contacts.status/timestamps
+      if (shortType === 'delivered') {
+        await exec(
+          `UPDATE contacts SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP),
+           status = CASE WHEN status IN ('pending','sent') THEN 'delivered' ELSE status END
+           WHERE id = ?`,
+          [contactId]
+        );
+      } else if (shortType === 'opened') {
+        await exec(
+          `UPDATE contacts SET
+             first_opened_at = COALESCE(first_opened_at, CURRENT_TIMESTAMP),
+             last_opened_at = CURRENT_TIMESTAMP,
+             status = CASE WHEN status IN ('pending','sent','delivered') THEN 'opened' ELSE status END
+           WHERE id = ?`,
+          [contactId]
+        );
+      } else if (shortType === 'bounced' || shortType === 'bounce') {
+        const reason = data.reason || data.bounce_type || 'bounced';
+        await exec(
+          `UPDATE contacts SET status = 'bounced', bounce_reason = ? WHERE id = ?`,
+          [String(reason).slice(0, 500), contactId]
+        );
+        await maybeBlockKol(contactId, `bounce: ${reason}`);
+      } else if (shortType === 'complained') {
+        await exec(
+          `UPDATE contacts SET status = 'bounced', bounce_reason = COALESCE(bounce_reason, 'complained') WHERE id = ?`,
+          [contactId]
+        );
+        // Spam complaints are strictly worse than bounces — block on the first one.
+        await maybeBlockKol(contactId, 'spam complaint', { threshold: 1 });
       }
     }
 
-    await exec(
-      'INSERT INTO email_events (id, workspace_id, provider, event_type, provider_email_id, contact_id, pipeline_job_id, recipient, reason, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [uuidv4(), workspaceId, 'resend', type, providerEmailId, contactId, pipelineJobId, recipient, reason, JSON.stringify(data), occurredAt]
-    );
-
-    // Side effects: flag the contact on bounce/complaint. We only touch the
-    // contact if we matched one — orphaned events stay in email_events and a
-    // future replay/reconciliation job can fix them up.
-    const update = RESEND_EVENT_UPDATES[type];
-    if (update && contactId && workspaceId) {
-      // Safe template: timestampColumn is from a fixed literal allow-list (RESEND_EVENT_UPDATES),
-      // never user-provided, so SQL injection isn't a concern here.
-      await exec(
-        `UPDATE contacts SET status = ?, ${update.timestampColumn} = CURRENT_TIMESTAMP WHERE id = ? AND workspace_id = ?`,
-        [update.contactStatus, contactId, workspaceId]
-      );
-    }
-
-    res.json({ success: true, matched: !!contactId });
+    res.json({ success: true, recorded });
   } catch (e) {
-    console.error('[Resend Events] Error:', e.message);
-    // Still 200 — Resend's retry window is short and failed rows are a data
-    // problem on our side, not something they can fix by retrying. Log + move on.
-    res.status(200).json({ success: false, error: e.message });
-  }
-});
-
-// Read delivery events for a contact. Used by the UI to badge sent/delivered/
-// bounced status next to an outreach row. Scoped to the caller's workspace
-// via scoped() — guarantees one tenant can't read another's event log even
-// if a contact id leaks.
-app.get(`${BASE_PATH}/api/contacts/:id/events`, async (req, res) => {
-  try {
-    const s = scoped(req.workspace.id);
-    const rows = await s.query(
-      'SELECT id, event_type, recipient, reason, occurred_at, received_at FROM email_events WHERE contact_id = ? AND workspace_id = ? ORDER BY COALESCE(occurred_at, received_at) ASC',
-      [req.params.id, req.workspace.id]
-    );
-    res.json({ events: rows.rows || [] });
-  } catch (e) {
+    console.error('[Email Events] Error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Get email thread for a contact
+// Count recent bounces for this contact's KOL and, if threshold met, set
+// kols.email_blocked_at so future sends short-circuit. Default threshold: 2
+// hard bounces (any provider-level bounce event). Env-tunable.
+const HARD_BOUNCE_BLOCK_THRESHOLD = parseInt(process.env.HARD_BOUNCE_BLOCK_THRESHOLD) || 2;
+async function maybeBlockKol(contactId, reason, opts = {}) {
+  if (!contactId) return;
+  try {
+    const row = await queryOne(
+      `SELECT c.kol_id, k.email_blocked_at FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ?`,
+      [contactId]
+    );
+    if (!row || row.email_blocked_at) return; // already blocked, noop
+    const threshold = opts.threshold || HARD_BOUNCE_BLOCK_THRESHOLD;
+    // Count bounce/failed events for this KOL's contacts over all time.
+    // "Over all time" is appropriate: if this address bounced twice ever,
+    // it's effectively dead — no point re-sending after a cooldown.
+    const countRow = await queryOne(
+      `SELECT COUNT(*) as n
+       FROM email_events e
+       JOIN contacts c2 ON c2.id = e.contact_id
+       WHERE c2.kol_id = ? AND e.event_type IN ('bounced', 'complained', 'failed')`,
+      [row.kol_id]
+    );
+    const count = parseInt(countRow?.n || 0);
+    if (count >= threshold) {
+      await exec(
+        `UPDATE kols SET email_blocked_at = CURRENT_TIMESTAMP, email_blocked_reason = ? WHERE id = ?`,
+        [String(reason).slice(0, 200), row.kol_id]
+      );
+      console.log(`[hard-bounce] Blocked KOL ${row.kol_id} after ${count} bounce/complaint events: ${reason}`);
+    }
+  } catch (e) {
+    console.warn('[hard-bounce] failed to evaluate block:', e.message);
+  }
+}
+
+// Manually clear the block on a KOL's email (e.g., after confirming with
+// the creator that the bounce was transient).
+app.post(`${BASE_PATH}/api/kols/:id/unblock-email`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      `UPDATE kols SET email_blocked_at = NULL, email_blocked_reason = NULL WHERE id = ? AND workspace_id = ?`,
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'KOL not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get email thread + event timeline for a contact
 app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
-      "SELECT c.*, k.name as kol_name, k.email as kol_email FROM contacts c LEFT JOIN kols k ON c.kol_id=k.id WHERE c.id=? AND c.workspace_id=?",
+      `SELECT c.*, k.display_name as kol_name, k.username, k.email as kol_email, k.platform, k.avatar_url
+       FROM contacts c LEFT JOIN kols k ON c.kol_id=k.id
+       WHERE c.id=? AND c.workspace_id=?`,
       [req.params.id, req.workspace.id]
     );
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
-    // Get all email exchanges
+    // Surface variant attribution so the thread can label "sent using variant B"
+    let variantInfo = null;
+    if (contact.template_id || contact.variant_id) {
+      const templateRow = await s.queryOne(
+        'SELECT id, name FROM email_templates WHERE id = ? AND workspace_id = ?',
+        [contact.template_id, req.workspace.id]
+      );
+      let variantRow = null;
+      if (contact.variant_id) {
+        variantRow = await s.queryOne(
+          'SELECT id, name, variant_label FROM email_templates WHERE id = ? AND workspace_id = ?',
+          [contact.variant_id, req.workspace.id]
+        );
+      }
+      variantInfo = {
+        template_id: contact.template_id,
+        template_name: templateRow?.name || null,
+        variant_id: contact.variant_id || null,
+        variant_label: variantRow?.variant_label || (contact.template_id && !contact.variant_id ? 'control' : null),
+      };
+    }
+    contact.variant_info = variantInfo;
+
     const replies = await s.query(
-      "SELECT * FROM email_replies WHERE contact_id=? AND workspace_id=? ORDER BY received_at ASC",
+      `SELECT * FROM email_replies
+       WHERE contact_id=? AND workspace_id=?
+       ORDER BY received_at ASC`,
       [req.params.id, req.workspace.id]
     );
 
-    // Build thread: outbound (our sent email) + inbound replies
-    const thread = [];
+    const events = await s.query(
+      `SELECT id, event_type, payload, occurred_at
+       FROM email_events WHERE contact_id=? AND workspace_id=?
+       ORDER BY occurred_at ASC`,
+      [req.params.id, req.workspace.id]
+    );
 
-    // Add the original outbound email
-    if (contact.email_subject) {
+    const thread = [];
+    const hasRealOutbound = (replies.rows || []).some(r => r.direction === 'outbound');
+
+    // Synthesize a placeholder from contacts.email_body only when there is no
+    // persisted outbound row (older contacts sent before email_replies was
+    // populated, or drafts that were never actually sent).
+    if (!hasRealOutbound && contact.email_subject) {
       thread.push({
         id: 'outbound-' + contact.id,
         direction: 'outbound',
@@ -1145,7 +1377,6 @@ app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
       });
     }
 
-    // Add all replies
     for (const r of replies.rows) {
       thread.push({
         id: r.id,
@@ -1158,7 +1389,18 @@ app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
       });
     }
 
-    res.json({ contact, thread });
+    const timeline = (events.rows || []).map(e => {
+      let payload = {};
+      try { payload = typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload; } catch {}
+      return {
+        id: e.id,
+        event_type: e.event_type,
+        occurred_at: e.occurred_at,
+        payload,
+      };
+    });
+
+    res.json({ contact, thread, timeline });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1213,12 +1455,20 @@ app.get(`${BASE_PATH}/api/pipeline/jobs/:id/thread`, async (req, res) => {
 app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, async (req, res) => {
   try {
     const { cooperation_type, price_quote } = req.body;
-    const campaign = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.campaignId]);
-    const approvedResult = await query("SELECT * FROM kols WHERE campaign_id = ? AND status = 'approved'", [req.params.campaignId]);
+    const workspaceId = req.workspace.id;
+    const campaign = await queryOne('SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?', [req.params.campaignId, workspaceId]);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const approvedResult = await query(
+      "SELECT * FROM kols WHERE campaign_id = ? AND workspace_id = ? AND status = 'approved'",
+      [req.params.campaignId, workspaceId]
+    );
     const approvedKols = approvedResult.rows;
 
     // Filter out KOLs that already have contacts
-    const existingResult = await query('SELECT kol_id FROM contacts WHERE campaign_id = ?', [req.params.campaignId]);
+    const existingResult = await query(
+      'SELECT kol_id FROM contacts WHERE campaign_id = ? AND workspace_id = ?',
+      [req.params.campaignId, workspaceId]
+    );
     const existingKolIds = existingResult.rows.map(r => r.kol_id);
     const newKols = approvedKols.filter(k => !existingKolIds.includes(k.id));
 
@@ -1228,8 +1478,8 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, async
         const email = generateOutreachEmail(kol, campaign, cooperation_type || 'affiliate', price_quote);
         const id = uuidv4();
         await tx.exec(
-          'INSERT INTO contacts (id, kol_id, campaign_id, email_subject, email_body, cooperation_type, price_quote, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [id, kol.id, req.params.campaignId, email.subject, email.body, cooperation_type || 'affiliate', price_quote || '', 'draft']
+          'INSERT INTO contacts (id, workspace_id, kol_id, campaign_id, email_subject, email_body, cooperation_type, price_quote, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [id, workspaceId, kol.id, req.params.campaignId, email.subject, email.body, cooperation_type || 'affiliate', price_quote || '', 'draft']
         );
         txResults.push({ id, kol_id: kol.id, ...email });
       }
@@ -1693,7 +1943,7 @@ app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
 // Manually trigger a scheduler tick (useful for testing / admin)
 app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermission('system.manage'), async (req, res) => {
   try {
-    const result = await scheduler.tick({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
+    const result = await scheduler.tick({ query, exec, queryOne, mailAgent, notifications, uuidv4, jobQueue });
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -2996,6 +3246,715 @@ app.post(`${BASE_PATH}/api/email-templates/:id/render`, (req, res) => {
   }
 });
 
+// ==================== Custom email templates (CRUD) ====================
+
+// List templates: built-in + workspace's custom ones.
+// Only parent templates are returned here (variant_of IS NULL). Variant
+// children are fetched separately via /email-templates/:id/variants.
+app.get(`${BASE_PATH}/api/email-templates/all`, async (req, res) => {
+  try {
+    const builtin = emailTemplates.listTemplates().map(t => ({ ...t, source: 'builtin' }));
+    if (!req.workspace?.id) return res.json({ builtin, custom: [] });
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      `SELECT id, name, language, cooperation_type, subject, body, variables, is_default, updated_at,
+              (SELECT COUNT(*) FROM email_templates v WHERE v.variant_of = email_templates.id AND v.workspace_id = email_templates.workspace_id) as variant_count
+       FROM email_templates
+       WHERE workspace_id = ? AND variant_of IS NULL
+       ORDER BY updated_at DESC`,
+      [req.workspace.id]
+    );
+    const custom = (result.rows || []).map(t => ({
+      ...t,
+      source: 'custom',
+      variables: tryParseJson(t.variables),
+      variant_count: parseInt(t.variant_count) || 0,
+    }));
+    res.json({ builtin, custom });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post(`${BASE_PATH}/api/email-templates`, async (req, res) => {
+  try {
+    const { name, language, cooperation_type, subject, body, variables } = req.body || {};
+    if (!name || !subject || !body) return res.status(400).json({ error: 'name, subject, body required' });
+    const id = uuidv4();
+    const s = scoped(req.workspace.id);
+    await s.exec(
+      `INSERT INTO email_templates (id, workspace_id, name, language, cooperation_type, subject, body, variables, created_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      [id, req.workspace.id, name, language || 'en', cooperation_type || null, subject, body,
+        JSON.stringify(Array.isArray(variables) ? variables : []), req.user?.id || null]
+    );
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
+  try {
+    const { name, language, cooperation_type, subject, body, variables } = req.body || {};
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      `UPDATE email_templates SET
+         name = COALESCE(?, name),
+         language = COALESCE(?, language),
+         cooperation_type = COALESCE(?, cooperation_type),
+         subject = COALESCE(?, subject),
+         body = COALESCE(?, body),
+         variables = COALESCE(?, variables),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND workspace_id = ?`,
+      [name || null, language || null, cooperation_type || null, subject || null, body || null,
+        variables ? JSON.stringify(variables) : null, req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Template not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    // Deleting a parent cascades to its variants (kept tidy — variants alone
+    // are meaningless without the parent's metadata).
+    await s.exec(
+      'DELETE FROM email_templates WHERE variant_of = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    const result = await s.exec(
+      'DELETE FROM email_templates WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Template not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// List variants for a given template (the parent + all variants).
+app.get(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT * FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      [req.params.id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Parent template not found' });
+    const variants = await s.query(
+      'SELECT * FROM email_templates WHERE variant_of = ? AND workspace_id = ? ORDER BY created_at ASC',
+      [req.params.id, req.workspace.id]
+    );
+    res.json({ parent, variants: variants.rows || [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Create a new variant of an existing template. Body mirrors the parent
+// CRUD but inherits language / cooperation_type from the parent if absent.
+app.post(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
+  try {
+    const { variant_label, subject, body, variables } = req.body || {};
+    if (!subject || !body) return res.status(400).json({ error: 'subject, body required' });
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT * FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      [req.params.id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Parent template not found' });
+    const id = uuidv4();
+    await s.exec(
+      `INSERT INTO email_templates
+         (id, workspace_id, name, language, cooperation_type, subject, body, variables,
+          variant_of, variant_label, created_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      [id, req.workspace.id,
+        `${parent.name} — ${variant_label || 'variant'}`,
+        parent.language, parent.cooperation_type,
+        subject, body,
+        JSON.stringify(Array.isArray(variables) ? variables : []),
+        parent.id, variant_label || 'variant',
+        req.user?.id || null]
+    );
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Pick a variant (including the parent itself) for this contact to send.
+// If the parent has a winner_variant_id set, we deterministically send that
+// one (auto-winner mode). Otherwise we do uniform random pick across
+// parent + variants. In both cases we record template_id/variant_id on the
+// contact so the thread + stats can attribute outcomes back.
+app.post(`${BASE_PATH}/api/contacts/:id/pick-variant`, async (req, res) => {
+  try {
+    const { template_id } = req.body || {};
+    if (!template_id) return res.status(400).json({ error: 'template_id required' });
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT * FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      [template_id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Parent template not found' });
+    const vrs = await s.query(
+      'SELECT * FROM email_templates WHERE variant_of = ? AND workspace_id = ?',
+      [template_id, req.workspace.id]
+    );
+
+    let chosen;
+    if (parent.winner_variant_id) {
+      // Auto-winner mode: always pick the promoted winner. If the winner is
+      // the parent itself, winner_variant_id may be set to parent.id.
+      chosen = parent.winner_variant_id === parent.id
+        ? parent
+        : (vrs.rows || []).find(v => v.id === parent.winner_variant_id) || parent;
+    } else {
+      const pool = [parent, ...(vrs.rows || [])];
+      chosen = pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    await s.exec(
+      'UPDATE contacts SET template_id=?, variant_id=? WHERE id=? AND workspace_id=?',
+      [parent.id, chosen.id === parent.id ? null : chosen.id, req.params.id, req.workspace.id]
+    );
+    res.json({
+      template_id: parent.id,
+      variant_id: chosen.id === parent.id ? null : chosen.id,
+      autoWinner: !!parent.winner_variant_id,
+      chosen: {
+        id: chosen.id,
+        name: chosen.name,
+        variant_label: chosen.variant_label || null,
+        subject: chosen.subject,
+        body: chosen.body,
+      },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Promote a variant (or the parent itself) as the winner. Subsequent
+// pick-variant calls will route 100% of traffic to this variant.
+app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, async (req, res) => {
+  try {
+    const { winner_id } = req.body || {};
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT id FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      [req.params.id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Parent template not found' });
+    if (winner_id === null || winner_id === undefined) {
+      await s.exec(
+        'UPDATE email_templates SET winner_variant_id = NULL WHERE id = ? AND workspace_id = ?',
+        [req.params.id, req.workspace.id]
+      );
+      return res.json({ success: true, winner_variant_id: null });
+    }
+    // winner_id must be parent itself or one of its variants
+    const valid = winner_id === parent.id || !!(await s.queryOne(
+      'SELECT id FROM email_templates WHERE id = ? AND variant_of = ? AND workspace_id = ?',
+      [winner_id, parent.id, req.workspace.id]
+    ));
+    if (!valid) return res.status(400).json({ error: 'winner_id must be the parent or one of its variants' });
+    await s.exec(
+      'UPDATE email_templates SET winner_variant_id = ? WHERE id = ? AND workspace_id = ?',
+      [winner_id, req.params.id, req.workspace.id]
+    );
+    res.json({ success: true, winner_variant_id: winner_id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// A/B stats for a parent template: sent / opened / replied per variant
+// (parent counts as the "control" / null variant_id).
+app.get(`${BASE_PATH}/api/email-templates/:id/stats`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT id, name, winner_variant_id FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      [req.params.id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Parent template not found' });
+    const variants = await s.query(
+      'SELECT id, name, variant_label FROM email_templates WHERE variant_of = ? AND workspace_id = ? ORDER BY created_at ASC',
+      [req.params.id, req.workspace.id]
+    );
+
+    // Aggregate per (template_id, variant_id) tuple. Parent row contributes
+    // variant_id = NULL; variant rows use their own id. We count by terminal
+    // contact.status for a coarse funnel — this ignores multi-open events
+    // but is cheap and good enough for relative A/B.
+    const rows = await s.query(
+      `SELECT variant_id,
+         COUNT(*) as sent,
+         SUM(CASE WHEN status IN ('delivered','opened','replied') THEN 1 ELSE 0 END) as delivered,
+         SUM(CASE WHEN status IN ('opened','replied') THEN 1 ELSE 0 END) as opened,
+         SUM(CASE WHEN status='replied' THEN 1 ELSE 0 END) as replied,
+         SUM(CASE WHEN status IN ('bounced','failed') THEN 1 ELSE 0 END) as failed
+       FROM contacts
+       WHERE workspace_id = ? AND template_id = ? AND status != 'draft'
+       GROUP BY variant_id`,
+      [req.workspace.id, parent.id]
+    );
+
+    const byVariant = {};
+    for (const r of rows.rows || []) {
+      byVariant[r.variant_id || '_parent'] = {
+        sent: parseInt(r.sent) || 0,
+        delivered: parseInt(r.delivered) || 0,
+        opened: parseInt(r.opened) || 0,
+        replied: parseInt(r.replied) || 0,
+        failed: parseInt(r.failed) || 0,
+      };
+    }
+
+    const zero = { sent: 0, delivered: 0, opened: 0, replied: 0, failed: 0 };
+    const payload = [
+      { id: parent.id, name: parent.name, variant_label: 'parent', isParent: true, ...(byVariant._parent || zero) },
+      ...(variants.rows || []).map(v => ({
+        id: v.id,
+        name: v.name,
+        variant_label: v.variant_label || 'variant',
+        isParent: false,
+        ...(byVariant[v.id] || zero),
+      })),
+    ].map(row => ({
+      ...row,
+      open_rate: row.sent > 0 ? ((row.opened / row.sent) * 100).toFixed(1) : '0.0',
+      reply_rate: row.sent > 0 ? ((row.replied / row.sent) * 100).toFixed(1) : '0.0',
+    }));
+
+    // Suggested winner via two-proportion z-test on reply_rate vs the best
+    // alternative. Only suggest when min sample >= 30 per arm and p < 0.05,
+    // which are common thresholds for lightweight A/B calls. No correction
+    // for multiple comparisons — at N=2-3 variants that's fine; the user
+    // still makes the final promote call.
+    const MIN_SAMPLE = 30;
+    const P_THRESHOLD = 0.05;
+    const best = payload.reduce((m, r) => (r.replied / Math.max(r.sent, 1) > m.replied / Math.max(m.sent, 1) ? r : m), payload[0]);
+    let suggestedWinner = null;
+    if (best && best.sent >= MIN_SAMPLE) {
+      // Compare the best to the aggregate of the rest.
+      const others = payload.filter(r => r.id !== best.id);
+      const othersSent = others.reduce((s, r) => s + r.sent, 0);
+      const othersReplied = others.reduce((s, r) => s + r.replied, 0);
+      if (othersSent >= MIN_SAMPLE) {
+        const p = abSig.twoPropZPValue(best.replied, best.sent, othersReplied, othersSent);
+        if (p != null && p < P_THRESHOLD) {
+          suggestedWinner = { id: best.id, variant_label: best.variant_label, p_value: p.toFixed(4) };
+        }
+      }
+    }
+
+    res.json({
+      parent,
+      variants: payload,
+      winner_variant_id: parent.winner_variant_id || null,
+      suggested_winner: suggestedWinner,
+      min_sample_for_significance: MIN_SAMPLE,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Significance helpers moved to ./ab-significance for testability.
+
+function tryParseJson(s) { try { return JSON.parse(s || '[]'); } catch { return []; } }
+
+// ==================== Mailbox accounts (outbound identities) ====================
+// Workspace-scoped. credentials_encrypted stores provider-specific secrets as
+// JSON. Once we add a workspace-scoped keyring we'll wrap this in a sealed box.
+function sanitizeMailbox(row) {
+  if (!row) return row;
+  const { credentials_encrypted, ...safe } = row;
+  let creds = {};
+  if (credentials_encrypted) {
+    try { creds = secrets.decrypt(credentials_encrypted) || {}; }
+    catch { creds = {}; }
+  }
+  return {
+    ...safe,
+    // Only expose non-secret hints to the client.
+    credentials: {
+      has_api_key: !!creds.api_key,
+      smtp_host: creds.smtp_host || null,
+      smtp_port: creds.smtp_port || null,
+      smtp_user: creds.smtp_user || null,
+      has_smtp_pass: !!creds.smtp_pass,
+      has_refresh_token: !!creds.refresh_token,
+      gmail_user_email: creds.gmail_user_email || null,
+    },
+  };
+}
+function readCredsRaw(stored) {
+  if (!stored) return {};
+  try { return secrets.decrypt(stored) || {}; } catch { return {}; }
+}
+
+app.get(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.query(
+      'SELECT * FROM mailbox_accounts WHERE workspace_id = ? ORDER BY is_default DESC, created_at DESC',
+      [req.workspace.id]
+    );
+    res.json({
+      items: (result.rows || []).map(sanitizeMailbox),
+      envFallback: {
+        hasResend: !!process.env.RESEND_API_KEY,
+        hasSmtp: !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
+        fromEmail: process.env.RESEND_FROM_EMAIL || process.env.SMTP_USER || null,
+      },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
+  try {
+    const { provider, from_email, from_name, reply_to, signature_html, credentials, is_default } = req.body || {};
+    if (!provider || !from_email) return res.status(400).json({ error: 'provider and from_email required' });
+    if (!['resend', 'smtp'].includes(provider)) return res.status(400).json({ error: 'Unsupported provider (expected resend|smtp)' });
+
+    // Credentials schema: { api_key } for resend, { smtp_host, smtp_port, smtp_user, smtp_pass } for smtp.
+    const creds = credentials || {};
+    if (provider === 'resend' && !creds.api_key) return res.status(400).json({ error: 'api_key required for resend' });
+    if (provider === 'smtp' && (!creds.smtp_host || !creds.smtp_user || !creds.smtp_pass)) {
+      return res.status(400).json({ error: 'smtp_host, smtp_user, smtp_pass required for smtp' });
+    }
+
+    const id = uuidv4();
+    const s = scoped(req.workspace.id);
+
+    // If is_default=true, clear the default flag on other rows first.
+    if (is_default) {
+      await s.exec(
+        'UPDATE mailbox_accounts SET is_default = 0 WHERE workspace_id = ?',
+        [req.workspace.id]
+      );
+    }
+    await s.exec(
+      `INSERT INTO mailbox_accounts
+         (id, workspace_id, provider, from_email, from_name, reply_to, signature_html,
+          credentials_encrypted, status, is_default, created_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, CURRENT_TIMESTAMP)`,
+      [id, req.workspace.id, provider, from_email, from_name || null, reply_to || null,
+        signature_html || null, secrets.encrypt(creds), is_default ? 1 : 0, req.user?.id || null]
+    );
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
+  try {
+    const { from_email, from_name, reply_to, signature_html, credentials, is_default, status } = req.body || {};
+    const s = scoped(req.workspace.id);
+
+    if (is_default) {
+      await s.exec(
+        'UPDATE mailbox_accounts SET is_default = 0 WHERE workspace_id = ? AND id != ?',
+        [req.workspace.id, req.params.id]
+      );
+    }
+
+    // Merge credentials: if supplied, overlay onto existing stored creds so
+    // callers can change just one field (e.g. rotate the api_key) without
+    // resending the others.
+    let credsBlob = null;
+    if (credentials && typeof credentials === 'object') {
+      const existing = await s.queryOne(
+        'SELECT credentials_encrypted FROM mailbox_accounts WHERE id=? AND workspace_id=?',
+        [req.params.id, req.workspace.id]
+      );
+      const prev = existing ? readCredsRaw(existing.credentials_encrypted) : {};
+      credsBlob = secrets.encrypt({ ...prev, ...credentials });
+    }
+
+    const result = await s.exec(
+      `UPDATE mailbox_accounts SET
+         from_email = COALESCE(?, from_email),
+         from_name = COALESCE(?, from_name),
+         reply_to = COALESCE(?, reply_to),
+         signature_html = COALESCE(?, signature_html),
+         credentials_encrypted = COALESCE(?, credentials_encrypted),
+         is_default = COALESCE(?, is_default),
+         status = COALESCE(?, status),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id=? AND workspace_id=?`,
+      [from_email || null, from_name || null, reply_to || null, signature_html || null,
+        credsBlob, typeof is_default === 'boolean' ? (is_default ? 1 : 0) : null,
+        status || null, req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Mailbox not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const result = await s.exec(
+      'DELETE FROM mailbox_accounts WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Mailbox not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Verify a mailbox connection (test-mode ping; doesn't send anything).
+app.post(`${BASE_PATH}/api/mailboxes/:id/verify`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const mb = await s.queryOne(
+      'SELECT * FROM mailbox_accounts WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!mb) return res.status(404).json({ error: 'Mailbox not found' });
+    const result = await mailAgent.verifyConnection(mb);
+    // If the Gmail flow refreshed the token, persist it.
+    if (result.refreshedCreds) {
+      try {
+        await s.exec(
+          'UPDATE mailbox_accounts SET credentials_encrypted = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND workspace_id = ?',
+          [secrets.encrypt(result.refreshedCreds), req.params.id, req.workspace.id]
+        );
+      } catch (e) {
+        console.warn('[mailbox verify] failed to persist refreshed creds:', e.message);
+      }
+    }
+    await s.exec(
+      `UPDATE mailbox_accounts SET last_verified_at = CURRENT_TIMESTAMP, last_error = ?,
+         status = ? WHERE id = ? AND workspace_id = ?`,
+      [result.error || null, result.verified ? 'active' : 'error', req.params.id, req.workspace.id]
+    );
+    // Don't leak the refreshed creds back to the client.
+    const { refreshedCreds, ...safe } = result;
+    res.json(safe);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Workspace-wide outreach tasks (for Pipeline "Email Tasks" tab).
+// Returns the recent pending / failed / bounced contacts, annotated with
+// KOL display info, so the UI can surface retry-worthy work across all
+// campaigns.
+app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const pending = await s.query(
+      `SELECT c.id, c.status, c.send_error, c.bounce_reason, c.sent_at, c.delivered_at,
+              c.last_opened_at, c.reply_at, c.send_attempts, c.email_subject,
+              c.last_send_attempt_at, c.campaign_id,
+              k.display_name, k.username, k.email as kol_email, k.platform, k.avatar_url,
+              cam.name as campaign_name
+       FROM contacts c
+       JOIN kols k ON c.kol_id = k.id
+       LEFT JOIN campaigns cam ON c.campaign_id = cam.id
+       WHERE c.workspace_id = ?
+         AND c.status IN ('pending', 'failed', 'bounced')
+       ORDER BY c.last_send_attempt_at DESC, c.created_at DESC
+       LIMIT 100`,
+      [req.workspace.id]
+    );
+    const scheduled = await s.query(
+      `SELECT c.id, c.status, c.email_subject, c.scheduled_send_at, c.campaign_id,
+              k.display_name, k.username, k.email as kol_email, k.platform, k.avatar_url,
+              cam.name as campaign_name
+       FROM contacts c
+       JOIN kols k ON c.kol_id = k.id
+       LEFT JOIN campaigns cam ON c.campaign_id = cam.id
+       WHERE c.workspace_id = ?
+         AND c.scheduled_send_at IS NOT NULL
+         AND c.sent_at IS NULL
+       ORDER BY c.scheduled_send_at ASC
+       LIMIT 100`,
+      [req.workspace.id]
+    );
+    const recent = await s.query(
+      `SELECT c.id, c.status, c.sent_at, c.delivered_at, c.first_opened_at, c.last_opened_at,
+              c.reply_at, c.email_subject, c.campaign_id,
+              k.display_name, k.username, k.email as kol_email, k.platform, k.avatar_url,
+              cam.name as campaign_name
+       FROM contacts c
+       JOIN kols k ON c.kol_id = k.id
+       LEFT JOIN campaigns cam ON c.campaign_id = cam.id
+       WHERE c.workspace_id = ?
+         AND c.status IN ('sent', 'delivered', 'opened')
+       ORDER BY COALESCE(c.last_opened_at, c.delivered_at, c.sent_at) DESC
+       LIMIT 30`,
+      [req.workspace.id]
+    );
+    res.json({
+      pending: pending.rows || [],
+      recent: recent.rows || [],
+      scheduled: scheduled.rows || [],
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Gmail mailbox OAuth ====================
+
+// Check whether Gmail OAuth is configured on this deployment (client-side
+// hides the button when not).
+app.get(`${BASE_PATH}/api/mailboxes/oauth/gmail/status`, (req, res) => {
+  res.json({ configured: gmailOAuth.isConfigured() });
+});
+
+// Start Gmail OAuth. We stash the workspace_id in `state` so the callback
+// (which Google calls without our auth header) knows where to attach the
+// resulting mailbox_accounts row.
+app.post(`${BASE_PATH}/api/mailboxes/oauth/gmail/init`, (req, res) => {
+  try {
+    if (!gmailOAuth.isConfigured()) {
+      return res.status(501).json({ error: 'Gmail OAuth not configured. Set GMAIL_OAUTH_CLIENT_ID + GMAIL_OAUTH_CLIENT_SECRET.' });
+    }
+    const { url } = gmailOAuth.buildAuthorizeUrl({
+      workspaceId: req.workspace.id,
+      userId: req.user?.id,
+      returnTo: req.body?.returnTo || '/',
+    });
+    res.json({ url });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Google redirects here with ?code + ?state. No auth header — state is the
+// trust anchor. On success we create/update a mailbox_accounts row and
+// close the popup so the parent ConnectionsPage can reload.
+app.get(`${BASE_PATH}/api/mailboxes/oauth/gmail/callback`, async (req, res) => {
+  try {
+    const { code, state, error: gErr } = req.query;
+    if (gErr) return res.status(400).send(`<script>window.close();</script>Gmail OAuth error: ${gErr}`);
+    if (!code || !state) return res.status(400).send('Missing code or state');
+
+    const entry = gmailOAuth.consumeState(state);
+    if (!entry) return res.status(400).send('Invalid or expired state');
+
+    const tokens = await gmailOAuth.exchangeCodeForTokens(code);
+    const profile = await gmailOAuth.fetchProfile(tokens.access_token);
+
+    const creds = {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: Date.now() + (tokens.expires_in || 3500) * 1000,
+      scope: tokens.scope,
+      gmail_user_email: profile.email,
+    };
+
+    // One Gmail identity per workspace — upsert on from_email.
+    const existing = await queryOne(
+      'SELECT id FROM mailbox_accounts WHERE workspace_id = ? AND provider = ? AND from_email = ?',
+      [entry.workspaceId, 'gmail_oauth', profile.email]
+    );
+    const credsBlob = secrets.encrypt(creds);
+    if (existing) {
+      await exec(
+        `UPDATE mailbox_accounts SET credentials_encrypted = ?, status = 'active',
+           last_error = NULL, last_verified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [credsBlob, existing.id]
+      );
+    } else {
+      await exec(
+        `INSERT INTO mailbox_accounts
+           (id, workspace_id, provider, from_email, from_name, credentials_encrypted,
+            status, is_default, last_verified_at, created_by, updated_at)
+         VALUES (?, ?, 'gmail_oauth', ?, ?, ?, 'active', 0, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)`,
+        [uuidv4(), entry.workspaceId, profile.email, profile.name || null,
+          credsBlob, entry.userId || null]
+      );
+    }
+
+    res.type('html').send(`
+      <!DOCTYPE html><html><head><meta charset="utf-8"><title>Gmail connected</title>
+      <style>body{font-family:system-ui;background:#0f1114;color:#eee;text-align:center;padding:60px 20px}</style></head>
+      <body>
+        <h2>✅ Gmail connected as ${profile.email}</h2>
+        <p>You can close this window and return to InfluenceX.</p>
+        <script>try { window.opener && window.opener.postMessage({ type:'gmail-oauth-complete' }, '*'); } catch(e){} setTimeout(()=>window.close(), 800);</script>
+      </body></html>
+    `);
+  } catch (e) {
+    console.error('[gmail-oauth callback]', e);
+    res.status(500).type('html').send(`<script>window.close();</script>Gmail OAuth error: ${String(e.message).slice(0, 200)}`);
+  }
+});
+
+// Email queue stats: specifically for email.* job types
+app.get(`${BASE_PATH}/api/email-queue/stats`, (req, res) => {
+  const s = jobQueue.getStats();
+  res.json({
+    ...s,
+    emailTypes: s.registeredTypes.filter(t => t.startsWith('email.')),
+  });
+});
+
+// Manually enqueue the safety-net sync job that fails contacts stuck in
+// 'pending' > 30min. Useful for admins debugging a stuck batch.
+app.post(`${BASE_PATH}/api/email-queue/sync-status`, (req, res) => {
+  try {
+    const id = jobQueue.push('email.sync_status', {}, { maxRetries: 0 });
+    res.json({ queued: true, jobId: id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Sender-domain DNS checks (SPF / DKIM / DMARC). Helps users diagnose why
+// outbound mail lands in spam. We do live DNS lookups — cheap but not
+// cached. For larger deployments, a 5-minute memoize would be appropriate.
+app.get(`${BASE_PATH}/api/mailboxes/:id/dns-check`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const mb = await s.queryOne(
+      'SELECT id, from_email, provider FROM mailbox_accounts WHERE id=? AND workspace_id=?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!mb) return res.status(404).json({ error: 'Mailbox not found' });
+    const domain = (mb.from_email || '').split('@')[1];
+    if (!domain) return res.status(400).json({ error: 'Cannot derive domain from from_email' });
+
+    const dns = require('dns').promises;
+    async function resolveTxt(name) {
+      try { return (await dns.resolveTxt(name)).map(r => r.join('')); }
+      catch (e) { return []; }
+    }
+
+    const [spfRaw, dmarcRaw] = await Promise.all([
+      resolveTxt(domain),
+      resolveTxt(`_dmarc.${domain}`),
+    ]);
+
+    const spf = spfRaw.find(r => r.toLowerCase().startsWith('v=spf1')) || null;
+    const dmarc = dmarcRaw.find(r => r.toLowerCase().startsWith('v=dmarc1')) || null;
+
+    // DKIM selector varies by provider. For gmail_oauth typically `google`
+    // (for Workspace-signed mail). For Resend it's the domain-specific
+    // selector in their dashboard. We only check the common ones here.
+    const dkimSelectors = mb.provider === 'gmail_oauth' ? ['google', 'google2', 'google3'] : ['resend', 'default'];
+    const dkim = {};
+    for (const sel of dkimSelectors) {
+      const rec = await resolveTxt(`${sel}._domainkey.${domain}`);
+      if (rec.length > 0) { dkim[sel] = rec[0]; break; }
+    }
+
+    res.json({
+      domain,
+      provider: mb.provider,
+      spf: { present: !!spf, record: spf },
+      dkim: { selectors_checked: dkimSelectors, found: dkim },
+      dmarc: { present: !!dmarc, record: dmarc },
+      advice: buildDnsAdvice({ spf, dmarc, dkim, provider: mb.provider, domain }),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+function buildDnsAdvice({ spf, dmarc, dkim, provider, domain }) {
+  const advice = [];
+  if (!spf) advice.push(`Add an SPF TXT record to ${domain}. For Gmail Workspace: "v=spf1 include:_spf.google.com ~all"; for Resend: "v=spf1 include:amazonses.com ~all".`);
+  else if (!/include:/i.test(spf)) advice.push(`SPF exists but no include:. Verify it covers your provider's sending infrastructure.`);
+  if (Object.keys(dkim).length === 0) {
+    advice.push(provider === 'gmail_oauth'
+      ? `No DKIM record found. In Google Workspace, generate a DKIM key (Admin Console → Apps → Gmail → Authenticate email) and publish its TXT record as google._domainkey.${domain}.`
+      : `No DKIM record found. Your email provider will give you a DKIM selector + TXT value to publish under <selector>._domainkey.${domain}.`);
+  }
+  if (!dmarc) advice.push(`No DMARC. Start with a monitoring-only policy: "v=DMARC1; p=none; rua=mailto:dmarc-reports@${domain}" at _dmarc.${domain}. Tighten to p=quarantine once aligned.`);
+  if (advice.length === 0) advice.push('Looks good — SPF, DKIM, and DMARC all present.');
+  return advice;
+}
+
 // Render a template for a specific KOL contact
 app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
   try {
@@ -4122,7 +5081,13 @@ async function initializeDefaultData() {
       console.log(`Access at: http://localhost:${PORT}${BASE_PATH}/`);
       const sinks = notifications.getEnabledSinks();
       if (sinks.length) console.log(`[notifications] Active sinks: ${sinks.join(', ')}`);
-      scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4 });
+      // Register background handlers on the shared job queue.
+      emailJobs.register({ jobQueue, query, queryOne, exec, mailAgent, notifications });
+      // Safety-net sweep every 10 minutes: fail contacts stuck in 'pending'.
+      setInterval(() => {
+        try { jobQueue.push('email.sync_status', {}, { maxRetries: 0 }); } catch {}
+      }, 10 * 60 * 1000).unref?.();
+      scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4, jobQueue });
       scheduledPublish.start({
         query, queryOne, exec, uuidv4, publishOauth, agentRuntime, notifications,
       });

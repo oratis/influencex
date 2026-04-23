@@ -71,6 +71,7 @@ export const api = {
   collectKols: (campaignId) => request(`/campaigns/${campaignId}/kols/collect`, { method: 'POST' }),
   updateKol: (id, data) => request(`/kols/${id}`, { method: 'PATCH', body: data }),
   batchUpdateKols: (ids, status) => request('/kols/batch', { method: 'PATCH', body: { ids, status } }),
+  unblockKolEmail: (id) => request(`/kols/${id}/unblock-email`, { method: 'POST' }),
 
   // Contacts
   getContacts: (campaignId, params = {}) => {
@@ -142,8 +143,36 @@ export const api = {
 
   // Email Templates
   listEmailTemplates: () => request('/email-templates'),
+  listAllEmailTemplates: () => request('/email-templates/all'),
+  createEmailTemplate: (data) => request('/email-templates', { method: 'POST', body: data }),
+  updateEmailTemplate: (id, data) => request(`/email-templates/${id}`, { method: 'PUT', body: data }),
+  deleteEmailTemplate: (id) => request(`/email-templates/${id}`, { method: 'DELETE' }),
+  // A/B variants
+  listTemplateVariants: (id) => request(`/email-templates/${id}/variants`),
+  createTemplateVariant: (id, data) => request(`/email-templates/${id}/variants`, { method: 'POST', body: data }),
+  pickTemplateVariant: (contactId, template_id) => request(`/contacts/${contactId}/pick-variant`, { method: 'POST', body: { template_id } }),
+  getTemplateStats: (id) => request(`/email-templates/${id}/stats`),
+  promoteTemplateWinner: (id, winner_id) => request(`/email-templates/${id}/promote-winner`, { method: 'POST', body: { winner_id } }),
   renderEmailTemplate: (id, variables) => request(`/email-templates/${id}/render`, { method: 'POST', body: { variables } }),
   renderContactTemplate: (contactId, data) => request(`/contacts/${contactId}/render-template`, { method: 'POST', body: data }),
+
+  // Outreach email sending
+  retryEmail: (id) => request(`/contacts/${id}/retry`, { method: 'POST' }),
+  batchSendEmails: (campaignId, contact_ids, template_id) => request(`/campaigns/${campaignId}/contacts/batch-send`, { method: 'POST', body: { contact_ids, template_id: template_id || null } }),
+  getEmailQueueStats: () => request('/email-queue/stats'),
+  getOutreachTasks: () => request('/outreach/tasks'),
+  syncEmailStatus: () => request('/email-queue/sync-status', { method: 'POST' }),
+
+  // Mailbox accounts (Connections — mailbox cards)
+  listMailboxes: () => request('/mailboxes'),
+  createMailbox: (data) => request('/mailboxes', { method: 'POST', body: data }),
+  updateMailbox: (id, data) => request(`/mailboxes/${id}`, { method: 'PATCH', body: data }),
+  deleteMailbox: (id) => request(`/mailboxes/${id}`, { method: 'DELETE' }),
+  verifyMailbox: (id) => request(`/mailboxes/${id}/verify`, { method: 'POST' }),
+  dnsCheckMailbox: (id) => request(`/mailboxes/${id}/dns-check`),
+  // Gmail OAuth
+  getGmailOAuthStatus: () => request('/mailboxes/oauth/gmail/status'),
+  initGmailOAuth: () => request('/mailboxes/oauth/gmail/init', { method: 'POST' }),
 
   // YouTube quota
   getYoutubeQuota: () => request('/quota/youtube'),

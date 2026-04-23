@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
+import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useI18n } from '../i18n';
 
@@ -16,6 +17,31 @@ export default function ConductorPage() {
   const [inspectedPlan, setInspectedPlan] = useState(null);
   const toast = useToast();
   const { t } = useI18n();
+  const { selectedCampaignId, campaigns } = useCampaign();
+  const currentCampaign = campaigns?.find(c => c.id === selectedCampaignId);
+
+  // Canned goal presets — mostly for users who don't know what to type.
+  // The campaign name is threaded into the outreach preset so Conductor has
+  // a concrete target instead of a placeholder.
+  const presets = [
+    {
+      key: 'outreach_first_round',
+      label: t('conductor.preset_outreach_first_round'),
+      goal: currentCampaign
+        ? t('conductor.preset_outreach_first_round_goal_with', { name: currentCampaign.name })
+        : t('conductor.preset_outreach_first_round_goal'),
+    },
+    {
+      key: 'weekly_digest',
+      label: t('conductor.preset_weekly_digest'),
+      goal: t('conductor.preset_weekly_digest_goal'),
+    },
+    {
+      key: 'competitor_scan',
+      label: t('conductor.preset_competitor_scan'),
+      goal: t('conductor.preset_competitor_scan_goal'),
+    },
+  ];
 
   useEffect(() => { loadRecent(); }, []);
 
@@ -80,6 +106,25 @@ export default function ConductorPage() {
 
       <div className="card">
         <label className="form-label">{t('conductor.goal')}</label>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center' }}>
+            {t('conductor.presets_label')}:
+          </span>
+          {presets.map(p => (
+            <button
+              key={p.key}
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: 11 }}
+              onClick={() => setGoal(p.goal)}
+              title={p.goal}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
         <textarea
           className="form-textarea"
           placeholder={t('conductor.goal_placeholder')}
