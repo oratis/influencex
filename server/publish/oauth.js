@@ -77,6 +77,78 @@ const PROVIDERS = {
     // Google only issues a refresh_token when access_type=offline + prompt=consent.
     extraAuthParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
   },
+  tiktok: {
+    id: 'tiktok',
+    label: 'TikTok',
+    kind: 'oauth',
+    // TikTok Login Kit v2. Requires TikTok for Developers app with Content
+    // Posting API enabled for video.publish scope.
+    authUrl: 'https://www.tiktok.com/v2/auth/authorize/',
+    tokenUrl: 'https://open.tiktokapis.com/v2/oauth/token/',
+    userInfoUrl: 'https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name,username',
+    scope: 'user.info.basic,video.upload,video.publish',
+    usesPKCE: true,
+    clientIdEnv: 'TIKTOK_CLIENT_KEY',
+    clientSecretEnv: 'TIKTOK_CLIENT_SECRET',
+    // TikTok's OAuth uses client_key (not client_id) — normalization happens
+    // in buildAuthorizeUrl when we see this provider.
+    clientIdParam: 'client_key',
+  },
+  threads: {
+    id: 'threads',
+    label: 'Threads',
+    kind: 'oauth',
+    // Meta Threads API. Separate app from Instagram/Facebook because scopes
+    // and product configuration differ.
+    authUrl: 'https://threads.net/oauth/authorize',
+    tokenUrl: 'https://graph.threads.net/oauth/access_token',
+    userInfoUrl: 'https://graph.threads.net/v1.0/me?fields=id,username,threads_profile_picture_url',
+    scope: 'threads_basic,threads_content_publish',
+    usesPKCE: false,
+    clientIdEnv: 'THREADS_APP_ID',
+    clientSecretEnv: 'THREADS_APP_SECRET',
+  },
+  facebook: {
+    id: 'facebook',
+    label: 'Facebook (Pages)',
+    kind: 'oauth',
+    // Reuses the META_APP_* credentials because Facebook + Instagram live on
+    // the same app. Scopes differ from IG — Pages API requires pages_manage_posts.
+    authUrl: 'https://www.facebook.com/v18.0/dialog/oauth',
+    tokenUrl: 'https://graph.facebook.com/v18.0/oauth/access_token',
+    userInfoUrl: null, // resolved via /me/accounts like Instagram
+    scope: 'pages_show_list,pages_manage_posts,pages_read_engagement',
+    usesPKCE: false,
+    clientIdEnv: 'META_APP_ID',
+    clientSecretEnv: 'META_APP_SECRET',
+  },
+  pinterest: {
+    id: 'pinterest',
+    label: 'Pinterest',
+    kind: 'oauth',
+    // Pinterest API v5. Requires developer app with "Trial" or "Standard" tier.
+    authUrl: 'https://www.pinterest.com/oauth/',
+    tokenUrl: 'https://api.pinterest.com/v5/oauth/token',
+    userInfoUrl: 'https://api.pinterest.com/v5/user_account',
+    scope: 'boards:read,pins:read,pins:write,user_accounts:read',
+    usesPKCE: true,
+    clientIdEnv: 'PINTEREST_APP_ID',
+    clientSecretEnv: 'PINTEREST_APP_SECRET',
+  },
+  reddit: {
+    id: 'reddit',
+    label: 'Reddit',
+    kind: 'oauth',
+    // Reddit OAuth 2.0. duration=permanent gets a refresh_token.
+    authUrl: 'https://www.reddit.com/api/v1/authorize',
+    tokenUrl: 'https://www.reddit.com/api/v1/access_token',
+    userInfoUrl: 'https://oauth.reddit.com/api/v1/me',
+    scope: 'identity submit read',
+    usesPKCE: false,
+    clientIdEnv: 'REDDIT_CLIENT_ID',
+    clientSecretEnv: 'REDDIT_CLIENT_SECRET',
+    extraAuthParams: { duration: 'permanent' },
+  },
   // --- API-key-based blog platforms. No OAuth dance — the user provides
   // credentials directly and we store them in platform_connections. The
   // "configured" flag is always true; configuration happens per-user.
@@ -160,9 +232,12 @@ function buildAuthorizeUrl(providerName, { workspaceId, userId, redirectUri }) {
 
   const state = crypto.randomBytes(16).toString('hex');
   const redirect = redirectUri || `${CALLBACK_BASE}/api/publish/oauth/${p.id}/callback`;
+  // Most providers use `client_id`; TikTok uses `client_key`. Let the config
+  // declare the param name so we don't branch per provider here.
+  const clientIdParam = p.clientIdParam || 'client_id';
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id: process.env[p.clientIdEnv],
+    [clientIdParam]: process.env[p.clientIdEnv],
     redirect_uri: redirect,
     scope: p.scope,
     state,
@@ -198,21 +273,26 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
   const clientId = process.env[p.clientIdEnv];
   const clientSecret = process.env[p.clientSecretEnv];
 
+  const clientIdParam = p.clientIdParam || 'client_id';
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
-    client_id: clientId,
+    [clientIdParam]: clientId,
   });
   if (p.usesPKCE && codeVerifier) {
     body.set('code_verifier', codeVerifier);
   }
 
   const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
-  if (providerName === 'twitter') {
-    // Twitter uses Basic auth for confidential clients
+  if (providerName === 'twitter' || providerName === 'reddit') {
+    // Twitter + Reddit use HTTP Basic auth for confidential-client token exchange.
     const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
     headers['Authorization'] = `Basic ${basic}`;
+    if (providerName === 'reddit') headers['User-Agent'] = 'influencex/1.0';
+  } else if (providerName === 'tiktok') {
+    body.set('client_secret', clientSecret);
+    body.set('client_key', clientId);
   } else {
     body.set('client_secret', clientSecret);
   }
@@ -232,7 +312,33 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
   let expiresIn = data.expires_in || null;
   let metadata = null;
 
-  if (providerName === 'instagram') {
+  if (providerName === 'facebook') {
+    // Facebook Pages flow: exchange to long-lived user token, list /me/accounts,
+    // store the first Page's id + its page access token. Scope must include
+    // pages_manage_posts for publishing.
+    try {
+      const llRes = await fetch(
+        `https://graph.facebook.com/v18.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&fb_exchange_token=${encodeURIComponent(data.access_token)}`
+      );
+      if (llRes.ok) {
+        const ll = await llRes.json();
+        if (ll.access_token) { accessToken = ll.access_token; expiresIn = ll.expires_in || expiresIn; }
+      }
+      const pagesRes = await fetch(
+        `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token&access_token=${encodeURIComponent(accessToken)}`
+      );
+      if (pagesRes.ok) {
+        const pages = await pagesRes.json();
+        const page = (pages.data || [])[0];
+        if (page) {
+          accessToken = page.access_token || accessToken;
+          accountId = page.id;
+          accountName = page.name;
+          metadata = { page_id: page.id, page_name: page.name };
+        }
+      }
+    } catch { /* ok, optional */ }
+  } else if (providerName === 'instagram') {
     // Meta flow: short-lived user token → long-lived user token → pick Page →
     // read its `instagram_business_account`. We store the Page access token
     // (long-lived) and the IG Business user id.
@@ -271,9 +377,9 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
     } catch { /* ok, optional */ }
   } else if (p.userInfoUrl) {
     try {
-      const userRes = await fetch(p.userInfoUrl, {
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-      });
+      const userInfoHeaders = { 'Authorization': `Bearer ${accessToken}` };
+      if (providerName === 'reddit') userInfoHeaders['User-Agent'] = 'influencex/1.0';
+      const userRes = await fetch(p.userInfoUrl, { headers: userInfoHeaders });
       if (userRes.ok) {
         const user = await userRes.json();
         if (providerName === 'twitter') {
@@ -293,6 +399,23 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
               country: channel.snippet?.country || null,
             };
           }
+        } else if (providerName === 'tiktok') {
+          accountId = user.data?.user?.open_id || user.data?.user?.union_id || null;
+          accountName = user.data?.user?.display_name || user.data?.user?.username || null;
+          metadata = {
+            open_id: user.data?.user?.open_id,
+            union_id: user.data?.user?.union_id,
+            avatar_url: user.data?.user?.avatar_url,
+          };
+        } else if (providerName === 'threads') {
+          accountId = user.id;
+          accountName = user.username ? `@${user.username}` : null;
+        } else if (providerName === 'pinterest') {
+          accountId = user.id || user.username;
+          accountName = user.username ? `@${user.username}` : null;
+        } else if (providerName === 'reddit') {
+          accountId = user.id;
+          accountName = user.name ? `u/${user.name}` : null;
         }
       }
     } catch { /* ok, optional */ }
@@ -323,6 +446,11 @@ async function publishDirect(providerName, credentials, payload) {
   if (providerName === 'linkedin')  return publishLinkedIn(credentials, { text });
   if (providerName === 'instagram') return publishInstagram(credentials, { text, imageUrl, igUserId: accountId });
   if (providerName === 'youtube')   return publishYouTube(credentials, { title, text, videoUrl: payload?.video_url || payload?.videoUrl, tags, privacyStatus: payload?.privacy_status || payload?.privacyStatus });
+  if (providerName === 'facebook')  return publishFacebook(credentials, { text, linkUrl: payload?.link_url || payload?.linkUrl, pageId: accountId });
+  if (providerName === 'threads')   return publishThreads(credentials, { text, imageUrl, threadsUserId: accountId });
+  if (providerName === 'tiktok')    return publishTikTok(credentials, { text, videoUrl: payload?.video_url || payload?.videoUrl });
+  if (providerName === 'pinterest') return publishPinterest(credentials, { text, title, imageUrl, boardId: payload?.board_id || payload?.boardId });
+  if (providerName === 'reddit')    return publishReddit(credentials, { text, title, subreddit: payload?.subreddit });
   if (providerName === 'medium')    return publishMedium(credentials, { text, title, tags });
   if (providerName === 'ghost')     return publishGhost(credentials, { text, title, tags });
   if (providerName === 'wordpress') return publishWordPress(credentials, { text, title, tags });
@@ -527,6 +655,223 @@ async function publishYouTube(accessToken, { title, text, videoUrl, tags, privac
     success: true,
     platform_post_id: videoId || null,
     url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
+  };
+}
+
+// --- Facebook (Pages) ---------------------------------------------------
+
+/**
+ * Publish to a Facebook Page feed. Requires pages_manage_posts and the Page
+ * access token (captured during exchangeCodeForToken via /me/accounts). Text
+ * posts are supported directly; linkUrl gets attached as a link attachment.
+ */
+async function publishFacebook(accessToken, { text, linkUrl, pageId }) {
+  if (!pageId) return { success: false, error: 'Facebook connection missing page_id (reconnect account)' };
+  const params = new URLSearchParams({ access_token: accessToken });
+  if (text) params.set('message', text);
+  if (linkUrl) params.set('link', linkUrl);
+  const res = await fetch(
+    `https://graph.facebook.com/v18.0/${encodeURIComponent(pageId)}/feed`,
+    { method: 'POST', body: params }
+  );
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `Facebook API ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  const postId = data.id;
+  // Post id format: "{page_id}_{post_id}" — strip to get the tail for the URL.
+  const tail = (postId || '').split('_').pop();
+  return {
+    success: true,
+    platform_post_id: postId || null,
+    url: tail ? `https://www.facebook.com/${pageId}/posts/${tail}` : null,
+  };
+}
+
+// --- Threads (Meta) -----------------------------------------------------
+
+/**
+ * Threads publishing mirrors Instagram's two-step pattern:
+ *   1) POST /{threads-user-id}/threads with media_type=TEXT (or IMAGE) → creation id
+ *   2) POST /{threads-user-id}/threads_publish with creation_id         → post id
+ *
+ * Images require a public image_url that Meta can fetch server-side.
+ */
+async function publishThreads(accessToken, { text, imageUrl, threadsUserId }) {
+  if (!threadsUserId) return { success: false, error: 'Threads connection missing user id (reconnect account)' };
+  if (!text && !imageUrl) return { success: false, error: 'Threads post requires text or image_url' };
+
+  const createParams = new URLSearchParams({ access_token: accessToken });
+  if (imageUrl) {
+    createParams.set('media_type', 'IMAGE');
+    createParams.set('image_url', imageUrl);
+    if (text) createParams.set('text', text);
+  } else {
+    createParams.set('media_type', 'TEXT');
+    createParams.set('text', text);
+  }
+
+  const createRes = await fetch(
+    `https://graph.threads.net/v1.0/${encodeURIComponent(threadsUserId)}/threads`,
+    { method: 'POST', body: createParams }
+  );
+  if (!createRes.ok) {
+    const t = await createRes.text().catch(() => '');
+    return { success: false, error: `Threads create ${createRes.status}: ${t.slice(0, 300)}` };
+  }
+  const createData = await createRes.json();
+  const creationId = createData.id;
+  if (!creationId) return { success: false, error: 'Threads create returned no id' };
+
+  const publishParams = new URLSearchParams({
+    creation_id: creationId,
+    access_token: accessToken,
+  });
+  const pubRes = await fetch(
+    `https://graph.threads.net/v1.0/${encodeURIComponent(threadsUserId)}/threads_publish`,
+    { method: 'POST', body: publishParams }
+  );
+  if (!pubRes.ok) {
+    const t = await pubRes.text().catch(() => '');
+    return { success: false, error: `Threads publish ${pubRes.status}: ${t.slice(0, 300)}` };
+  }
+  const pubData = await pubRes.json();
+  return {
+    success: true,
+    platform_post_id: pubData.id || null,
+    url: pubData.id ? `https://www.threads.net/t/${pubData.id}` : null,
+  };
+}
+
+// --- TikTok (Content Posting API) ---------------------------------------
+
+/**
+ * TikTok video publishing via Content Posting API PULL_FROM_URL mode. The
+ * agent produces a public video URL (signed Cloud Storage or similar) and
+ * TikTok's servers fetch it. The alternative FILE_UPLOAD mode requires a
+ * chunked upload session; PULL_FROM_URL is simpler and matches our agent
+ * deliverables pattern.
+ *
+ * Scopes required: video.upload + video.publish.
+ */
+async function publishTikTok(accessToken, { text, videoUrl }) {
+  if (!videoUrl) {
+    return {
+      success: false,
+      error: 'TikTok publishing requires a public video_url (MP4). Text-only posts are not supported.',
+    };
+  }
+  const body = {
+    post_info: {
+      title: (text || '').slice(0, 2200),
+      privacy_level: 'SELF_ONLY', // draft — user confirms in TikTok app before going public
+      disable_duet: false,
+      disable_stitch: false,
+      disable_comment: false,
+    },
+    source_info: {
+      source: 'PULL_FROM_URL',
+      video_url: videoUrl,
+    },
+  };
+  const res = await fetch('https://open.tiktokapis.com/v2/post/publish/video/init/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `TikTok init ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  const publishId = data.data?.publish_id;
+  return {
+    success: true,
+    platform_post_id: publishId || null,
+    // TikTok doesn't expose a public URL until upload + moderation complete.
+    // Caller can poll /v2/post/publish/status/fetch/ with publish_id.
+    url: null,
+  };
+}
+
+// --- Pinterest (v5 API) -------------------------------------------------
+
+/**
+ * Create a Pin on a given board. Requires pins:write scope. The imageUrl must
+ * be publicly fetchable — Pinterest downloads it server-side.
+ */
+async function publishPinterest(accessToken, { text, title, imageUrl, boardId }) {
+  if (!boardId) return { success: false, error: 'Pinterest requires board_id (pick a board at publish time)' };
+  if (!imageUrl) return { success: false, error: 'Pinterest requires image_url — text-only pins are not supported' };
+  const body = {
+    board_id: boardId,
+    title: (title || (text || '').split('\n')[0] || 'Untitled').slice(0, 100),
+    description: (text || '').slice(0, 800),
+    media_source: { source_type: 'image_url', url: imageUrl },
+  };
+  const res = await fetch('https://api.pinterest.com/v5/pins', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `Pinterest API ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  return {
+    success: true,
+    platform_post_id: data.id || null,
+    url: data.id ? `https://www.pinterest.com/pin/${data.id}/` : null,
+  };
+}
+
+// --- Reddit -------------------------------------------------------------
+
+/**
+ * Self-post (text) submission to a subreddit. Reddit requires a descriptive
+ * User-Agent and Bearer auth for all authenticated endpoints.
+ */
+async function publishReddit(accessToken, { text, title, subreddit }) {
+  if (!subreddit) return { success: false, error: 'Reddit requires a subreddit (e.g. "test")' };
+  if (!title) return { success: false, error: 'Reddit submissions require a title' };
+  const body = new URLSearchParams({
+    sr: subreddit.replace(/^r\//, ''),
+    kind: 'self',
+    title: title.slice(0, 300),
+    text: text || '',
+    api_type: 'json',
+  });
+  const res = await fetch('https://oauth.reddit.com/api/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Bearer ${accessToken}`,
+      'User-Agent': 'influencex/1.0',
+    },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    return { success: false, error: `Reddit API ${res.status}: ${t.slice(0, 300)}` };
+  }
+  const data = await res.json();
+  const submission = data.json?.data;
+  const errors = data.json?.errors;
+  if (errors && errors.length) {
+    return { success: false, error: `Reddit: ${errors.map(e => e.join(':')).join('; ')}` };
+  }
+  return {
+    success: true,
+    platform_post_id: submission?.id || submission?.name || null,
+    url: submission?.url || null,
   };
 }
 
