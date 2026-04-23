@@ -2428,6 +2428,74 @@ app.delete(`${BASE_PATH}/api/brand-voices/:id`, async (req, res) => {
   }
 });
 
+// --- Inbox messages (Community Agent) ---------------------------------
+
+// List inbox rows for the current workspace. Supports filters:
+//   status=open|resolved|snoozed, platform=twitter, priority=urgent|normal|low,
+//   sentiment=negative|..., limit=50, offset=0.
+app.get(`${BASE_PATH}/api/inbox-messages`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const clauses = ['workspace_id = ?'];
+    const params = [req.workspace.id];
+    for (const col of ['status', 'platform', 'priority', 'sentiment']) {
+      if (req.query[col]) { clauses.push(`${col} = ?`); params.push(req.query[col]); }
+    }
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const offset = parseInt(req.query.offset) || 0;
+    params.push(limit, offset);
+    const result = await s.query(
+      `SELECT id, platform, kind, external_id, thread_id, author_handle, author_name,
+              author_avatar_url, text, url, sentiment, priority, status, assignee_user_id,
+              draft_reply, replied_at, occurred_at, fetched_at, tags
+       FROM inbox_messages
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY COALESCE(occurred_at, fetched_at) DESC
+       LIMIT ? OFFSET ?`,
+      params
+    );
+    const rows = (result.rows || []).map(r => ({ ...r, tags: r.tags ? JSON.parse(r.tags) : [] }));
+
+    // Summary counters so the UI can render tab badges in one round-trip.
+    const counts = await s.query(
+      `SELECT status, COUNT(*) AS c FROM inbox_messages WHERE workspace_id = ? GROUP BY status`,
+      [req.workspace.id]
+    );
+    const byStatus = {};
+    for (const row of counts.rows || []) byStatus[row.status] = parseInt(row.c) || 0;
+    res.json({ messages: rows, count: rows.length, by_status: byStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update a single inbox row — typically flipping status (open → resolved),
+// assigning to a user, or editing the draft_reply before send.
+app.patch(`${BASE_PATH}/api/inbox-messages/:id`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const allowed = ['status', 'priority', 'assignee_user_id', 'draft_reply', 'sentiment'];
+    const sets = [];
+    const params = [];
+    for (const col of allowed) {
+      if (req.body[col] !== undefined) { sets.push(`${col} = ?`); params.push(req.body[col]); }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+    if (req.body.status === 'resolved' && req.body.mark_replied) {
+      sets.push('replied_at = CURRENT_TIMESTAMP');
+    }
+    params.push(req.params.id, req.workspace.id);
+    const result = await s.exec(
+      `UPDATE inbox_messages SET ${sets.join(', ')} WHERE id = ? AND workspace_id = ?`,
+      params
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'inbox_message not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Conductor — build a plan from a goal
 app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
   try {

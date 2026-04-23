@@ -275,4 +275,11 @@ export const api = {
   listBrandVoices: () => request('/brand-voices'),
   createBrandVoice: (data) => request('/brand-voices', { method: 'POST', body: data }),
   deleteBrandVoice: (id) => request(`/brand-voices/${id}`, { method: 'DELETE' }),
+
+  // Community inbox
+  listInboxMessages: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/inbox-messages${q ? '?' + q : ''}`);
+  },
+  updateInboxMessage: (id, data) => request(`/inbox-messages/${id}`, { method: 'PATCH', body: data }),
 };
