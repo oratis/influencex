@@ -3,39 +3,35 @@ import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, Cartesia
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
+import { useI18n } from '../i18n';
 
 const TRAFFIC_COLORS = ['#6c5ce7', '#00d2a0', '#ff6b6b', '#feca57', '#48dbfb', '#ff9ff3', '#54a0ff', '#5f27cd'];
 const PLATFORM_COLORS = { youtube: '#ff4444', tiktok: '#00f2ea', instagram: '#e1306c', other: '#888' };
 
 export default function DataModule() {
+  const { t } = useI18n();
   const { selectedCampaign } = useCampaign();
   const [contentData, setContentData] = useState([]);
   const [regData, setRegData] = useState([]);
   const [tab, setTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
-  // GA4
   const [gaMetrics, setGaMetrics] = useState(null);
   const [gaTraffic, setGaTraffic] = useState(null);
   const [gaRealtime, setGaRealtime] = useState(null);
-  // Feishu
   const [feishuStatus, setFeishuStatus] = useState(null);
   const [feishuContent, setFeishuContent] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
-  // Combined dashboard
   const [dashboardData, setDashboardData] = useState(null);
-  // Manual edit modal
   const [editItem, setEditItem] = useState(null);
   const [editForm, setEditForm] = useState({ views: 0, likes: 0, comments: 0, shares: 0 });
   const [saving, setSaving] = useState(false);
-  // Daily stats drawer
   const [dailyStatsItem, setDailyStatsItem] = useState(null);
   const [dailyStats, setDailyStats] = useState([]);
   const toast = useToast();
 
   const loadData = async () => {
-    // Helper: wrap each API call so failures don't block others
     const safe = (fn, fallback = null) => fn().catch(() => fallback);
     try {
       const [content, reg, gam, gat, gar, fs] = await Promise.all([
@@ -65,7 +61,6 @@ export default function DataModule() {
 
   useEffect(() => { loadData(); loadDashboard(); }, []);
 
-  // Refresh GA realtime every 30s
   useEffect(() => {
     const timer = setInterval(async () => {
       try { setGaRealtime(await api.getGA4Realtime()); } catch (_) {}
@@ -79,7 +74,6 @@ export default function DataModule() {
     try {
       const result = await api.syncFeishu();
       setSyncResult(result);
-      // Load full content data
       const allData = await api.getFeishuAllData();
       setFeishuContent(allData);
       await loadData();
@@ -115,10 +109,10 @@ export default function DataModule() {
     try {
       await api.updateContentStats(editItem.id, editForm);
       setEditItem(null);
-      toast.success('Stats updated');
+      toast.success(t('data_module.saved'));
       await loadData();
       await loadDashboard();
-    } catch (e) { toast.error('Failed to save: ' + e.message); }
+    } catch (e) { toast.error(t('data_module.save_failed', { msg: e.message })); }
     setSaving(false);
   };
 
@@ -147,87 +141,82 @@ export default function DataModule() {
     color: 'var(--text-primary)',
   };
 
-  // Find content publish dates for reference lines
   const publishDates = dashboardData?.combined?.filter(d => d.has_publish).map(d => d.date) || [];
 
   return (
     <div className="page-container fade-in">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h2>{campaignName} - Data Analytics</h2>
-          <p>Content performance, website analytics, and registration metrics</p>
+          <h2>{t('data_module.title', { campaign: campaignName })}</h2>
+          <p>{t('data_module.subtitle')}</p>
         </div>
         <div className="btn-group">
           <button className="btn btn-secondary" onClick={handleFeishuSync} disabled={syncing}>
-            {syncing ? 'Syncing...' : 'Sync Feishu'}
+            {syncing ? t('data_module.btn_syncing') : t('data_module.btn_sync_feishu')}
           </button>
           <button className="btn btn-secondary" onClick={handleScrapeViews} disabled={scraping}>
-            {scraping ? 'Scraping...' : 'Scrape Views'}
+            {scraping ? t('data_module.btn_scraping') : t('data_module.btn_scrape')}
           </button>
-          <button className="btn btn-primary" onClick={() => { loadData(); loadDashboard(); }}>Refresh</button>
+          <button className="btn btn-primary" onClick={() => { loadData(); loadDashboard(); }}>{t('data_module.btn_refresh')}</button>
         </div>
       </div>
 
-      {/* Top Stats */}
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
         <div className="stat-card">
           <div className="stat-icon purple" style={{ fontSize: '20px' }}>V</div>
-          <div><div className="stat-value">{formatNumber(totalViews)}</div><div className="stat-label">Total Views</div></div>
+          <div><div className="stat-value">{formatNumber(totalViews)}</div><div className="stat-label">{t('data_module.stat_views')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon red" style={{ fontSize: '20px' }}>L</div>
-          <div><div className="stat-value">{formatNumber(totalLikes)}</div><div className="stat-label">Total Likes</div></div>
+          <div><div className="stat-value">{formatNumber(totalLikes)}</div><div className="stat-label">{t('data_module.stat_likes')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon blue" style={{ fontSize: '20px' }}>C</div>
-          <div><div className="stat-value">{contentData.length}</div><div className="stat-label">Published Content</div></div>
+          <div><div className="stat-value">{contentData.length}</div><div className="stat-label">{t('data_module.stat_content')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon green" style={{ fontSize: '20px' }}>U</div>
-          <div><div className="stat-value">{formatNumber(gaUV)}</div><div className="stat-label">Website UV</div></div>
+          <div><div className="stat-value">{formatNumber(gaUV)}</div><div className="stat-label">{t('data_module.stat_uv')}</div></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon" style={{ fontSize: '20px', background: 'linear-gradient(135deg, #00d2a0, #00b894)' }}>R</div>
-          <div><div className="stat-value">{gaRealtime?.activeUsers || 0}</div><div className="stat-label">Online Now</div></div>
+          <div><div className="stat-value">{gaRealtime?.activeUsers || 0}</div><div className="stat-label">{t('data_module.stat_online')}</div></div>
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="tabs">
         {[
-          { key: 'dashboard', label: 'Combined Dashboard' },
-          { key: 'content', label: 'Published Content' },
-          { key: 'analytics', label: 'Website Analytics' },
-        ].map(t => (
-          <button key={t.key} className={`tab ${tab === t.key ? 'active' : ''}`} onClick={() => setTab(t.key)}>
-            {t.label}
+          { key: 'dashboard', label: t('data_module.tab_dashboard') },
+          { key: 'content', label: t('data_module.tab_content') },
+          { key: 'analytics', label: t('data_module.tab_analytics') },
+        ].map(tt => (
+          <button key={tt.key} className={`tab ${tab === tt.key ? 'active' : ''}`} onClick={() => setTab(tt.key)}>
+            {tt.label}
           </button>
         ))}
       </div>
 
       {loading ? (
-        <div className="empty-state"><p>Loading data...</p></div>
+        <div className="empty-state"><p>{t('data_module.loading')}</p></div>
       ) : (
         <>
-          {/* ==================== Combined Dashboard (Task 2) ==================== */}
           {tab === 'dashboard' && (
             <div>
               {!dashboardData?.combined?.length ? (
                 <div className="empty-state">
-                  <h4>No dashboard data yet</h4>
-                  <p>Click "Sync Feishu" to pull published content, then "Scrape Views" to get view counts</p>
+                  <h4>{t('data_module.no_dashboard_title')}</h4>
+                  <p>{t('data_module.no_dashboard_hint')}</p>
                   <button className="btn btn-primary" onClick={handleFeishuSync} disabled={syncing}>
-                    {syncing ? 'Syncing...' : 'Sync Feishu Now'}
+                    {syncing ? t('data_module.btn_syncing') : t('data_module.btn_sync_now')}
                   </button>
                 </div>
               ) : (
                 <>
-                  {/* Main Combined Chart */}
                   <div className="card" style={{ marginBottom: '20px' }}>
                     <div className="card-header">
-                      <h3>Content Views + Website UV + Registrations</h3>
+                      <h3>{t('data_module.chart_main_title')}</h3>
                       <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
-                        Vertical dashed lines = content publish dates
+                        {t('data_module.chart_main_hint')}
                       </p>
                     </div>
                     <div className="chart-container" style={{ height: '420px' }}>
@@ -248,12 +237,10 @@ export default function DataModule() {
                             formatter={(val, name) => [formatNumber(val), name]}
                             labelFormatter={l => {
                               const d = dashboardData.combined.find(x => x.date === l);
-                              return d?.has_publish ? `${l} (Content Published: ${d.content_count})` : l;
+                              return d?.has_publish ? t('data_module.tooltip_published', { date: l, count: d.content_count }) : l;
                             }}
                           />
                           <Legend />
-
-                          {/* Content publish date markers */}
                           {publishDates.map(date => (
                             <ReferenceLine
                               key={date}
@@ -264,19 +251,17 @@ export default function DataModule() {
                               strokeWidth={1.5}
                             />
                           ))}
-
-                          <Area yAxisId="views" type="monotone" dataKey="views" stroke="#6c5ce7" fill="url(#viewsGrad)" strokeWidth={2} name="Content Views" />
-                          <Line yAxisId="uv" type="monotone" dataKey="uv" stroke="#48dbfb" strokeWidth={2} dot={false} name="Website UV" />
-                          <Bar yAxisId="uv" dataKey="registrations" fill="rgba(0,210,160,0.6)" name="Registrations" radius={[3, 3, 0, 0]} />
+                          <Area yAxisId="views" type="monotone" dataKey="views" stroke="#6c5ce7" fill="url(#viewsGrad)" strokeWidth={2} name={t('data_module.series_views')} />
+                          <Line yAxisId="uv" type="monotone" dataKey="uv" stroke="#48dbfb" strokeWidth={2} dot={false} name={t('data_module.series_uv')} />
+                          <Bar yAxisId="uv" dataKey="registrations" fill="rgba(0,210,160,0.6)" name={t('data_module.series_regs')} radius={[3, 3, 0, 0]} />
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
                   </div>
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-                    {/* Content by Date bar chart */}
                     <div className="card">
-                      <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>Content Published per Date</h3>
+                      <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>{t('data_module.per_date_title')}</h3>
                       <div className="chart-container" style={{ height: '280px' }}>
                         <ResponsiveContainer>
                           <BarChart data={dashboardData.combined.filter(d => d.content_count > 0)}>
@@ -284,15 +269,14 @@ export default function DataModule() {
                             <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickFormatter={d => d.slice(5)} />
                             <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} allowDecimals={false} />
                             <Tooltip contentStyle={customTooltipStyle} />
-                            <Bar dataKey="content_count" fill="#6c5ce7" radius={[4, 4, 0, 0]} name="Content Count" />
+                            <Bar dataKey="content_count" fill="#6c5ce7" radius={[4, 4, 0, 0]} name={t('data_module.series_content_count')} />
                           </BarChart>
                         </ResponsiveContainer>
                       </div>
                     </div>
 
-                    {/* Platform distribution */}
                     <div className="card">
-                      <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>Platform Distribution</h3>
+                      <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>{t('data_module.platform_dist')}</h3>
                       <div className="chart-container" style={{ height: '200px' }}>
                         <ResponsiveContainer>
                           <PieChart>
@@ -334,25 +318,24 @@ export default function DataModule() {
                     </div>
                   </div>
 
-                  {/* Dashboard Totals */}
                   <div className="card" style={{ marginTop: '20px' }}>
-                    <h3 style={{ fontSize: '15px', marginBottom: '14px' }}>Summary</h3>
+                    <h3 style={{ fontSize: '15px', marginBottom: '14px' }}>{t('data_module.summary')}</h3>
                     <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
                       <div style={{ textAlign: 'center', padding: '12px' }}>
                         <div style={{ fontSize: '28px', fontWeight: '700', color: '#6c5ce7' }}>{formatNumber(dashboardData.totals?.total_views || 0)}</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Total Content Views</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('data_module.sum_total_views')}</div>
                       </div>
                       <div style={{ textAlign: 'center', padding: '12px' }}>
                         <div style={{ fontSize: '28px', fontWeight: '700', color: '#48dbfb' }}>{formatNumber(gaUV)}</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Website UV (30d)</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('data_module.sum_uv_30d')}</div>
                       </div>
                       <div style={{ textAlign: 'center', padding: '12px' }}>
                         <div style={{ fontSize: '28px', fontWeight: '700', color: '#00d2a0' }}>{formatNumber(dashboardData.totals?.total_registrations || 0)}</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Total Registrations</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('data_module.sum_regs')}</div>
                       </div>
                       <div style={{ textAlign: 'center', padding: '12px' }}>
                         <div style={{ fontSize: '28px', fontWeight: '700', color: '#feca57' }}>{dashboardData.totals?.total_content || 0}</div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Published Content</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('data_module.sum_content')}</div>
                       </div>
                     </div>
                   </div>
@@ -361,15 +344,14 @@ export default function DataModule() {
             </div>
           )}
 
-          {/* ==================== Published Content Table ==================== */}
           {tab === 'content' && (
             <div className="card">
               <div className="card-header">
-                <h3>Published Content (from Feishu)</h3>
+                <h3>{t('data_module.content_table')}</h3>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <span className="badge badge-purple">{contentData.length} items</span>
+                  <span className="badge badge-purple">{t('data_module.items_count', { n: contentData.length })}</span>
                   <button className="btn btn-secondary btn-sm" onClick={handleScrapeViews} disabled={scraping} style={{ fontSize: '12px', padding: '4px 10px' }}>
-                    {scraping ? 'Scraping...' : 'Scrape Views'}
+                    {scraping ? t('data_module.btn_scraping') : t('data_module.btn_scrape')}
                   </button>
                 </div>
               </div>
@@ -377,14 +359,14 @@ export default function DataModule() {
                 <table>
                   <thead>
                     <tr>
-                      <th>Platform</th>
-                      <th>Content URL</th>
-                      <th>Publish Date</th>
-                      <th>Views</th>
-                      <th>Likes</th>
-                      <th>Comments</th>
-                      <th>Shares</th>
-                      <th style={{ width: '130px' }}>Actions</th>
+                      <th>{t('data_module.col_platform')}</th>
+                      <th>{t('data_module.col_url')}</th>
+                      <th>{t('data_module.col_date')}</th>
+                      <th>{t('data_module.col_views')}</th>
+                      <th>{t('data_module.col_likes')}</th>
+                      <th>{t('data_module.col_comments')}</th>
+                      <th>{t('data_module.col_shares')}</th>
+                      <th style={{ width: '130px' }}>{t('data_module.col_actions')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -409,11 +391,11 @@ export default function DataModule() {
                         <td>{c.shares > 0 ? formatNumber(c.shares) : '-'}</td>
                         <td>
                           <div style={{ display: 'flex', gap: '4px' }}>
-                            <button className="btn btn-secondary btn-sm" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => handleEditOpen(c)} title="Edit stats manually">
-                              Edit
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => handleEditOpen(c)}>
+                              {t('data_module.btn_edit')}
                             </button>
-                            <button className="btn btn-secondary btn-sm" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => handleShowDailyStats(c)} title="View daily stats trend">
-                              Trend
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => handleShowDailyStats(c)}>
+                              {t('data_module.btn_trend')}
                             </button>
                           </div>
                         </td>
@@ -425,46 +407,42 @@ export default function DataModule() {
             </div>
           )}
 
-          {/* ==================== Website Analytics (GA4) ==================== */}
           {tab === 'analytics' && (
             <>
               {!gaMetrics ? (
                 <div className="empty-state">
-                  <h4>Analytics Unavailable</h4>
-                  <p>GA4 Data API is not responding. Check your GA4_PROPERTY_ID and service account configuration.</p>
-                  <button className="btn btn-secondary" onClick={loadData}>Retry</button>
+                  <h4>{t('data_module.analytics_unavailable')}</h4>
+                  <p>{t('data_module.analytics_unavailable_hint')}</p>
+                  <button className="btn btn-secondary" onClick={loadData}>{t('data_module.btn_retry')}</button>
                 </div>
               ) : (
             <div>
               {!gaMetrics.configured && (
                 <div className="card" style={{ marginBottom: '16px', padding: '12px 16px', borderLeft: '3px solid var(--info)' }}>
                   <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                    GA4 Data API not yet connected. Configure GA4_PROPERTY_ID and service account to see live analytics.
-                    Measurement ID: <strong>G-4H57DW4Y3G</strong>
+                    {t('data_module.ga_not_connected', { id: 'G-4H57DW4Y3G' })}
                   </span>
                 </div>
               )}
 
-              {/* GA Summary Cards */}
               <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: '20px' }}>
                 <div className="stat-card">
-                  <div><div className="stat-value">{formatNumber(gaMetrics.totals?.sessions || 0)}</div><div className="stat-label">Sessions (30d)</div></div>
+                  <div><div className="stat-value">{formatNumber(gaMetrics.totals?.sessions || 0)}</div><div className="stat-label">{t('data_module.ga_sessions')}</div></div>
                 </div>
                 <div className="stat-card">
-                  <div><div className="stat-value">{formatNumber(gaMetrics.totals?.pageViews || 0)}</div><div className="stat-label">Page Views</div></div>
+                  <div><div className="stat-value">{formatNumber(gaMetrics.totals?.pageViews || 0)}</div><div className="stat-label">{t('data_module.ga_pageviews')}</div></div>
                 </div>
                 <div className="stat-card">
-                  <div><div className="stat-value">{Math.round(gaMetrics.totals?.avgSessionDuration || 0)}s</div><div className="stat-label">Avg Duration</div></div>
+                  <div><div className="stat-value">{Math.round(gaMetrics.totals?.avgSessionDuration || 0)}s</div><div className="stat-label">{t('data_module.ga_avg_duration')}</div></div>
                 </div>
                 <div className="stat-card">
-                  <div><div className="stat-value">{(gaMetrics.totals?.bounceRate || 0).toFixed(1)}%</div><div className="stat-label">Bounce Rate</div></div>
+                  <div><div className="stat-value">{(gaMetrics.totals?.bounceRate || 0).toFixed(1)}%</div><div className="stat-label">{t('data_module.ga_bounce')}</div></div>
                 </div>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px' }}>
-                {/* UV Trend */}
                 <div className="card">
-                  <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>Daily Active Users (UV)</h3>
+                  <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>{t('data_module.ga_uv_title')}</h3>
                   <div className="chart-container" style={{ height: '350px' }}>
                     <ResponsiveContainer>
                       <AreaChart data={gaMetrics.data || []}>
@@ -478,16 +456,15 @@ export default function DataModule() {
                         <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} tickFormatter={d => d.slice(5)} />
                         <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
                         <Tooltip contentStyle={customTooltipStyle} />
-                        <Area type="monotone" dataKey="activeUsers" stroke="#48dbfb" fill="url(#uvGrad)" strokeWidth={2} name="Active Users" />
-                        <Area type="monotone" dataKey="newUsers" stroke="#00d2a0" fill="none" strokeWidth={1.5} strokeDasharray="4 4" name="New Users" />
+                        <Area type="monotone" dataKey="activeUsers" stroke="#48dbfb" fill="url(#uvGrad)" strokeWidth={2} name={t('data_module.ga_active_users')} />
+                        <Area type="monotone" dataKey="newUsers" stroke="#00d2a0" fill="none" strokeWidth={1.5} strokeDasharray="4 4" name={t('data_module.ga_new_users')} />
                       </AreaChart>
                     </ResponsiveContainer>
                   </div>
                 </div>
 
-                {/* Traffic Sources */}
                 <div className="card">
-                  <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>Traffic Sources</h3>
+                  <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>{t('data_module.ga_traffic_title')}</h3>
                   {gaTraffic?.data && gaTraffic.data.length > 0 ? (
                     <>
                       <div className="chart-container" style={{ height: '200px' }}>
@@ -509,26 +486,25 @@ export default function DataModule() {
                         </ResponsiveContainer>
                       </div>
                       <div style={{ marginTop: '12px' }}>
-                        {gaTraffic.data.slice(0, 6).map((t, i) => (
+                        {gaTraffic.data.slice(0, 6).map((tr, i) => (
                           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', fontSize: '12px', borderBottom: '1px solid var(--border)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                               <div style={{ width: 10, height: 10, borderRadius: '50%', background: TRAFFIC_COLORS[i % TRAFFIC_COLORS.length] }} />
-                              <span style={{ color: 'var(--text-secondary)', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.source}</span>
+                              <span style={{ color: 'var(--text-secondary)', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr.source}</span>
                             </div>
-                            <span style={{ fontWeight: '600' }}>{formatNumber(t.activeUsers)}</span>
+                            <span style={{ fontWeight: '600' }}>{formatNumber(tr.activeUsers)}</span>
                           </div>
                         ))}
                       </div>
                     </>
                   ) : (
-                    <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>No traffic data available</p>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>{t('data_module.ga_no_traffic')}</p>
                   )}
                 </div>
               </div>
 
-              {/* Sessions & Page Views chart */}
               <div className="card" style={{ marginTop: '20px' }}>
-                <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>Sessions & Page Views</h3>
+                <h3 style={{ marginBottom: '16px', fontSize: '15px' }}>{t('data_module.ga_sessions_title')}</h3>
                 <div className="chart-container" style={{ height: '300px' }}>
                   <ResponsiveContainer>
                     <ComposedChart data={gaMetrics.data || []}>
@@ -538,8 +514,8 @@ export default function DataModule() {
                       <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
                       <Tooltip contentStyle={customTooltipStyle} />
                       <Legend />
-                      <Bar yAxisId="left" dataKey="sessions" fill="rgba(108,92,231,0.5)" name="Sessions" radius={[4, 4, 0, 0]} />
-                      <Line yAxisId="right" type="monotone" dataKey="pageViews" stroke="#feca57" strokeWidth={2} dot={false} name="Page Views" />
+                      <Bar yAxisId="left" dataKey="sessions" fill="rgba(108,92,231,0.5)" name={t('data_module.ga_sessions_series')} radius={[4, 4, 0, 0]} />
+                      <Line yAxisId="right" type="monotone" dataKey="pageViews" stroke="#feca57" strokeWidth={2} dot={false} name={t('data_module.ga_pageviews_series')} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>
@@ -551,44 +527,40 @@ export default function DataModule() {
       </>
     )}
 
-      {/* ==================== Data Sources Panel ==================== */}
       <div className="card" style={{ marginTop: '20px' }}>
-        <h3 style={{ fontSize: '15px', marginBottom: '14px' }}>Data Sources</h3>
+        <h3 style={{ fontSize: '15px', marginBottom: '14px' }}>{t('data_module.sources_title')}</h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
-          {/* Feishu Content */}
           <div style={{ padding: '14px', borderRadius: '8px', background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <span style={{ fontWeight: '600', fontSize: '14px' }}>Feishu Spreadsheet</span>
+              <span style={{ fontWeight: '600', fontSize: '14px' }}>{t('data_module.src_feishu')}</span>
               <span className={`badge ${feishuStatus?.configured ? 'badge-green' : 'badge-orange'}`}>
-                {feishuStatus?.configured ? 'Connected' : 'Pending Setup'}
+                {feishuStatus?.configured ? t('data_module.src_connected') : t('data_module.src_pending')}
               </span>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
-              {feishuStatus?.sheet || 'Published content records with dates and URLs'}
+              {feishuStatus?.sheet || t('data_module.src_feishu_desc')}
             </p>
           </div>
 
-          {/* YouTube/TikTok Scraper */}
           <div style={{ padding: '14px', borderRadius: '8px', background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <span style={{ fontWeight: '600', fontSize: '14px' }}>Content Scraper</span>
-              <span className="badge badge-green">Active</span>
+              <span style={{ fontWeight: '600', fontSize: '14px' }}>{t('data_module.src_scraper')}</span>
+              <span className="badge badge-green">{t('data_module.src_active')}</span>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
-              YouTube Data API + TikTok scraping for view counts
+              {t('data_module.src_scraper_desc')}
             </p>
           </div>
 
-          {/* GA4 */}
           <div style={{ padding: '14px', borderRadius: '8px', background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <span style={{ fontWeight: '600', fontSize: '14px' }}>Google Analytics</span>
+              <span style={{ fontWeight: '600', fontSize: '14px' }}>{t('data_module.src_ga')}</span>
               <span className={`badge ${gaMetrics?.configured ? 'badge-green' : 'badge-orange'}`}>
-                {gaMetrics?.configured ? 'Connected' : 'Pending Setup'}
+                {gaMetrics?.configured ? t('data_module.src_connected') : t('data_module.src_pending')}
               </span>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
-              G-4H57DW4Y3G | Website UV + traffic data
+              G-4H57DW4Y3G | {t('data_module.src_ga_desc')}
             </p>
           </div>
         </div>
@@ -596,59 +568,62 @@ export default function DataModule() {
         {syncResult && (
           <div style={{ marginTop: '12px', padding: '10px 14px', borderRadius: '6px', background: syncResult.error ? 'rgba(255,100,100,0.1)' : 'rgba(0,210,160,0.1)', fontSize: '13px' }}>
             {syncResult.error ? (
-              <span style={{ color: '#ff6b6b' }}>Error: {syncResult.error}</span>
+              <span style={{ color: '#ff6b6b' }}>{t('data_module.result_error', { msg: syncResult.error })}</span>
             ) : syncResult.scraped !== undefined ? (
               <span style={{ color: '#00d2a0' }}>
-                Scraped {syncResult.scraped} content URLs ({syncResult.errors} failed)
+                {t('data_module.result_scraped', { n: syncResult.scraped, err: syncResult.errors })}
               </span>
             ) : (
               <span style={{ color: '#00d2a0' }}>
-                Synced {syncResult.total || 0} published content records from Feishu
-                {syncResult.syncedAt && ` at ${new Date(syncResult.syncedAt).toLocaleTimeString()}`}
+                {t('data_module.result_synced', { n: syncResult.total || 0 })}
+                {syncResult.syncedAt && t('data_module.result_synced_at', { time: new Date(syncResult.syncedAt).toLocaleTimeString() })}
               </span>
             )}
           </div>
         )}
       </div>
 
-      {/* ==================== Edit Stats Modal ==================== */}
       {editItem && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setEditItem(null)}>
           <div className="card" style={{ width: '420px', maxWidth: '90vw', padding: '24px' }} onClick={e => e.stopPropagation()}>
-            <h3 style={{ marginBottom: '4px' }}>Edit Content Stats</h3>
+            <h3 style={{ marginBottom: '4px' }}>{t('data_module.edit_title')}</h3>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px', wordBreak: 'break-all' }}>
               {editItem.content_url?.replace(/https?:\/\/(www\.)?/, '').slice(0, 60)}
             </p>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              {['views', 'likes', 'comments', 'shares'].map(field => (
-                <div key={field}>
-                  <label style={{ fontSize: '12px', fontWeight: '600', textTransform: 'capitalize', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>{field}</label>
+              {[
+                { key: 'views', label: t('data_module.field_views') },
+                { key: 'likes', label: t('data_module.field_likes') },
+                { key: 'comments', label: t('data_module.field_comments') },
+                { key: 'shares', label: t('data_module.field_shares') },
+              ].map(f => (
+                <div key={f.key}>
+                  <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>{f.label}</label>
                   <input
                     type="number"
-                    value={editForm[field]}
-                    onChange={e => setEditForm(f => ({ ...f, [field]: parseInt(e.target.value) || 0 }))}
+                    value={editForm[f.key]}
+                    onChange={e => setEditForm(form => ({ ...form, [f.key]: parseInt(e.target.value) || 0 }))}
                     style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '14px' }}
                   />
                 </div>
               ))}
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '20px' }}>
-              <button className="btn btn-secondary" onClick={() => setEditItem(null)}>Cancel</button>
+              <button className="btn btn-secondary" onClick={() => setEditItem(null)}>{t('data_module.btn_cancel')}</button>
               <button className="btn btn-primary" onClick={handleEditSave} disabled={saving}>
-                {saving ? 'Saving...' : 'Save'}
+                {saving ? t('data_module.btn_saving') : t('data_module.btn_save')}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ==================== Daily Stats Drawer ==================== */}
       {dailyStatsItem && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setDailyStatsItem(null)}>
           <div className="card" style={{ width: '700px', maxWidth: '95vw', padding: '24px' }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
               <div>
-                <h3 style={{ marginBottom: '4px' }}>Daily View Trend</h3>
+                <h3 style={{ marginBottom: '4px' }}>{t('data_module.trend_title')}</h3>
                 <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0, wordBreak: 'break-all' }}>
                   <span className="badge" style={{ background: PLATFORM_COLORS[dailyStatsItem.platform] || '#888', color: '#fff', fontSize: '10px', marginRight: '6px' }}>
                     {dailyStatsItem.platform}
@@ -656,15 +631,15 @@ export default function DataModule() {
                   {dailyStatsItem.content_url?.replace(/https?:\/\/(www\.)?/, '').slice(0, 60)}
                 </p>
                 <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-                  Published: {dailyStatsItem.publish_date || 'Unknown'}
+                  {t('data_module.trend_published', { date: dailyStatsItem.publish_date || t('data_module.trend_unknown') })}
                 </p>
               </div>
               <button className="btn btn-secondary btn-sm" onClick={() => setDailyStatsItem(null)} style={{ fontSize: '14px', lineHeight: 1, padding: '4px 8px' }}>X</button>
             </div>
             {dailyStats.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
-                <p>No daily snapshot data yet.</p>
-                <p style={{ fontSize: '12px' }}>Click "Scrape Views" to start collecting daily data, or manually edit stats to create a snapshot.</p>
+                <p>{t('data_module.no_daily_title')}</p>
+                <p style={{ fontSize: '12px' }}>{t('data_module.no_daily_hint')}</p>
               </div>
             ) : (
               <>
@@ -677,9 +652,9 @@ export default function DataModule() {
                       <YAxis yAxisId="engagement" orientation="right" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
                       <Tooltip contentStyle={customTooltipStyle} formatter={(val, name) => [formatNumber(val), name]} />
                       <Legend />
-                      <Area yAxisId="views" type="monotone" dataKey="views" stroke="#6c5ce7" fill="rgba(108,92,231,0.15)" strokeWidth={2} name="Views" />
-                      <Line yAxisId="engagement" type="monotone" dataKey="likes" stroke="#ff6b6b" strokeWidth={1.5} dot={{ r: 2 }} name="Likes" />
-                      <Line yAxisId="engagement" type="monotone" dataKey="comments" stroke="#48dbfb" strokeWidth={1.5} dot={{ r: 2 }} name="Comments" />
+                      <Area yAxisId="views" type="monotone" dataKey="views" stroke="#6c5ce7" fill="rgba(108,92,231,0.15)" strokeWidth={2} name={t('data_module.col_views')} />
+                      <Line yAxisId="engagement" type="monotone" dataKey="likes" stroke="#ff6b6b" strokeWidth={1.5} dot={{ r: 2 }} name={t('data_module.col_likes')} />
+                      <Line yAxisId="engagement" type="monotone" dataKey="comments" stroke="#48dbfb" strokeWidth={1.5} dot={{ r: 2 }} name={t('data_module.col_comments')} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>
@@ -687,12 +662,12 @@ export default function DataModule() {
                   <table style={{ fontSize: '12px' }}>
                     <thead>
                       <tr>
-                        <th>Date</th>
-                        <th>Views</th>
-                        <th>Likes</th>
-                        <th>Comments</th>
-                        <th>Shares</th>
-                        <th>Source</th>
+                        <th>{t('data_module.trend_col_date')}</th>
+                        <th>{t('data_module.col_views')}</th>
+                        <th>{t('data_module.col_likes')}</th>
+                        <th>{t('data_module.col_comments')}</th>
+                        <th>{t('data_module.col_shares')}</th>
+                        <th>{t('data_module.trend_col_source')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -703,7 +678,7 @@ export default function DataModule() {
                           <td>{formatNumber(d.likes)}</td>
                           <td>{formatNumber(d.comments)}</td>
                           <td>{formatNumber(d.shares)}</td>
-                          <td><span className={`badge ${d.source === 'manual' ? 'badge-orange' : 'badge-green'}`} style={{ fontSize: '10px' }}>{d.source}</span></td>
+                          <td><span className={`badge ${d.source === 'manual' ? 'badge-orange' : 'badge-green'}`} style={{ fontSize: '10px' }}>{d.source === 'manual' ? t('data_module.src_manual') : t('data_module.src_scrape')}</span></td>
                         </tr>
                       ))}
                     </tbody>

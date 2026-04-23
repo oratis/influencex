@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { api } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
+import { useI18n } from '../i18n';
 
 const FUNNEL_COLORS = ['#6c5ce7', '#74b9ff', '#00d2a0', '#fdcb6e', '#ff9ff3', '#00b894'];
 
@@ -31,6 +32,7 @@ function MetricCard({ label, value, sub, color = 'var(--accent)' }) {
 }
 
 export default function RoiDashboard() {
+  const { t } = useI18n();
   const { selectedCampaign, selectedCampaignId } = useCampaign();
   const [roi, setRoi] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -41,15 +43,15 @@ export default function RoiDashboard() {
     setLoading(true);
     api.getCampaignRoi(selectedCampaignId)
       .then(data => setRoi(data))
-      .catch(e => toast.error('Failed to load ROI: ' + e.message))
+      .catch(e => toast.error(t('roi.load_failed', { msg: e.message })))
       .finally(() => setLoading(false));
   }, [selectedCampaignId]);
 
   if (!selectedCampaignId) {
     return (
       <div className="page-container fade-in">
-        <div className="page-header"><h2>ROI Dashboard</h2><p>Select a campaign from the header to view ROI</p></div>
-        <div className="empty-state"><h4>No campaign selected</h4><p>Use the campaign selector above</p></div>
+        <div className="page-header"><h2>{t('roi.title')}</h2><p>{t('roi.subtitle_select')}</p></div>
+        <div className="empty-state"><h4>{t('roi.no_campaign_title')}</h4><p>{t('roi.no_campaign_hint')}</p></div>
       </div>
     );
   }
@@ -57,20 +59,20 @@ export default function RoiDashboard() {
   if (loading || !roi) {
     return (
       <div className="page-container fade-in">
-        <div className="page-header"><h2>ROI Dashboard</h2></div>
-        <div className="empty-state"><p>Loading ROI data...</p></div>
+        <div className="page-header"><h2>{t('roi.title')}</h2></div>
+        <div className="empty-state"><p>{t('roi.loading')}</p></div>
       </div>
     );
   }
 
   const { campaign, kols, funnel, content_performance: perf, roi: roiMetrics } = roi;
   const funnelSteps = [
-    { label: 'Total Contacts', value: funnel.total_contacts, rate: '100%' },
-    { label: 'Sent', value: funnel.sent_or_beyond, rate: funnel.total_contacts > 0 ? ((funnel.sent_or_beyond / funnel.total_contacts) * 100).toFixed(1) + '%' : '0%' },
-    { label: 'Replied', value: funnel.replied, rate: funnel.rates.reply_rate + '%' },
-    { label: 'Contracted', value: funnel.signed_contracts, rate: funnel.rates.contract_rate + '%' },
-    { label: 'Content Done', value: funnel.content_done, rate: funnel.rates.completion_rate + '%' },
-    { label: 'Paid', value: funnel.paid, rate: funnel.rates.payment_rate + '%' },
+    { label: t('roi.funnel_total_contacts'), value: funnel.total_contacts, rate: '100%' },
+    { label: t('roi.funnel_sent'), value: funnel.sent_or_beyond, rate: funnel.total_contacts > 0 ? ((funnel.sent_or_beyond / funnel.total_contacts) * 100).toFixed(1) + '%' : '0%' },
+    { label: t('roi.funnel_replied'), value: funnel.replied, rate: funnel.rates.reply_rate + '%' },
+    { label: t('roi.funnel_contracted'), value: funnel.signed_contracts, rate: funnel.rates.contract_rate + '%' },
+    { label: t('roi.funnel_content_done'), value: funnel.content_done, rate: funnel.rates.completion_rate + '%' },
+    { label: t('roi.funnel_paid'), value: funnel.paid, rate: funnel.rates.payment_rate + '%' },
   ];
 
   const kolStatusData = Object.entries(kols.byStatus || {}).map(([status, data]) => ({
@@ -83,47 +85,45 @@ export default function RoiDashboard() {
     <div className="page-container fade-in">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h2>ROI Dashboard - {campaign.name}</h2>
-          <p>Campaign performance, conversion funnel, and cost efficiency</p>
+          <h2>{t('roi.title_for', { name: campaign.name })}</h2>
+          <p>{t('roi.subtitle')}</p>
         </div>
         <div className="btn-group">
           <span className={`badge ${campaign.status === 'active' ? 'badge-green' : 'badge-gray'}`}>{campaign.status}</span>
         </div>
       </div>
 
-      {/* Top-line metrics */}
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
         <MetricCard
-          label="Budget Utilization"
+          label={t('roi.metric_budget_util')}
           value={campaign.budget_utilization ? campaign.budget_utilization + '%' : '-'}
           sub={`${formatCurrency(campaign.budget_spent)} / ${formatCurrency(campaign.budget)}`}
           color="#6c5ce7"
         />
         <MetricCard
-          label="Total Content Views"
+          label={t('roi.metric_total_views')}
           value={formatNumber(perf.total_views)}
-          sub={`${perf.content_count} pieces published`}
+          sub={t('roi.pieces_published_sub', { n: perf.content_count })}
           color="#74b9ff"
         />
         <MetricCard
-          label="Engagement Rate"
+          label={t('roi.metric_engagement_rate')}
           value={perf.engagement_rate + '%'}
-          sub={`${formatNumber(perf.total_engagement)} total interactions`}
+          sub={t('roi.total_interactions_sub', { n: formatNumber(perf.total_engagement) })}
           color="#00d2a0"
         />
         <MetricCard
-          label="Effective CPM"
+          label={t('roi.metric_effective_cpm')}
           value={roiMetrics.effective_cpm ? formatCurrency(roiMetrics.effective_cpm) : '-'}
-          sub="Cost per 1,000 views"
+          sub={t('roi.cpm_sub')}
           color="#fdcb6e"
         />
       </div>
 
-      {/* Conversion Funnel */}
       <div className="card" style={{ marginTop: '16px' }}>
         <div className="card-header">
-          <h3>Conversion Funnel</h3>
-          <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>From outreach to paid content</span>
+          <h3>{t('roi.funnel_title')}</h3>
+          <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('roi.funnel_subtitle')}</span>
         </div>
         <div className="chart-container" style={{ height: '280px' }}>
           <ResponsiveContainer>
@@ -136,7 +136,7 @@ export default function RoiDashboard() {
                   backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)',
                   borderRadius: '8px', fontSize: '13px'
                 }}
-                formatter={(v, name, props) => [`${v} (${props.payload.rate})`, 'Count']}
+                formatter={(v, name, props) => [`${v} (${props.payload.rate})`, t('roi.funnel_tooltip_label')]}
               />
               <Bar dataKey="value" radius={[0, 6, 6, 0]}>
                 {funnelSteps.map((_, i) => <Cell key={i} fill={FUNNEL_COLORS[i]} />)}
@@ -147,29 +147,28 @@ export default function RoiDashboard() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginTop: '16px' }}>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
             <div style={{ fontSize: '20px', fontWeight: '700', color: '#6c5ce7' }}>{funnel.rates.reply_rate}%</div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Reply Rate</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.reply_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
             <div style={{ fontSize: '20px', fontWeight: '700', color: '#00d2a0' }}>{funnel.rates.contract_rate}%</div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Contract Rate</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.contract_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
             <div style={{ fontSize: '20px', fontWeight: '700', color: '#fdcb6e' }}>{funnel.rates.completion_rate}%</div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Completion Rate</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.completion_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
             <div style={{ fontSize: '20px', fontWeight: '700', color: '#00b894' }}>{funnel.rates.payment_rate}%</div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Payment Rate</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.payment_rate')}</div>
           </div>
         </div>
       </div>
 
-      {/* KOL Status + ROI Details */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px' }}>
         <div className="card">
-          <h3 style={{ marginBottom: '14px' }}>KOLs by Status</h3>
+          <h3 style={{ marginBottom: '14px' }}>{t('roi.kols_by_status')}</h3>
           {kolStatusData.length === 0 ? (
-            <div className="empty-state"><p>No KOLs collected yet</p></div>
+            <div className="empty-state"><p>{t('roi.no_kols')}</p></div>
           ) : (
             <div className="chart-container" style={{ height: '220px' }}>
               <ResponsiveContainer>
@@ -191,51 +190,50 @@ export default function RoiDashboard() {
         </div>
 
         <div className="card">
-          <h3 style={{ marginBottom: '14px' }}>Cost Efficiency</h3>
+          <h3 style={{ marginBottom: '14px' }}>{t('roi.cost_efficiency')}</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px', background: 'var(--bg-input)', borderRadius: '8px' }}>
               <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Total Spent</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('roi.total_spent')}</div>
                 <div style={{ fontSize: '22px', fontWeight: '700' }}>{formatCurrency(roiMetrics.total_spent)}</div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Remaining</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{t('roi.remaining')}</div>
                 <div style={{ fontSize: '22px', fontWeight: '700', color: 'var(--success)' }}>{formatCurrency(campaign.budget_remaining)}</div>
               </div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
               <div style={{ padding: '10px', background: 'var(--bg-input)', borderRadius: '8px' }}>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Cost per Signed Contract</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.cost_per_signed')}</div>
                 <div style={{ fontSize: '18px', fontWeight: '700', color: '#74b9ff' }}>
                   {roiMetrics.cost_per_signed_contract ? formatCurrency(roiMetrics.cost_per_signed_contract) : '-'}
                 </div>
               </div>
               <div style={{ padding: '10px', background: 'var(--bg-input)', borderRadius: '8px' }}>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Cost per Completed</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.cost_per_completed')}</div>
                 <div style={{ fontSize: '18px', fontWeight: '700', color: '#00d2a0' }}>
                   {roiMetrics.cost_per_completed ? formatCurrency(roiMetrics.cost_per_completed) : '-'}
                 </div>
               </div>
             </div>
             <div style={{ padding: '10px', background: 'var(--bg-input)', borderRadius: '8px' }}>
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Effective CPM (cost per 1K views)</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.cpm_label')}</div>
               <div style={{ fontSize: '18px', fontWeight: '700', color: '#fdcb6e' }}>
-                {roiMetrics.effective_cpm ? formatCurrency(roiMetrics.effective_cpm) : 'No views data yet'}
+                {roiMetrics.effective_cpm ? formatCurrency(roiMetrics.effective_cpm) : t('roi.no_views_data')}
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Content Performance Table */}
       <div className="card" style={{ marginTop: '16px' }}>
-        <h3 style={{ marginBottom: '14px' }}>Content Performance Breakdown</h3>
+        <h3 style={{ marginBottom: '14px' }}>{t('roi.content_perf_title')}</h3>
         <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
-          <MetricCard label="Pieces Published" value={perf.content_count} color="#6c5ce7" />
-          <MetricCard label="Views" value={formatNumber(perf.total_views)} color="#74b9ff" />
-          <MetricCard label="Likes" value={formatNumber(perf.total_likes)} color="#ff6b6b" />
-          <MetricCard label="Comments" value={formatNumber(perf.total_comments)} color="#00d2a0" />
-          <MetricCard label="Shares" value={formatNumber(perf.total_shares)} color="#fdcb6e" />
+          <MetricCard label={t('roi.pieces_published')} value={perf.content_count} color="#6c5ce7" />
+          <MetricCard label={t('roi.views')} value={formatNumber(perf.total_views)} color="#74b9ff" />
+          <MetricCard label={t('roi.likes')} value={formatNumber(perf.total_likes)} color="#ff6b6b" />
+          <MetricCard label={t('roi.comments')} value={formatNumber(perf.total_comments)} color="#00d2a0" />
+          <MetricCard label={t('roi.shares')} value={formatNumber(perf.total_shares)} color="#fdcb6e" />
         </div>
       </div>
     </div>

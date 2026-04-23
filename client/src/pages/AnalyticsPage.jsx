@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
+import { useI18n } from '../i18n';
 
-/**
- * Analytics page — spend, agent performance, platform conversion, preset ROI.
- * All numbers are scoped to the current workspace.
- */
 export default function AnalyticsPage() {
+  const { t } = useI18n();
   const [agents, setAgents] = useState([]);
   const [platforms, setPlatforms] = useState([]);
   const [presets, setPresets] = useState([]);
@@ -43,48 +41,46 @@ export default function AnalyticsPage() {
     <div className="page-container fade-in">
       <div className="page-header">
         <div>
-          <h2>Analytics</h2>
-          <p>Understand where your AI spend goes and what's working.</p>
+          <h2>{t('analytics.title')}</h2>
+          <p>{t('analytics.subtitle')}</p>
         </div>
       </div>
 
-      {/* Cost summary */}
       {cost && (
         <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
           <div className="stat-card">
             <div className="stat-icon purple">$</div>
-            <div><div className="stat-value">{money(cost.lifetime?.usdCents)}</div><div className="stat-label">Lifetime spend</div></div>
+            <div><div className="stat-value">{money(cost.lifetime?.usdCents)}</div><div className="stat-label">{t('analytics.stat_lifetime')}</div></div>
           </div>
           <div className="stat-card">
             <div className="stat-icon orange">T</div>
-            <div><div className="stat-value">{money(cost.today?.usdCents)}</div><div className="stat-label">Today</div></div>
+            <div><div className="stat-value">{money(cost.today?.usdCents)}</div><div className="stat-label">{t('analytics.stat_today')}</div></div>
           </div>
           <div className="stat-card">
             <div className="stat-icon blue">R</div>
-            <div><div className="stat-value">{cost.lifetime?.runs || 0}</div><div className="stat-label">Agent runs</div></div>
+            <div><div className="stat-value">{cost.lifetime?.runs || 0}</div><div className="stat-label">{t('analytics.stat_runs')}</div></div>
           </div>
           <div className="stat-card">
             <div className="stat-icon green">Tk</div>
-            <div><div className="stat-value">{((cost.lifetime?.inputTokens || 0) + (cost.lifetime?.outputTokens || 0)).toLocaleString()}</div><div className="stat-label">Total tokens</div></div>
+            <div><div className="stat-value">{((cost.lifetime?.inputTokens || 0) + (cost.lifetime?.outputTokens || 0)).toLocaleString()}</div><div className="stat-label">{t('analytics.stat_tokens')}</div></div>
           </div>
         </div>
       )}
 
-      {/* Agent performance */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 style={{ marginBottom: 14 }}>Agent performance</h3>
-        {loading ? <div className="empty-state"><p>Loading...</p></div> :
-          agents.length === 0 ? <div className="empty-state"><p>Run an agent to see stats here.</p></div> :
+        <h3 style={{ marginBottom: 14 }}>{t('analytics.agent_performance')}</h3>
+        {loading ? <div className="empty-state"><p>{t('analytics.loading')}</p></div> :
+          agents.length === 0 ? <div className="empty-state"><p>{t('analytics.no_agents')}</p></div> :
           <div className="table-container">
             <table>
               <thead><tr>
-                <th>Agent</th>
-                <th>Runs</th>
-                <th>Success rate</th>
-                <th>Cost</th>
-                <th>Avg cost/run</th>
-                <th>Avg duration</th>
-                <th>Tokens</th>
+                <th>{t('analytics.col_agent')}</th>
+                <th>{t('analytics.col_runs')}</th>
+                <th>{t('analytics.col_success_rate')}</th>
+                <th>{t('analytics.col_cost')}</th>
+                <th>{t('analytics.col_avg_cost')}</th>
+                <th>{t('analytics.col_avg_duration')}</th>
+                <th>{t('analytics.col_tokens')}</th>
               </tr></thead>
               <tbody>
                 {agents.map(a => (
@@ -116,29 +112,28 @@ export default function AnalyticsPage() {
         }
       </div>
 
-      {/* Platform performance */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 style={{ marginBottom: 14 }}>Publishing conversion by platform</h3>
-        {platforms.length === 0 ? <div className="empty-state"><p>Schedule some publishes to see platform stats.</p></div> :
+        <h3 style={{ marginBottom: 14 }}>{t('analytics.platform_title')}</h3>
+        {platforms.length === 0 ? <div className="empty-state"><p>{t('analytics.no_platforms')}</p></div> :
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
             {platforms.map(p => (
               <div key={p.platform} className="card" style={{ padding: 14, border: '1px solid var(--border)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <span className="badge badge-purple" style={{ textTransform: 'capitalize' }}>{p.platform}</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.total} total</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('analytics.platform_total', { n: p.total })}</span>
                 </div>
                 <div style={{ marginBottom: 10 }}>
                   <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: 'var(--bg-input)' }}>
-                    <div style={{ width: `${(p.complete / p.total) * 100}%`, background: 'var(--success)' }} title={`${p.complete} complete`} />
-                    <div style={{ width: `${(p.error / p.total) * 100}%`, background: 'var(--danger)' }} title={`${p.error} error`} />
-                    <div style={{ width: `${(p.pending / p.total) * 100}%`, background: 'var(--warning)' }} title={`${p.pending} pending`} />
+                    <div style={{ width: `${(p.complete / p.total) * 100}%`, background: 'var(--success)' }} />
+                    <div style={{ width: `${(p.error / p.total) * 100}%`, background: 'var(--danger)' }} />
+                    <div style={{ width: `${(p.pending / p.total) * 100}%`, background: 'var(--warning)' }} />
                   </div>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                  ✓ {p.complete || 0} · ✗ {p.error || 0} · ⏳ {p.pending || 0}
+                  {t('analytics.platform_legend', { ok: p.complete || 0, err: p.error || 0, pend: p.pending || 0 })}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                  {Math.round(p.successRate * 100)}% success
+                  {t('analytics.platform_success_suffix', { pct: Math.round(p.successRate * 100) })}
                 </div>
               </div>
             ))}
@@ -146,13 +141,18 @@ export default function AnalyticsPage() {
         }
       </div>
 
-      {/* Preset effectiveness */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 style={{ marginBottom: 14 }}>Prompt preset usage</h3>
-        {presets.length === 0 ? <div className="empty-state"><p>Save presets in Content Studio to see usage here.</p></div> :
+        <h3 style={{ marginBottom: 14 }}>{t('analytics.preset_title')}</h3>
+        {presets.length === 0 ? <div className="empty-state"><p>{t('analytics.no_presets')}</p></div> :
           <div className="table-container">
             <table>
-              <thead><tr><th>Name</th><th>Type</th><th>Agent</th><th>Uses</th><th>Created</th></tr></thead>
+              <thead><tr>
+                <th>{t('analytics.preset_col_name')}</th>
+                <th>{t('analytics.preset_col_type')}</th>
+                <th>{t('analytics.preset_col_agent')}</th>
+                <th>{t('analytics.preset_col_uses')}</th>
+                <th>{t('analytics.preset_col_created')}</th>
+              </tr></thead>
               <tbody>
                 {presets.map(p => (
                   <tr key={p.id}>
@@ -169,10 +169,9 @@ export default function AnalyticsPage() {
         }
       </div>
 
-      {/* Content library breakdown */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3 style={{ marginBottom: 14 }}>Content library</h3>
-        {Object.keys(content).length === 0 ? <div className="empty-state"><p>No saved content yet.</p></div> :
+        <h3 style={{ marginBottom: 14 }}>{t('analytics.content_title')}</h3>
+        {Object.keys(content).length === 0 ? <div className="empty-state"><p>{t('analytics.no_content')}</p></div> :
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
             {Object.entries(content).map(([type, statuses]) => {
               const total = Object.values(statuses).reduce((a, b) => a + b, 0);

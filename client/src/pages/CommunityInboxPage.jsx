@@ -1,15 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
+import { useI18n } from '../i18n';
 
-/**
- * Community Inbox — surfaces mentions/comments/DMs pulled by the Community
- * Agent. Three actions map 1:1 to the agent's actions:
- *   - Fetch: pulls new messages from connected platforms
- *   - Classify: runs triage on un-classified rows
- *   - Draft:  generates an on-brand reply for a selected message
- */
 export default function CommunityInboxPage() {
+  const { t } = useI18n();
   const [messages, setMessages] = useState([]);
   const [byStatus, setByStatus] = useState({});
   const [statusFilter, setStatusFilter] = useState('open');
@@ -38,7 +33,6 @@ export default function CommunityInboxPage() {
 
   async function runAgent(action, extra = {}) {
     const r = await api.runAgent('community', { action, ...extra });
-    // The run API is fire-and-forget; give the backend a moment then reload.
     await new Promise(res => setTimeout(res, 1200));
     return r;
   }
@@ -47,7 +41,7 @@ export default function CommunityInboxPage() {
     setFetchBusy(true);
     try {
       await runAgent('fetch');
-      toast.success('Fetched latest mentions');
+      toast.success(t('inbox.toast_fetched'));
       await load();
     } catch (e) { toast.error(e.message); }
     setFetchBusy(false);
@@ -57,7 +51,7 @@ export default function CommunityInboxPage() {
     setClassifyBusy(true);
     try {
       await runAgent('classify', { limit: 30 });
-      toast.success('Classified new messages');
+      toast.success(t('inbox.toast_classified'));
       await load();
     } catch (e) { toast.error(e.message); }
     setClassifyBusy(false);
@@ -67,12 +61,11 @@ export default function CommunityInboxPage() {
     setDraftBusy(true);
     try {
       await runAgent('draft', { inbox_message_id: msg.id });
-      // Reload to pull the new draft_reply column.
       await load();
       const r = await api.listInboxMessages({ status: statusFilter, platform: platformFilter });
       const updated = (r.messages || []).find(m => m.id === msg.id);
       if (updated) setSelected(updated);
-      toast.success('Draft generated');
+      toast.success(t('inbox.toast_draft_gen'));
     } catch (e) { toast.error(e.message); }
     setDraftBusy(false);
   }
@@ -93,7 +86,7 @@ export default function CommunityInboxPage() {
     if (!selected) return;
     try {
       await api.updateInboxMessage(selected.id, { draft_reply: selected.draft_reply || '' });
-      toast.success('Draft saved');
+      toast.success(t('inbox.toast_draft_saved'));
       load();
     } catch (e) { toast.error(e.message); }
   }
@@ -108,46 +101,44 @@ export default function CommunityInboxPage() {
     <div className="page-container fade-in">
       <div className="page-header">
         <div>
-          <h2>Community Inbox</h2>
-          <p>Mentions, comments, and DMs from connected platforms — triaged by the Community Agent.</p>
+          <h2>{t('inbox.title')}</h2>
+          <p>{t('inbox.subtitle')}</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-secondary" onClick={handleClassify} disabled={classifyBusy}>
-            {classifyBusy ? 'Classifying…' : 'Classify unread'}
+            {classifyBusy ? t('inbox.btn_classifying') : t('inbox.btn_classify')}
           </button>
           <button className="btn btn-primary" onClick={handleFetch} disabled={fetchBusy}>
-            {fetchBusy ? 'Fetching…' : 'Fetch new'}
+            {fetchBusy ? t('inbox.btn_fetching') : t('inbox.btn_fetch')}
           </button>
         </div>
       </div>
 
-      {/* Stats strip */}
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
-        <StatusChip label="Open" value={byStatus.open || 0} active={statusFilter === 'open'} onClick={() => setStatusFilter('open')} />
-        <StatusChip label="Resolved" value={byStatus.resolved || 0} active={statusFilter === 'resolved'} onClick={() => setStatusFilter('resolved')} />
-        <StatusChip label="Snoozed" value={byStatus.snoozed || 0} active={statusFilter === 'snoozed'} onClick={() => setStatusFilter('snoozed')} />
-        <StatusChip label="All" value={Object.values(byStatus).reduce((a, b) => a + b, 0)} active={statusFilter === ''} onClick={() => setStatusFilter('')} />
+        <StatusChip label={t('inbox.status_open')} value={byStatus.open || 0} active={statusFilter === 'open'} onClick={() => setStatusFilter('open')} />
+        <StatusChip label={t('inbox.status_resolved')} value={byStatus.resolved || 0} active={statusFilter === 'resolved'} onClick={() => setStatusFilter('resolved')} />
+        <StatusChip label={t('inbox.status_snoozed')} value={byStatus.snoozed || 0} active={statusFilter === 'snoozed'} onClick={() => setStatusFilter('snoozed')} />
+        <StatusChip label={t('inbox.status_all')} value={Object.values(byStatus).reduce((a, b) => a + b, 0)} active={statusFilter === ''} onClick={() => setStatusFilter('')} />
       </div>
 
       <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: 16 }}>
-        {/* Left: list */}
         <div className="card" style={{ padding: 0, maxHeight: 'calc(100vh - 260px)', overflow: 'auto' }}>
           <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 8, alignItems: 'center' }}>
             <select value={platformFilter} onChange={e => setPlatformFilter(e.target.value)} className="input" style={{ padding: '4px 8px' }}>
-              <option value="">All platforms</option>
+              <option value="">{t('inbox.filter_all_platforms')}</option>
               <option value="twitter">X (Twitter)</option>
               <option value="linkedin">LinkedIn</option>
               <option value="instagram">Instagram</option>
               <option value="tiktok">TikTok</option>
             </select>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{messages.length} shown</span>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('inbox.shown_count', { n: messages.length })}</span>
           </div>
           {loading ? (
-            <div className="empty-state"><p>Loading…</p></div>
+            <div className="empty-state"><p>{t('inbox.loading')}</p></div>
           ) : messages.length === 0 ? (
             <div className="empty-state">
-              <p>No messages match these filters.</p>
-              <p style={{ fontSize: 12 }}>Connect a platform on <a href="/connections">Connections</a> and click "Fetch new".</p>
+              <p>{t('inbox.no_messages')}</p>
+              <p style={{ fontSize: 12 }}>{t('inbox.connect_hint')}</p>
             </div>
           ) : (
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
@@ -163,7 +154,7 @@ export default function CommunityInboxPage() {
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600 }}>{m.author_handle || m.author_name || 'unknown'}</span>
+                    <span style={{ fontWeight: 600 }}>{m.author_handle || m.author_name || t('inbox.unknown_author')}</span>
                     <span style={{ color: 'var(--text-muted)' }}>{m.platform}</span>
                   </div>
                   <div style={{ fontSize: 13, lineHeight: 1.4, color: 'var(--text)', marginBottom: 6 }}>
@@ -186,11 +177,10 @@ export default function CommunityInboxPage() {
           )}
         </div>
 
-        {/* Right: detail */}
         <div className="card" style={{ maxHeight: 'calc(100vh - 260px)', overflow: 'auto' }}>
           {!selected ? (
             <div className="empty-state">
-              <p>Select a message to view details and draft a reply.</p>
+              <p>{t('inbox.select_hint')}</p>
             </div>
           ) : (
             <div>
@@ -199,14 +189,14 @@ export default function CommunityInboxPage() {
                   <img src={selected.author_avatar_url} alt="" style={{ width: 40, height: 40, borderRadius: '50%' }} />
                 )}
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600 }}>{selected.author_name || selected.author_handle || 'unknown'}</div>
+                  <div style={{ fontWeight: 600 }}>{selected.author_name || selected.author_handle || t('inbox.unknown_author')}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                     {selected.author_handle} · {selected.platform} · {selected.kind}
                   </div>
                 </div>
                 {selected.url && (
                   <a href={selected.url} target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ padding: '4px 10px' }}>
-                    Open
+                    {t('inbox.open_btn')}
                   </a>
                 )}
               </div>
@@ -217,51 +207,51 @@ export default function CommunityInboxPage() {
 
               <div style={{ display: 'flex', gap: 8, marginBottom: 16, fontSize: 12 }}>
                 {selected.sentiment && (
-                  <Badge color={sentimentColor[selected.sentiment]}>sentiment: {selected.sentiment}</Badge>
+                  <Badge color={sentimentColor[selected.sentiment]}>{t('inbox.badge_sentiment', { val: selected.sentiment })}</Badge>
                 )}
-                {selected.priority && <Badge color={priorityColor[selected.priority]}>priority: {selected.priority}</Badge>}
-                {(selected.tags || []).map(t => <Badge key={t} color="#6b7280">{t}</Badge>)}
+                {selected.priority && <Badge color={priorityColor[selected.priority]}>{t('inbox.badge_priority', { val: selected.priority })}</Badge>}
+                {(selected.tags || []).map(tag => <Badge key={tag} color="#6b7280">{tag}</Badge>)}
               </div>
 
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>Draft reply</label>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>{t('inbox.draft_label')}</label>
                   <button
                     onClick={() => handleDraft(selected)}
                     disabled={draftBusy}
                     className="btn btn-secondary"
                     style={{ padding: '4px 10px', fontSize: 12 }}
                   >
-                    {draftBusy ? 'Drafting…' : selected.draft_reply ? 'Regenerate' : 'Generate draft'}
+                    {draftBusy ? t('inbox.btn_drafting') : selected.draft_reply ? t('inbox.btn_regenerate') : t('inbox.btn_generate')}
                   </button>
                 </div>
                 <textarea
                   value={selected.draft_reply || ''}
                   onChange={e => handleDraftEdit(e.target.value)}
-                  placeholder="Click 'Generate draft' to have the Community Agent write a reply."
+                  placeholder={t('inbox.draft_placeholder')}
                   rows={5}
                   className="input"
                   style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
                 />
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button className="btn btn-primary" onClick={handleDraftSave}>Save draft</button>
+                  <button className="btn btn-primary" onClick={handleDraftSave}>{t('inbox.btn_save_draft')}</button>
                   {selected.status !== 'resolved' ? (
                     <button className="btn btn-secondary" onClick={() => handleStatusChange(selected, 'resolved')}>
-                      Mark resolved
+                      {t('inbox.btn_mark_resolved')}
                     </button>
                   ) : (
                     <button className="btn btn-secondary" onClick={() => handleStatusChange(selected, 'open')}>
-                      Reopen
+                      {t('inbox.btn_reopen')}
                     </button>
                   )}
                   {selected.status !== 'snoozed' && (
                     <button className="btn btn-secondary" onClick={() => handleStatusChange(selected, 'snoozed')}>
-                      Snooze
+                      {t('inbox.btn_snooze')}
                     </button>
                   )}
                 </div>
                 <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-                  The Community Agent doesn't auto-send. Copy the draft and post it on {selected.platform} yourself.
+                  {t('inbox.footer_hint', { platform: selected.platform })}
                 </p>
               </div>
             </div>
