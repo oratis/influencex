@@ -125,10 +125,20 @@ Raw OpenAPI 3.1 spec at `/api/openapi.json`.
 ### Google Cloud Run
 
 ```bash
-./deploy.sh      # builds, pushes, deploys
+./setup-secrets.sh   # one-time / when rotating: push .env values to GCP Secret Manager + grant IAM
+./deploy.sh          # builds, pushes, deploys (mounts secrets via --update-secrets)
 ```
 
 Uses Cloud SQL via `--add-cloudsql-instances` — the app connects over Unix socket when `K_SERVICE` is set.
+
+Sensitive values (`MAILBOX_ENCRYPTION_KEY`, `RESEND_API_KEY`, OAuth client secrets, DB URL, etc) live in [GCP Secret Manager](https://console.cloud.google.com/security/secret-manager) and are mounted into the container as env vars at runtime — they never appear in `gcloud run services describe` output or the service YAML. The full list of what's a secret vs plain config is in [setup-secrets.sh](./setup-secrets.sh) (`SECRET_NAMES`) and [deploy.sh](./deploy.sh) (`SECRETS_CSV`); keep them in sync when adding new secrets.
+
+To rotate a single secret:
+
+```bash
+printf 'new-value' | gcloud secrets versions add SECRET_NAME --data-file=-
+./deploy.sh   # or: gcloud run services update influencex --region us-central1
+```
 
 ### Any Docker host
 
