@@ -77,6 +77,29 @@ const PROVIDERS = {
     // Google only issues a refresh_token when access_type=offline + prompt=consent.
     extraAuthParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
   },
+  gmail: {
+    id: 'gmail',
+    label: 'Gmail',
+    kind: 'oauth',
+    // Separate OAuth client from Google SSO and YouTube. Scope is restricted
+    // (`gmail.send`) so the Google Cloud project must pass OAuth verification
+    // before non-test-users can connect. category='email' keeps it out of
+    // the publishDirect dispatcher — Gmail is used by server/email.js, not
+    // as a publishing target.
+    category: 'email',
+    authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    userInfoUrl: 'https://www.googleapis.com/oauth2/v2/userinfo',
+    // Send-only. Reading/drafts would broaden the scope to restricted-sensitive
+    // territory and slow verification significantly.
+    scope: 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email openid',
+    usesPKCE: true,
+    clientIdEnv: 'GMAIL_OAUTH_CLIENT_ID',
+    clientSecretEnv: 'GMAIL_OAUTH_CLIENT_SECRET',
+    // Tokens are encrypted at rest with MAILBOX_ENCRYPTION_KEY (see server/index.js callback).
+    encryptTokens: true,
+    extraAuthParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
+  },
   tiktok: {
     id: 'tiktok',
     label: 'TikTok',
@@ -399,6 +422,12 @@ async function exchangeCodeForToken(providerName, { code, redirectUri, codeVerif
               country: channel.snippet?.country || null,
             };
           }
+        } else if (providerName === 'gmail') {
+          // userinfo returns { id, email, verified_email, ... }. We use email
+          // as both account_id (stable) and account_name (user-facing).
+          accountId = user.email || user.id || null;
+          accountName = user.email || null;
+          metadata = { email: user.email, verified: !!user.verified_email };
         } else if (providerName === 'tiktok') {
           accountId = user.data?.user?.open_id || user.data?.user?.union_id || null;
           accountName = user.data?.user?.display_name || user.data?.user?.username || null;

@@ -53,6 +53,7 @@ async function tick({ query, exec, queryOne, mailAgent, notifications, uuidv4 })
         to: contact.kol_email,
         subject: contact.email_subject,
         body: contact.email_body,
+        workspaceId: contact.workspace_id,
       });
 
       if (send.success) {
@@ -101,6 +102,7 @@ async function tick({ query, exec, queryOne, mailAgent, notifications, uuidv4 })
         to: contact.kol_email,
         subject: followUpSubject,
         body: followUpBody,
+        workspaceId: contact.workspace_id,
       });
 
       if (send.success) {

@@ -871,6 +871,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, async (req, res
       to: emailTo,
       subject: contact.email_subject,
       body: contact.email_body,
+      workspaceId: req.workspace.id,
     });
 
     if (!sendResult.success) {
@@ -1915,6 +1916,7 @@ app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, async (req, res) => {
 // ==================== Platform OAuth Connections ====================
 
 const publishOauth = require('./publish/oauth');
+const { encrypt: encryptSecret } = require('./encryption');
 
 // List available platforms + their configured/connected state for this workspace
 app.get(`${BASE_PATH}/api/publish/platforms`, async (req, res) => {
@@ -1990,15 +1992,23 @@ app.get(`${BASE_PATH}/api/publish/oauth/:provider/callback`, async (req, res) =>
     );
     const expiresAt = tokenInfo.expires_in ? new Date(Date.now() + tokenInfo.expires_in * 1000).toISOString() : null;
 
+    // Providers that carry a `encryptTokens: true` flag (currently gmail) get
+    // their access_token + refresh_token encrypted at rest. Other providers
+    // continue to store plaintext — intentional: migrating every existing row
+    // is a separate change, and mixing encrypted/plaintext is safe because
+    // decrypt() passes plaintext through via the enc: prefix check.
+    const providerMeta = publishOauth.getProvider(provider);
+    const maybeEncrypt = providerMeta?.encryptTokens ? encryptSecret : (v => v);
+
     if (existingConn) {
       await exec(
         'UPDATE platform_connections SET access_token=?, refresh_token=?, token_scope=?, expires_at=?, account_name=?, account_id=?, connected_at=CURRENT_TIMESTAMP WHERE id=?',
-        [tokenInfo.access_token, tokenInfo.refresh_token, tokenInfo.scope, expiresAt, tokenInfo.account_name, tokenInfo.account_id, existingConn.id]
+        [maybeEncrypt(tokenInfo.access_token), maybeEncrypt(tokenInfo.refresh_token), tokenInfo.scope, expiresAt, tokenInfo.account_name, tokenInfo.account_id, existingConn.id]
       );
     } else {
       await exec(
         'INSERT INTO platform_connections (id, workspace_id, platform, account_name, account_id, access_token, refresh_token, token_scope, expires_at, connected_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [uuidv4(), row.workspace_id, provider, tokenInfo.account_name, tokenInfo.account_id, tokenInfo.access_token, tokenInfo.refresh_token, tokenInfo.scope, expiresAt, row.user_id]
+        [uuidv4(), row.workspace_id, provider, tokenInfo.account_name, tokenInfo.account_id, maybeEncrypt(tokenInfo.access_token), maybeEncrypt(tokenInfo.refresh_token), tokenInfo.scope, expiresAt, row.user_id]
       );
     }
 
@@ -3348,6 +3358,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
       to: emailTo,
       subject: job.email_subject,
       body: job.email_body,
+      workspaceId: req.workspace.id,
     });
 
     if (sendResult.success) {
