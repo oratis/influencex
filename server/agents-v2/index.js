@@ -23,6 +23,7 @@ function registerAll() {
     require('./community'),
     require('./discovery'),
     require('./translate'),
+    require('./analytics'),
   ];
   for (const a of agents) {
     try { runtime.registerAgent(a); }
