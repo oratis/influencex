@@ -67,6 +67,33 @@ NOTIFY_GENERIC_WEBHOOK_URL=NOTIFY_GENERIC_WEBHOOK_URL:latest,\
 DATABASE_URL=DATABASE_URL:latest\
 "
 
+# Non-sensitive env vars. OAuth client IDs, CORS, LLM routing, mail sender
+# identity, public sheet IDs — none of these are secrets (they're visible to
+# the browser on login / in email headers) so they stay as plain env vars
+# rather than Secret Manager refs.
+#
+# CORS_ORIGINS contains commas; --update-env-vars' default delimiter IS
+# comma, which would split the value mid-URL. Prefix with `^##^` to switch
+# the inter-var separator to `##` so embedded commas survive.
+ENV_VARS="^##^\
+BASE_PATH=##\
+NODE_ENV=production##\
+CLOUD_SQL_CONNECTION=${CLOUD_SQL_INSTANCE}##\
+OAUTH_CALLBACK_BASE=https://influencexes.com##\
+CORS_ORIGINS=https://influencexes.com,https://www.influencexes.com,https://gogameclaw.com##\
+RESEND_FROM_EMAIL=contact@market.hakko.ai##\
+RESEND_REPLY_TO=market@hakko.ai##\
+FEISHU_APP_ID=cli_a94eb8811578dcd4##\
+GA4_PROPERTY_ID=291429613##\
+LLM_DEFAULT_PROVIDER=anthropic##\
+STRATEGY_LLM_PROVIDER=google##\
+RESEARCH_LLM_PROVIDER=google##\
+SEO_LLM_PROVIDER=google##\
+COMPETITOR_LLM_PROVIDER=google##\
+REVIEW_LLM_PROVIDER=google##\
+TWITTER_CLIENT_ID=Yy04RnJKVDlpRF81RDNNa0poNno6MTpjaQ##\
+TWITCH_CLIENT_ID=ftj4lauvvjr4dkywfyeri0200pp0xq"
+
 # Deploy to Cloud Run
 echo "🚀 Deploying to Cloud Run..."
 gcloud run deploy ${SERVICE_NAME} \
@@ -80,7 +107,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --min-instances 0 \
   --max-instances 3 \
   --add-cloudsql-instances ${CLOUD_SQL_INSTANCE} \
-  --update-env-vars "BASE_PATH=,NODE_ENV=production,CLOUD_SQL_CONNECTION=${CLOUD_SQL_INSTANCE},OAUTH_CALLBACK_BASE=https://influencexes.com" \
+  --update-env-vars "${ENV_VARS}" \
   --update-secrets "${SECRETS_CSV}"
 
 echo ""
