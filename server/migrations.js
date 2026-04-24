@@ -666,6 +666,38 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-04-25-invitations',
+    description: 'Invitations table for invite-only signup (public /api/auth/register is removed)',
+    up: async ({ exec }) => {
+      // Admin invites an email → we store a random token here, share the
+      // link with the invitee, they POST /api/invitations/:token/accept
+      // with name+password to create their user + workspace membership in
+      // one step. One invitation is single-use; accepted_at stamps it.
+      await exec(`
+        CREATE TABLE IF NOT EXISTS invitations (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          email TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'editor',
+          token TEXT NOT NULL UNIQUE,
+          invited_by TEXT NOT NULL,
+          expires_at TIMESTAMP NOT NULL,
+          accepted_at TIMESTAMP,
+          accepted_user_id TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      for (const stmt of [
+        'CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token)',
+        'CREATE INDEX IF NOT EXISTS idx_invitations_workspace ON invitations(workspace_id)',
+        'CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

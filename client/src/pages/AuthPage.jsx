@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../AuthContext';
 import { useI18n } from '../i18n';
 
+// Login-only page. Account creation is invite-only — admins send invitation
+// links handled by AcceptInvitePage (/accept-invite?token=...).
 export default function AuthPage() {
-  const [mode, setMode] = useState('login'); // 'login' or 'register'
-  const [form, setForm] = useState({ email: '', password: '', name: '' });
+  const [form, setForm] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [googleConfigured, setGoogleConfigured] = useState(false);
-  const { login, register } = useAuth();
+  const { login } = useAuth();
   const { t } = useI18n();
 
   useEffect(() => {
@@ -34,13 +35,7 @@ export default function AuthPage() {
     setError('');
     setLoading(true);
     try {
-      if (mode === 'login') {
-        await login(form.email, form.password);
-      } else {
-        if (!form.name.trim()) { setError(t('auth.please_enter_name')); setLoading(false); return; }
-        if (form.password.length < 6) { setError(t('auth.password_too_short')); setLoading(false); return; }
-        await register(form.email, form.password, form.name);
-      }
+      await login(form.email, form.password);
     } catch (e) {
       setError(e.message);
     }
@@ -59,21 +54,6 @@ export default function AuthPage() {
         </div>
 
         <div className="auth-card">
-          <div className="auth-tabs">
-            <button
-              className={`auth-tab ${mode === 'login' ? 'active' : ''}`}
-              onClick={() => { setMode('login'); setError(''); }}
-            >
-              {t('auth.sign_in')}
-            </button>
-            <button
-              className={`auth-tab ${mode === 'register' ? 'active' : ''}`}
-              onClick={() => { setMode('register'); setError(''); }}
-            >
-              {t('auth.sign_up')}
-            </button>
-          </div>
-
           {googleConfigured && (
             <>
               <button
@@ -104,19 +84,6 @@ export default function AuthPage() {
           )}
 
           <form onSubmit={handleSubmit}>
-            {mode === 'register' && (
-              <div className="form-group">
-                <label className="form-label">{t('auth.name')}</label>
-                <input
-                  className="form-input"
-                  type="text"
-                  placeholder={t('auth.name_placeholder')}
-                  value={form.name}
-                  onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                  autoComplete="name"
-                />
-              </div>
-            )}
             <div className="form-group">
               <label className="form-label">{t('auth.email')}</label>
               <input
@@ -134,10 +101,10 @@ export default function AuthPage() {
               <input
                 className="form-input"
                 type="password"
-                placeholder={mode === 'register' ? t('auth.password_new_placeholder') : t('auth.password_placeholder')}
+                placeholder={t('auth.password_placeholder')}
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-                autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                autoComplete="current-password"
                 required
               />
             </div>
@@ -150,16 +117,14 @@ export default function AuthPage() {
             )}
 
             <button type="submit" className="btn btn-primary auth-submit" disabled={loading}>
-              {loading ? (mode === 'login' ? t('auth.signing_in') : t('auth.creating_account')) : (mode === 'login' ? t('auth.sign_in') : t('auth.create_account'))}
+              {loading ? t('auth.signing_in') : t('auth.sign_in')}
             </button>
           </form>
 
           <div className="auth-footer">
-            {mode === 'login' ? (
-              <p>{t('auth.no_account')} <button className="auth-link" onClick={() => { setMode('register'); setError(''); }}>{t('auth.sign_up')}</button></p>
-            ) : (
-              <p>{t('auth.have_account')} <button className="auth-link" onClick={() => { setMode('login'); setError(''); }}>{t('auth.sign_in')}</button></p>
-            )}
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', marginTop: 12 }}>
+              {t('auth.invite_only_note')}
+            </p>
           </div>
         </div>
 

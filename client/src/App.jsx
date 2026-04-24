@@ -25,6 +25,7 @@ import CommunityInboxPage from './pages/CommunityInboxPage';
 import AdsPage from './pages/AdsPage';
 import TranslatePage from './pages/TranslatePage';
 import LandingPage from './pages/LandingPage';
+import AcceptInvitePage from './pages/AcceptInvitePage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -78,14 +79,28 @@ function AppContent() {
     );
   }
 
+  // /accept-invite works regardless of auth state. If the user is already
+  // logged in with a different email, the accept flow returns EMAIL_EXISTS
+  // and nudges them to log in instead.
+  if (window.location.hash.startsWith('#/accept-invite')) {
+    return (
+      <Routes>
+        <Route path="/accept-invite" element={<AcceptInvitePage />} />
+        <Route path="*" element={<AcceptInvitePage />} />
+      </Routes>
+    );
+  }
+
   if (!user) {
-    // Public routes — landing at / with AuthPage on /login + /signup
+    // Public routes. Signup is disabled — /signup redirects to /login.
+    // /accept-invite renders the invitation flow (creates account + logs in).
     return (
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<AuthPage />} />
-        <Route path="/signup" element={<AuthPage />} />
+        <Route path="/signup" element={<Navigate to="/login" replace />} />
         <Route path="/auth" element={<AuthPage />} />
+        <Route path="/accept-invite" element={<AcceptInvitePage />} />
         <Route path="*" element={<AuthPage />} />
       </Routes>
     );

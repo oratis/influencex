@@ -15,6 +15,9 @@ export default function WorkspaceSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
+  // When an admin invites an unregistered email, the server returns a token
+  // link. We surface it here so the admin can copy/share it.
+  const [inviteLinkModal, setInviteLinkModal] = useState(null);
   const toast = useToast();
   const { confirm: confirmDialog, prompt: promptDialog } = useConfirm();
 
@@ -71,12 +74,30 @@ export default function WorkspaceSettingsPage() {
       return;
     }
     try {
-      await api.inviteToWorkspace(currentId, { email: email.trim(), role });
-      toast.success(t('workspace.invited', { email, role }));
+      const result = await api.inviteToWorkspace(currentId, { email: email.trim(), role });
+      if (result.kind === 'new_invitation' && result.invitation?.link) {
+        // Unregistered email → show the admin the invite link to share.
+        setInviteLinkModal({
+          email: result.invitation.email,
+          role: result.invitation.role,
+          link: result.invitation.link,
+          expires_at: result.invitation.expires_at,
+        });
+      } else {
+        toast.success(t('workspace.invited', { email, role }));
+      }
       loadMembers();
     } catch (e) {
       toast.error(e.message);
     }
+  }
+
+  function copyInviteLink() {
+    if (!inviteLinkModal?.link) return;
+    navigator.clipboard.writeText(inviteLinkModal.link).then(
+      () => toast.success(t('common.copied')),
+      () => toast.error(t('common.error'))
+    );
   }
 
   async function handleChangeRole(member) {
@@ -251,6 +272,40 @@ export default function WorkspaceSettingsPage() {
           >
             {t('workspace.danger_btn')}
           </button>
+        </div>
+      )}
+
+      {inviteLinkModal && (
+        <div className="modal-overlay" onClick={() => setInviteLinkModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div className="modal-header">
+              <h3>{t('workspace.invite_link_title')}</h3>
+              <button className="btn-icon" onClick={() => setInviteLinkModal(null)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+                {t('workspace.invite_link_hint', { email: inviteLinkModal.email, role: inviteLinkModal.role })}
+              </p>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'stretch', marginBottom: 10 }}>
+                <input
+                  className="form-input"
+                  readOnly
+                  value={inviteLinkModal.link}
+                  onFocus={e => e.target.select()}
+                  style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+                />
+                <button className="btn btn-primary" onClick={copyInviteLink}>
+                  {t('common.copy')}
+                </button>
+              </div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {t('workspace.invite_link_expires', { date: new Date(inviteLinkModal.expires_at).toLocaleDateString() })}
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setInviteLinkModal(null)}>{t('common.close')}</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

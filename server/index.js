@@ -155,19 +155,15 @@ const sendEmailWorkspaceLimiter = rateLimit({
 
 // ==================== Auth API ====================
 
-app.post(`${BASE_PATH}/api/auth/register`, authLimiter, async (req, res) => {
-  try {
-    const { email, password, name } = req.body;
-    if (!email || !password || !name) return res.status(400).json({ error: 'Email, password, and name are required' });
-    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    const result = await registerUser(email, password, name);
-    if (result.error) return res.status(400).json({ error: result.error });
-    // Auto-login after registration
-    const login = await loginUser(email, password);
-    res.json(login);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+// Public /api/auth/register is intentionally removed — the platform is
+// invite-only. New accounts are created by accepting an invitation via
+// POST /api/invitations/:token/accept. The 410 Gone status makes it
+// explicit to any old client code (or probe) that the endpoint is dead.
+app.post(`${BASE_PATH}/api/auth/register`, (req, res) => {
+  res.status(410).json({
+    error: 'Public registration is disabled. Ask a workspace admin to invite you.',
+    code: 'REGISTRATION_DISABLED',
+  });
 });
 
 app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
@@ -391,19 +387,106 @@ app.post(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, 
     }
 
     const invitee = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
-    if (!invitee) return res.status(404).json({ error: 'User not found. They must register first.' });
 
-    const existing = await queryOne(
-      'SELECT 1 as x FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
-      [req.params.id, invitee.id]
+    if (invitee) {
+      // Existing user: add directly as member (no invitation flow needed).
+      const existing = await queryOne(
+        'SELECT 1 as x FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+        [req.params.id, invitee.id]
+      );
+      if (existing) return res.status(409).json({ error: 'Already a member' });
+
+      await exec(
+        'INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)',
+        [req.params.id, invitee.id, role, req.user.id]
+      );
+      return res.json({ success: true, user_id: invitee.id, role, kind: 'existing_user' });
+    }
+
+    // Unregistered email: create an invitation token. Admin shares the link;
+    // invitee accepts it to create their account + join in one step.
+    const token = crypto.randomBytes(32).toString('hex');
+    const inviteId = uuidv4();
+    const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    await exec(
+      `INSERT INTO invitations (id, workspace_id, email, role, token, invited_by, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [inviteId, req.params.id, email, role, token, req.user.id, expiresAt]
     );
-    if (existing) return res.status(409).json({ error: 'Already a member' });
+    const origin = req.headers.origin || `https://${req.headers.host}`;
+    const link = `${origin}${BASE_PATH}/#/accept-invite?token=${token}`;
+    res.json({
+      success: true,
+      kind: 'new_invitation',
+      invitation: { id: inviteId, email, role, token, link, expires_at: expiresAt },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Public: look up an invitation by token. Used by the accept-invite page to
+// show workspace name + pre-fill the email field. Intentionally leaks only
+// the workspace name — not members, not other invitations.
+app.get(`${BASE_PATH}/api/invitations/:token`, async (req, res) => {
+  try {
+    const row = await queryOne(
+      `SELECT i.email, i.role, i.expires_at, i.accepted_at, w.name AS workspace_name
+       FROM invitations i JOIN workspaces w ON i.workspace_id = w.id
+       WHERE i.token = ?`,
+      [req.params.token]
+    );
+    if (!row) return res.status(404).json({ error: 'Invitation not found', code: 'INVITE_NOT_FOUND' });
+    if (row.accepted_at) return res.status(410).json({ error: 'Invitation already used', code: 'INVITE_USED' });
+    if (new Date(row.expires_at) < new Date()) return res.status(410).json({ error: 'Invitation expired', code: 'INVITE_EXPIRED' });
+    res.json({
+      email: row.email,
+      role: row.role,
+      workspace_name: row.workspace_name,
+      expires_at: row.expires_at,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Public: accept an invitation. Creates the user + workspace membership in
+// one atomic step. Rate-limited via authLimiter so tokens can't be brute-forced.
+app.post(`${BASE_PATH}/api/invitations/:token/accept`, authLimiter, async (req, res) => {
+  try {
+    const { password, name } = req.body || {};
+    if (!password || !name) return res.status(400).json({ error: 'password and name are required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    const invite = await queryOne(
+      'SELECT id, workspace_id, email, role, expires_at, accepted_at FROM invitations WHERE token = ?',
+      [req.params.token]
+    );
+    if (!invite) return res.status(404).json({ error: 'Invitation not found', code: 'INVITE_NOT_FOUND' });
+    if (invite.accepted_at) return res.status(410).json({ error: 'Invitation already used', code: 'INVITE_USED' });
+    if (new Date(invite.expires_at) < new Date()) return res.status(410).json({ error: 'Invitation expired', code: 'INVITE_EXPIRED' });
+
+    // Reject if the email was registered elsewhere after the invite was sent.
+    // We could silently fall through to "just log in", but the safer UX is to
+    // surface the conflict so the admin can fix it.
+    const existing = await queryOne('SELECT id FROM users WHERE email = ?', [invite.email]);
+    if (existing) return res.status(409).json({ error: 'An account with this email already exists — log in instead', code: 'EMAIL_EXISTS' });
+
+    const created = await registerUser(invite.email, password, name);
+    if (created.error) return res.status(400).json({ error: created.error });
 
     await exec(
       'INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)',
-      [req.params.id, invitee.id, role, req.user.id]
+      [invite.workspace_id, created.id, invite.role, (await queryOne('SELECT invited_by FROM invitations WHERE id=?', [invite.id]))?.invited_by]
     );
-    res.json({ success: true, user_id: invitee.id, role });
+    await exec(
+      'UPDATE invitations SET accepted_at = CURRENT_TIMESTAMP, accepted_user_id = ? WHERE id = ?',
+      [created.id, invite.id]
+    );
+
+    // Auto-login so the client can hop straight into the app.
+    const login = await loginUser(invite.email, password);
+    res.json(login);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

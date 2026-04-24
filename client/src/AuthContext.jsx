@@ -43,11 +43,13 @@ export function AuthProvider({ children }) {
     return result;
   };
 
-  const register = async (email, password, name) => {
-    const result = await auth.register({ email, password, name });
-    auth.setToken(result.token);
-    setUser(result.user);
-    return result;
+  // Seed the client session from an already-issued login response (e.g. the
+  // body of POST /api/invitations/:token/accept, which auto-logs-in on
+  // success). Used so AcceptInvitePage can hand off to the main app without
+  // a second round-trip to /auth/login.
+  const setSessionFromApi = (result) => {
+    if (result?.token) auth.setToken(result.token);
+    if (result?.user) setUser(result.user);
   };
 
   const logout = async () => {
@@ -57,7 +59,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, setSessionFromApi }}>
       {children}
     </AuthContext.Provider>
   );

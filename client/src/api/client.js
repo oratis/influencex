@@ -87,7 +87,6 @@ export function toastApiError(err, toast, t) {
 export const auth = {
   getToken,
   setToken,
-  register: (data) => request('/auth/register', { method: 'POST', body: data }),
   login: (data) => request('/auth/login', { method: 'POST', body: data }),
   logout: () => request('/auth/logout', { method: 'POST' }).finally(() => setToken(null)),
   me: () => request('/auth/me'),
