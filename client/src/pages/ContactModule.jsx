@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { api } from '../api/client';
+import { api, toastApiError } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
 import ContactThreadDrawer, { EmailStatusBadge } from '../components/ContactThreadDrawer';
 import TemplateManagerDrawer from '../components/TemplateManagerDrawer';
+import ErrorCard from '../components/ErrorCard';
 
 export default function ContactModule() {
   const { t } = useI18n();
@@ -22,6 +23,8 @@ export default function ContactModule() {
   const [bulkSending, setBulkSending] = useState(false);
   const [bulkTemplateModal, setBulkTemplateModal] = useState(null);
   const [availableTemplates, setAvailableTemplates] = useState({ builtin: [], custom: [] });
+  const [loadError, setLoadError] = useState(null);
+  const [pollDelay, setPollDelay] = useState(5000);
 
   const CONTRACT_OPTIONS = [
     { value: 'none', label: t('contacts.contract_none') },
@@ -46,19 +49,27 @@ export default function ContactModule() {
   useEffect(() => { if (selectedCampaignId) loadContacts(); else setContacts([]); }, [selectedCampaignId, tab]);
 
   // Poll while anything is in flight so the UI reflects queue/delivery events.
+  // pollDelay starts at 5s and doubles on failure (capped at ~1 min) so a
+  // broken backend doesn't fan out into a hot request loop.
   useEffect(() => {
     const hasInflight = contacts.some(c => c.status === 'pending' || c.status === 'sent');
     if (!hasInflight) return;
-    const iv = setInterval(() => loadContacts(), 5000);
+    const iv = setInterval(() => loadContacts(), pollDelay);
     return () => clearInterval(iv);
-  }, [contacts]);
+  }, [contacts, pollDelay]);
 
   const loadContacts = async () => {
     setLoading(true);
     try {
       const data = await api.getContacts(selectedCampaignId, {});
       setContacts(data);
-    } catch (e) { console.error(e); }
+      setLoadError(null);
+      setPollDelay(5000);
+    } catch (e) {
+      setLoadError(e);
+      setPollDelay(d => Math.min(d * 2, 60000));
+      toastApiError(e, toast, t);
+    }
     setLoading(false);
   };
 
@@ -167,6 +178,9 @@ export default function ContactModule() {
 
   return (
     <div className="page-container fade-in">
+      {loadError && contacts.length === 0 && (
+        <ErrorCard error={loadError} onRetry={loadContacts} />
+      )}
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <h2>{t('contacts.title')}</h2>

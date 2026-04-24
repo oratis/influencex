@@ -624,7 +624,7 @@ export default function ContentStudio() {
               <div key={p.id} className="card" style={{ padding: 14, border: '1px solid var(--border)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 6 }}>
                   <span className="badge badge-gray" style={{ fontSize: 10 }}>{p.type}</span>
-                  <button className="btn-icon" onClick={() => handleDelete(p.id)} style={{ padding: 4 }}>🗑</button>
+                  <button className="btn-icon" onClick={() => handleDelete(p.id)} style={{ padding: 4 }} aria-label={t('common.delete')} title={t('common.delete')}>🗑</button>
                 </div>
                 {p.type === 'image' && p.body ? (
                   <a href={p.body} target="_blank" rel="noreferrer">
@@ -657,7 +657,7 @@ export default function ContentStudio() {
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
             <div className="modal-header">
               <h3>{t('studio.schedule_publish')}</h3>
-              <button className="btn-icon" onClick={() => setShowScheduleModal(false)}>✕</button>
+              <button className="btn-icon" onClick={() => setShowScheduleModal(false)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
             </div>
             <div className="modal-body">
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>

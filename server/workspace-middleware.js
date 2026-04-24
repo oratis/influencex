@@ -102,14 +102,25 @@ function workspaceContext(opts = {}) {
  */
 async function listUserWorkspaces(userId) {
   const result = await query(
-    `SELECT w.id, w.name, w.slug, w.plan, wm.role, wm.joined_at
+    `SELECT w.id, w.name, w.slug, w.plan, w.settings, wm.role, wm.joined_at
      FROM workspaces w
      JOIN workspace_members wm ON wm.workspace_id = w.id
      WHERE wm.user_id = ? AND w.deleted_at IS NULL
      ORDER BY wm.joined_at ASC`,
     [userId]
   );
-  return result.rows || [];
+  // Parse settings JSON so clients get an object, not a string.
+  return (result.rows || []).map(w => ({
+    ...w,
+    settings: parseSettings(w.settings),
+  }));
+}
+
+function parseSettings(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; }
+  catch { return {}; }
 }
 
 /**

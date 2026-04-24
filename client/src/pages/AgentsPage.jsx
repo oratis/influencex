@@ -124,7 +124,7 @@ export default function AgentsPage() {
           <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 680 }}>
             <div className="modal-header">
               <h3>{t('agents.modal_title', { id: runningAgentId })}</h3>
-              <button className="btn-icon" onClick={() => setRunningAgentId(null)}>✕</button>
+              <button className="btn-icon" onClick={() => setRunningAgentId(null)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
             </div>
             <div className="modal-body">
               <label className="form-label">{t('agents.modal_input_label')}</label>
@@ -154,7 +154,7 @@ export default function AgentsPage() {
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-header">
             <h3>{t('agents.live_run_title', { id: activeRun.slice(0, 8) })}</h3>
-            <button className="btn-icon" onClick={() => setActiveRun(null)}>✕</button>
+            <button className="btn-icon" onClick={() => setActiveRun(null)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
           </div>
           <div style={{ maxHeight: 300, overflowY: 'auto', fontFamily: 'monospace', fontSize: 12, background: 'var(--bg-input)', borderRadius: 8, padding: 12 }}>
             {events.map((e, i) => (

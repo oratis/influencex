@@ -314,7 +314,7 @@ function AddKolModal({ onClose, onAdded }) {
       <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '640px' }}>
         <div className="modal-header">
           <h3>{t('kol_db.add_title')}</h3>
-          <button className="btn-icon" onClick={onClose}>✕</button>
+          <button className="btn-icon" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>✕</button>
         </div>
         <div className="modal-body">
           <div className="tabs" style={{ marginBottom: '16px' }}>
@@ -393,7 +393,7 @@ function KolDetailModal({ kol, onClose }) {
               </div>
             </div>
           </div>
-          <button className="btn-icon" onClick={onClose}>✕</button>
+          <button className="btn-icon" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>✕</button>
         </div>
         <div className="modal-body">
           <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: '20px' }}>

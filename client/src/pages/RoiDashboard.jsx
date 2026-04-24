@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LineChart, Line, Legend } from 'recharts';
-import { api } from '../api/client';
+import { api, toastApiError } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useI18n } from '../i18n';
+import ErrorCard from '../components/ErrorCard';
 
 const FUNNEL_COLORS = ['#6c5ce7', '#74b9ff', '#54a0ff', '#a29bfe', '#00d2a0', '#fdcb6e', '#ff9ff3', '#00b894'];
 
@@ -36,22 +37,38 @@ export default function RoiDashboard() {
   const { selectedCampaign, selectedCampaignId } = useCampaign();
   const [roi, setRoi] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const toast = useToast();
 
-  useEffect(() => {
+  const loadRoi = React.useCallback(() => {
     if (!selectedCampaignId) { setRoi(null); setLoading(false); return; }
     setLoading(true);
+    setError(null);
     api.getCampaignRoi(selectedCampaignId)
-      .then(data => setRoi(data))
-      .catch(e => toast.error(t('roi.load_failed', { msg: e.message })))
+      .then(data => { setRoi(data); setError(null); })
+      .catch(e => {
+        setError(e);
+        toastApiError(e, toast, t);
+      })
       .finally(() => setLoading(false));
-  }, [selectedCampaignId]);
+  }, [selectedCampaignId, toast, t]);
+
+  useEffect(() => { loadRoi(); }, [loadRoi]);
 
   if (!selectedCampaignId) {
     return (
       <div className="page-container fade-in">
         <div className="page-header"><h2>{t('roi.title')}</h2><p>{t('roi.subtitle_select')}</p></div>
         <div className="empty-state"><h4>{t('roi.no_campaign_title')}</h4><p>{t('roi.no_campaign_hint')}</p></div>
+      </div>
+    );
+  }
+
+  if (error && !roi) {
+    return (
+      <div className="page-container fade-in">
+        <div className="page-header"><h2>{t('roi.title')}</h2></div>
+        <ErrorCard error={error} onRetry={loadRoi} />
       </div>
     );
   }

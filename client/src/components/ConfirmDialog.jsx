@@ -42,7 +42,7 @@ function ConfirmModal({ state, onClose }) {
       <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '440px' }}>
         <div className="modal-header">
           <h3>{state.title}</h3>
-          <button className="btn-icon" onClick={() => onClose(state.isPrompt ? null : false)}>✕</button>
+          <button className="btn-icon" onClick={() => onClose(state.isPrompt ? null : false)} aria-label="Close" title="Close">✕</button>
         </div>
         <div className="modal-body">
           <p style={{ fontSize: '14px', lineHeight: '1.5', color: 'var(--text-secondary)' }}>{state.message}</p>

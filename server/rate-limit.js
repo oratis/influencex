@@ -42,6 +42,7 @@ function rateLimit({ max, windowMs, keyFn, message } = {}) {
       res.set('Retry-After', String(Math.max(1, retryAfterSec)));
       return res.status(429).json({
         error: errorMsg,
+        code: 'RATE_LIMITED',
         retryAfter: retryAfterSec,
       });
     }

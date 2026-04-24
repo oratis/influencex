@@ -28,6 +28,7 @@ import TranslatePage from './pages/TranslatePage';
 import LandingPage from './pages/LandingPage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // Lazy-load heavy pages
 const DataModule = lazy(() => import('./pages/DataModule'));
@@ -108,6 +109,8 @@ function AppContent() {
               <NavLink
                 key={item.path}
                 to={item.path}
+                aria-label={item.label}
+                title={item.label}
                 className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
               >
                 {item.icon}
@@ -211,13 +214,20 @@ function GlobalHeader() {
   );
 }
 
+function BoundaryWithI18n({ children }) {
+  const { t } = useI18n();
+  return <ErrorBoundary t={t}>{children}</ErrorBoundary>;
+}
+
 export default function App() {
   return (
     <I18nProvider>
       <ToastProvider>
         <ConfirmProvider>
           <WorkspaceProvider>
-            <AppContent />
+            <BoundaryWithI18n>
+              <AppContent />
+            </BoundaryWithI18n>
           </WorkspaceProvider>
         </ConfirmProvider>
       </ToastProvider>

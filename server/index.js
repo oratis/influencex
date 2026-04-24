@@ -364,6 +364,32 @@ app.patch(`${BASE_PATH}/api/workspaces/:id`, authMiddleware, async (req, res) =>
   }
 });
 
+// Partial-update workspace settings JSON (admin of the workspace only).
+// Body: any subset of keys to merge into workspaces.settings. Unknown keys
+// are preserved on the server side — callers don't need to send the full blob.
+app.patch(`${BASE_PATH}/api/workspaces/:id/settings`, authMiddleware, async (req, res) => {
+  try {
+    const membership = await queryOne(
+      'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+    if (!membership) return res.status(404).json({ error: 'Workspace not found' });
+    if (membership.role !== 'admin') return res.status(403).json({ error: 'Only admins can edit workspace settings' });
+    const patch = req.body || {};
+    if (typeof patch !== 'object' || Array.isArray(patch)) {
+      return res.status(400).json({ error: 'Body must be an object' });
+    }
+    const row = await queryOne('SELECT settings FROM workspaces WHERE id = ?', [req.params.id]);
+    let current = {};
+    try { current = row?.settings ? JSON.parse(row.settings) : {}; } catch { current = {}; }
+    const merged = { ...current, ...patch };
+    await exec('UPDATE workspaces SET settings = ? WHERE id = ?', [JSON.stringify(merged), req.params.id]);
+    res.json({ success: true, settings: merged });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Soft-delete workspace (owner only). Sets deleted_at; data retained for 30 days.
 app.delete(`${BASE_PATH}/api/workspaces/:id`, authMiddleware, async (req, res) => {
   try {

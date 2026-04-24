@@ -13,6 +13,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const secrets = require('./secrets');
+const log = require('./logger');
 
 function register({ jobQueue, query, queryOne, exec, mailAgent, notifications }) {
   async function resolveMailbox(contact) {
@@ -40,7 +41,7 @@ function register({ jobQueue, query, queryOne, exec, mailAgent, notifications })
         [uuidv4(), workspaceId || null, contactId || null, providerMessageId || null, eventType, JSON.stringify(payload || {})]
       );
     } catch (e) {
-      console.warn('[email-jobs] failed to record event:', e.message);
+      log.warn('[email-jobs] failed to record event:', e.message);
     }
   }
 
@@ -127,7 +128,7 @@ function register({ jobQueue, query, queryOne, exec, mailAgent, notifications })
             [secrets.encrypt(fresh), mailbox.id]
           );
         } catch (e) {
-          console.warn('[email-jobs] failed to persist refreshed creds:', e.message);
+          log.warn('[email-jobs] failed to persist refreshed creds:', e.message);
         }
       },
     });
@@ -195,7 +196,7 @@ function register({ jobQueue, query, queryOne, exec, mailAgent, notifications })
         jobQueue.push('email.send', { contactId: cid }, { maxRetries: 3 });
         enqueued += 1;
       } catch (e) {
-        console.warn('[email-jobs] failed to enqueue child:', e.message);
+        log.warn('[email-jobs] failed to enqueue child:', e.message);
       }
     }
     return { enqueued };

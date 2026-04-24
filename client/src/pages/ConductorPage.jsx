@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { api } from '../api/client';
+import React, { useState, useEffect, useRef } from 'react';
+import { api, toastApiError } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useI18n } from '../i18n';
@@ -15,6 +15,8 @@ export default function ConductorPage() {
   const [isRunning, setIsRunning] = useState(false);
   const [recentPlans, setRecentPlans] = useState([]);
   const [inspectedPlan, setInspectedPlan] = useState(null);
+  const [planElapsed, setPlanElapsed] = useState(0);
+  const planAbortRef = useRef(null);
   const toast = useToast();
   const { t } = useI18n();
   const { selectedCampaignId, campaigns } = useCampaign();
@@ -56,15 +58,35 @@ export default function ConductorPage() {
     if (!goal.trim()) return;
     setIsPlanning(true);
     setCurrentPlan(null);
+    setPlanElapsed(0);
+    const controller = new AbortController();
+    planAbortRef.current = controller;
     try {
-      const r = await api.conductorPlan(goal.trim());
+      const r = await api.conductorPlan(goal.trim(), { signal: controller.signal });
       setCurrentPlan(r);
     } catch (e) {
-      toast.error(e.message);
+      // AbortError surfaces when the user cancels; don't toast.
+      if (e.name !== 'AbortError') toastApiError(e, toast, t);
     } finally {
       setIsPlanning(false);
+      planAbortRef.current = null;
     }
   }
+
+  function handleCancelPlan() {
+    if (planAbortRef.current) {
+      planAbortRef.current.abort();
+      planAbortRef.current = null;
+    }
+  }
+
+  // Drive a 1s elapsed-time counter while planning so the user sees progress.
+  useEffect(() => {
+    if (!isPlanning) return;
+    const start = Date.now();
+    const iv = setInterval(() => setPlanElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(iv);
+  }, [isPlanning]);
 
   async function handleApprove() {
     if (!currentPlan?.planId) return;
@@ -132,14 +154,19 @@ export default function ConductorPage() {
           onChange={e => setGoal(e.target.value)}
           style={{ minHeight: 100 }}
         />
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
           <button
             className="btn btn-primary"
             onClick={handlePlan}
             disabled={isPlanning || !goal.trim()}
           >
-            {isPlanning ? t('conductor.thinking') : t('conductor.build_plan')}
+            {isPlanning ? `${t('conductor.thinking')} (${planElapsed}s)` : t('conductor.build_plan')}
           </button>
+          {isPlanning && (
+            <button className="btn btn-secondary" onClick={handleCancelPlan}>
+              {t('common.cancel')}
+            </button>
+          )}
         </div>
       </div>
 

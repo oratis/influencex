@@ -1,9 +1,16 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { api } from '../api/client';
+import { api, toastApiError } from '../api/client';
 import { useCampaign } from '../CampaignContext';
+import { useWorkspace } from '../WorkspaceContext';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
+import ErrorCard from '../components/ErrorCard';
+
+// Fallback used when a workspace hasn't saved a preferred keyword list.
+// Moved from a hardcoded state default to a named constant so it's easy to
+// swap or localize later.
+const DEFAULT_DISCOVERY_KEYWORDS = 'gaming AI roleplay, AI character game, AI NPC gaming, AI companion roleplay';
 
 const STAGE_KEYS = ['scrape', 'write', 'review', 'send', 'monitor', 'done'];
 
@@ -38,6 +45,7 @@ function StageProgress({ currentStage, t }) {
 export default function PipelinePage() {
   const { t } = useI18n();
   const { selectedCampaignId } = useCampaign();
+  const { currentWorkspace, currentId: currentWorkspaceId, refresh: refreshWorkspaces } = useWorkspace();
   const toast = useToast();
   const { confirm, prompt } = useConfirm();
   const [jobs, setJobs] = useState([]);
@@ -47,26 +55,40 @@ export default function PipelinePage() {
   const [submitting, setSubmitting] = useState(false);
   const [tab, setTab] = useState('pipeline');
   const [discoveryJobs, setDiscoveryJobs] = useState([]);
-  const [discoveryKeywords, setDiscoveryKeywords] = useState('gaming AI roleplay, AI character game, AI NPC gaming, AI companion roleplay');
-  const [discoveryMinSubs, setDiscoveryMinSubs] = useState(5000);
+  const [discoveryKeywords, setDiscoveryKeywords] = useState(
+    currentWorkspace?.settings?.default_discovery_keywords || DEFAULT_DISCOVERY_KEYWORDS
+  );
+  const [discoveryMinSubs, setDiscoveryMinSubs] = useState(
+    currentWorkspace?.settings?.default_discovery_min_subs || 5000
+  );
   const [selectedDiscovery, setSelectedDiscovery] = useState(null);
   const [discovering, setDiscovering] = useState(false);
   const [threadData, setThreadData] = useState(null);
   const [outreachTasks, setOutreachTasks] = useState({ pending: [], recent: [] });
   const [emailQueueStats, setEmailQueueStats] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [pollDelay, setPollDelay] = useState(5000);
 
   const loadJobs = useCallback(async () => {
     try {
       const data = await api.getPipelineJobs();
       setJobs(data);
-    } catch (e) { console.error(e); }
+      setLoadError(null);
+      return true;
+    } catch (e) {
+      setLoadError(e);
+      return false;
+    }
   }, []);
 
   const loadDiscoveryJobs = useCallback(async () => {
     try {
       const data = await api.getDiscoveryJobs();
       setDiscoveryJobs(data);
-    } catch (e) { console.error(e); }
+      return true;
+    } catch (e) {
+      return false;
+    }
   }, []);
 
   const loadOutreachTasks = useCallback(async () => {
@@ -77,20 +99,54 @@ export default function PipelinePage() {
       ]);
       setOutreachTasks(tasks || { pending: [], recent: [] });
       setEmailQueueStats(stats);
-    } catch (e) { /* ok */ }
+      return true;
+    } catch (e) {
+      return false;
+    }
   }, []);
 
-  useEffect(() => {
-    loadJobs();
-    loadDiscoveryJobs();
-    loadOutreachTasks();
-    const interval = setInterval(() => {
-      loadJobs();
-      loadDiscoveryJobs();
-      loadOutreachTasks();
-    }, 5000);
-    return () => clearInterval(interval);
+  // Refresh all three loaders; back off on any failure so we don't hammer
+  // a broken backend. Reset delay on success.
+  const refreshAll = useCallback(async () => {
+    const results = await Promise.all([loadJobs(), loadDiscoveryJobs(), loadOutreachTasks()]);
+    const allOk = results.every(Boolean);
+    setPollDelay(d => allOk ? 5000 : Math.min(d * 2, 60000));
   }, [loadJobs, loadDiscoveryJobs, loadOutreachTasks]);
+
+  useEffect(() => {
+    refreshAll();
+    const interval = setInterval(refreshAll, pollDelay);
+    return () => clearInterval(interval);
+  }, [refreshAll, pollDelay]);
+
+  // When the workspace loads, seed the discovery form with the workspace's
+  // saved defaults — but only if the user hasn't already edited the fields
+  // (tracked via ref). This avoids clobbering in-progress input when the
+  // workspace context refreshes.
+  const discoveryTouchedRef = React.useRef(false);
+  useEffect(() => {
+    if (discoveryTouchedRef.current) return;
+    if (!currentWorkspace?.settings) return;
+    const s = currentWorkspace.settings;
+    if (s.default_discovery_keywords) setDiscoveryKeywords(s.default_discovery_keywords);
+    if (s.default_discovery_min_subs) setDiscoveryMinSubs(s.default_discovery_min_subs);
+  }, [currentWorkspace]);
+
+  // Persist current discovery defaults to the workspace. Admin-only on the
+  // server; non-admin callers get 403 which we surface as a toast.
+  const saveDiscoveryDefaults = async () => {
+    if (!currentWorkspaceId) return;
+    try {
+      await api.updateWorkspaceSettings(currentWorkspaceId, {
+        default_discovery_keywords: discoveryKeywords,
+        default_discovery_min_subs: discoveryMinSubs,
+      });
+      toast.success(t('common.success'));
+      refreshWorkspaces?.();
+    } catch (e) {
+      toastApiError(e, toast, t);
+    }
+  };
 
   const handleRetryOutreach = async (contactId) => {
     try {
@@ -191,6 +247,9 @@ export default function PipelinePage() {
 
   return (
     <div className="page-container fade-in">
+      {loadError && jobs.length === 0 && (
+        <ErrorCard error={loadError} onRetry={refreshAll} />
+      )}
       <div className="page-header">
         <div>
           <h2>{t('pipeline.title')}</h2>
@@ -328,13 +387,13 @@ export default function PipelinePage() {
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
               {t('pipeline.discovery_hint')}
             </p>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '10px', alignItems: 'end' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '10px', alignItems: 'end' }}>
               <div>
                 <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>{t('pipeline.discovery_keywords')}</label>
                 <input
                   type="text"
                   value={discoveryKeywords}
-                  onChange={e => setDiscoveryKeywords(e.target.value)}
+                  onChange={e => { discoveryTouchedRef.current = true; setDiscoveryKeywords(e.target.value); }}
                   style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px' }}
                 />
               </div>
@@ -343,10 +402,13 @@ export default function PipelinePage() {
                 <input
                   type="number"
                   value={discoveryMinSubs}
-                  onChange={e => setDiscoveryMinSubs(parseInt(e.target.value) || 1000)}
+                  onChange={e => { discoveryTouchedRef.current = true; setDiscoveryMinSubs(parseInt(e.target.value) || 1000); }}
                   style={{ width: '120px', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px' }}
                 />
               </div>
+              <button className="btn btn-secondary" onClick={saveDiscoveryDefaults} title={t('pipeline.save_defaults_hint') || 'Save as workspace default'}>
+                💾
+              </button>
               <button className="btn btn-primary" onClick={handleStartDiscovery} disabled={discovering}>
                 {discovering ? t('pipeline.working') : `🔍 ${t('pipeline.discovery_run')}`}
               </button>

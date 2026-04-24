@@ -35,14 +35,53 @@ async function request(path, options = {}) {
       setToken(null);
       window.dispatchEvent(new Event('auth:logout'));
     }
-    throw new Error(data.error || 'Authentication required');
+    const err = new Error(data.error || 'Authentication required');
+    err.statusCode = 401;
+    err.code = 'UNAUTHORIZED';
+    throw err;
+  }
+
+  if (res.status === 429) {
+    const data = await res.json().catch(() => ({}));
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+    const err = new Error(data.error || 'Too many requests');
+    err.statusCode = 429;
+    err.code = 'RATE_LIMITED';
+    err.retryAfter = Number.isFinite(retryAfter) ? retryAfter : null;
+    throw err;
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || 'Request failed');
+    const payload = await res.json().catch(() => ({ error: res.statusText }));
+    const err = new Error(payload.error || 'Request failed');
+    err.statusCode = res.status;
+    err.code = payload.code || null;
+    throw err;
   }
   return res.json();
+}
+
+// Translate a thrown error into the right toast. Callers pass their toast + t
+// so i18n works. Returns the resolved message string for callers that want to
+// also render it in an inline error card.
+export function toastApiError(err, toast, t) {
+  if (!err) return '';
+  if (err.code === 'RATE_LIMITED') {
+    const sec = err.retryAfter;
+    const msg = sec
+      ? `${t('common.error_rate_limited')} (${sec}s)`
+      : t('common.error_rate_limited');
+    toast?.warning?.(msg);
+    return msg;
+  }
+  if (err.code === 'UNAUTHORIZED') {
+    // Auth flow already redirects to login; skip toast to avoid noise.
+    return err.message || '';
+  }
+  const msg = err.message || t('common.error');
+  toast?.error?.(msg);
+  return msg;
 }
 
 export const auth = {
@@ -226,6 +265,7 @@ export const api = {
   listWorkspaces: () => request('/auth/workspaces'),
   createWorkspace: (data) => request('/workspaces', { method: 'POST', body: data }),
   updateWorkspace: (id, data) => request(`/workspaces/${id}`, { method: 'PATCH', body: data }),
+  updateWorkspaceSettings: (id, patch) => request(`/workspaces/${id}/settings`, { method: 'PATCH', body: patch }),
   deleteWorkspace: (id) => request(`/workspaces/${id}`, { method: 'DELETE' }),
   listWorkspaceMembers: (id) => request(`/workspaces/${id}/members`),
   inviteToWorkspace: (id, data) => request(`/workspaces/${id}/members`, { method: 'POST', body: data }),
@@ -251,7 +291,7 @@ export const api = {
   },
 
   // Conductor
-  conductorPlan: (goal) => request('/conductor/plan', { method: 'POST', body: { goal } }),
+  conductorPlan: (goal, opts = {}) => request('/conductor/plan', { method: 'POST', body: { goal }, ...opts }),
   listConductorPlans: () => request('/conductor/plans'),
   getConductorPlan: (id) => request(`/conductor/plans/${id}`),
   conductorRun: (planId) => request(`/conductor/plans/${planId}/run`, { method: 'POST' }),
