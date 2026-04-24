@@ -666,54 +666,6 @@ const MIGRATIONS = [
     },
   },
 
-  {
-    id: '2026-04-24-email-events',
-    description: 'email_events table for Resend delivery webhooks (sent/delivered/bounced/etc)',
-    up: async ({ exec }) => {
-      // Resend fires webhooks per send-side event. We keep a raw audit trail
-      // (one row per event) and derive contact-level status by joining on
-      // resend_email_id via email_replies — the outbound row written when we
-      // send already stores that id. workspace_id is resolved lazily when we
-      // match the event to a reply, so we index by provider_email_id for that
-      // lookup, and by workspace_id once populated for per-tenant queries.
-      await exec(`
-        CREATE TABLE IF NOT EXISTS email_events (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT,
-          provider TEXT NOT NULL,
-          event_type TEXT NOT NULL,
-          provider_email_id TEXT,
-          contact_id TEXT,
-          pipeline_job_id TEXT,
-          recipient TEXT,
-          reason TEXT,
-          payload TEXT,
-          occurred_at TIMESTAMP,
-          received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-      for (const stmt of [
-        'CREATE INDEX IF NOT EXISTS idx_email_events_provider_email ON email_events(provider_email_id)',
-        'CREATE INDEX IF NOT EXISTS idx_email_events_workspace ON email_events(workspace_id)',
-        'CREATE INDEX IF NOT EXISTS idx_email_events_contact ON email_events(contact_id)',
-        'CREATE INDEX IF NOT EXISTS idx_email_events_type ON email_events(event_type)',
-      ]) {
-        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
-      }
-
-      // Contact-level derived flags so UI can filter/warn without joining
-      // against the event log. Only bounces + complaints are denormalized —
-      // opens/clicks are too chatty to be useful as a boolean.
-      for (const stmt of [
-        'ALTER TABLE contacts ADD COLUMN bounced_at TIMESTAMP',
-        'ALTER TABLE contacts ADD COLUMN complained_at TIMESTAMP',
-      ]) {
-        try { await exec(stmt); } catch (e) {
-          if (!/already exists|duplicate column/i.test(e.message)) throw e;
-        }
-      }
-    },
-  },
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

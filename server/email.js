@@ -8,8 +8,6 @@
  * omitted or null, the env-based provider is used.
  */
 
-const gmailSender = require('./gmail');
-
 function escapeHtml(text) {
   return text
     .replace(/&/g, '&amp;')
