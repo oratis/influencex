@@ -437,6 +437,11 @@ export default function PipelinePage() {
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
                 {t('pipeline.discovery_keywords_prefix', { keywords: job.search_criteria?.keywords || '-' })} | {new Date(job.created_at).toLocaleString()}
               </div>
+              {job.status === 'error' && job.error_message && (
+                <div style={{ fontSize: '12px', color: 'var(--danger, #ff6b6b)', marginTop: 6, padding: '6px 10px', background: 'rgba(255,107,107,0.08)', borderRadius: 6 }}>
+                  <strong>{t('common.error')}:</strong> {job.error_message}
+                </div>
+              )}
             </div>
           ))}
 

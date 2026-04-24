@@ -4739,16 +4739,64 @@ app.get(`${BASE_PATH}/api/data/dashboard/combined`, async (req, res) => {
 // ==================== Discovery API (Task 3) ====================
 
 // Start discovery
+// Resolve a default campaign_id for the caller's workspace. Used when
+// discovery-start is called without an explicit campaign_id (e.g. from the
+// "Discovery" tab on PipelinePage, which doesn't know which campaign it's
+// bound to). Prefers an active campaign, falls back to any campaign, and
+// throws if the workspace has none — refusing to leak into the global
+// hakko-q1-all seed like the old code did.
+async function defaultCampaignForWorkspace(workspaceId) {
+  const active = await queryOne(
+    "SELECT id FROM campaigns WHERE workspace_id = ? AND status = 'active' ORDER BY created_at ASC LIMIT 1",
+    [workspaceId]
+  );
+  if (active) return active.id;
+  const any = await queryOne(
+    'SELECT id FROM campaigns WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 1',
+    [workspaceId]
+  );
+  return any?.id || null;
+}
+
 app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) => {
   try {
     const { campaign_id, keywords, platforms, min_subscribers, max_results } = req.body;
     const searchKeywords = keywords || 'gaming AI roleplay, AI character game, AI NPC gaming, AI companion roleplay';
 
-    const jobId = uuidv4();
-    await exec("INSERT INTO discovery_jobs (id, campaign_id, search_criteria, status) VALUES (?, ?, ?, 'running')",
-      [jobId, campaign_id || 'hakko-q1-all', JSON.stringify({ keywords: searchKeywords, platforms: platforms || ['youtube'], min_subscribers: min_subscribers || 1000, max_results: max_results || 50 })]);
+    // Explicit campaign_id must belong to caller's workspace; otherwise fall
+    // back to workspace's default campaign. No more global seed leakage.
+    let resolvedCampaignId = null;
+    if (campaign_id) {
+      const owned = await queryOne(
+        'SELECT id FROM campaigns WHERE id = ? AND workspace_id = ?',
+        [campaign_id, req.workspace.id]
+      );
+      if (!owned) return res.status(404).json({ error: 'Campaign not found in this workspace' });
+      resolvedCampaignId = owned.id;
+    } else {
+      resolvedCampaignId = await defaultCampaignForWorkspace(req.workspace.id);
+      if (!resolvedCampaignId) {
+        return res.status(400).json({
+          error: 'No campaign exists in this workspace. Create one before running discovery.',
+          code: 'NO_CAMPAIGN',
+        });
+      }
+    }
 
-    // Run discovery async
+    const jobId = uuidv4();
+    await exec(
+      'INSERT INTO discovery_jobs (id, workspace_id, campaign_id, search_criteria, status) VALUES (?, ?, ?, ?, ?)',
+      [
+        jobId,
+        req.workspace.id,
+        resolvedCampaignId,
+        JSON.stringify({ keywords: searchKeywords, platforms: platforms || ['youtube'], min_subscribers: min_subscribers || 1000, max_results: max_results || 50 }),
+        'running',
+      ]
+    );
+
+    // Run discovery async. Any failure writes to error_message so the UI
+    // can surface a reason instead of a bare "error" badge.
     (async () => {
       try {
         const result = await discoveryAgent.searchYouTubeChannels({
@@ -4758,23 +4806,33 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
         });
 
         if (!result.success) {
-          await exec("UPDATE discovery_jobs SET status='error', completed_at=CURRENT_TIMESTAMP WHERE id=?", [jobId]);
+          await exec(
+            "UPDATE discovery_jobs SET status='error', error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+            [String(result.error || 'unknown error').slice(0, 500), jobId]
+          );
+          console.warn('[discovery] failed:', result.error);
           return;
         }
 
-        // Insert results
         await transaction(async (tx) => {
           for (const ch of result.channels) {
-            await tx.exec("INSERT INTO discovery_results (id, job_id, platform, channel_url, channel_name, subscribers, relevance_score, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'found')",
-              [uuidv4(), jobId, ch.platform, ch.channel_url, ch.channel_name, ch.subscribers, ch.relevance_score]);
+            await tx.exec(
+              'INSERT INTO discovery_results (id, job_id, platform, channel_url, channel_name, subscribers, relevance_score, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+              [uuidv4(), jobId, ch.platform, ch.channel_url, ch.channel_name, ch.subscribers, ch.relevance_score, 'found']
+            );
           }
         });
 
-        await exec("UPDATE discovery_jobs SET status='complete', total_found=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-          [result.channels.length, jobId]);
+        await exec(
+          "UPDATE discovery_jobs SET status='complete', total_found=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+          [result.channels.length, jobId]
+        );
       } catch (e) {
-        await exec("UPDATE discovery_jobs SET status='error', completed_at=CURRENT_TIMESTAMP WHERE id=?", [jobId]);
-        console.error('Discovery error:', e.message);
+        await exec(
+          "UPDATE discovery_jobs SET status='error', error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+          [String(e.message || e).slice(0, 500), jobId]
+        );
+        console.error('[discovery] exception:', e.message);
       }
     })();
 
@@ -4784,10 +4842,13 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
   }
 });
 
-// List discovery jobs
+// List discovery jobs — scoped to caller's workspace.
 app.get(`${BASE_PATH}/api/discovery/jobs`, async (req, res) => {
   try {
-    const result = await query("SELECT * FROM discovery_jobs ORDER BY created_at DESC");
+    const result = await query(
+      'SELECT * FROM discovery_jobs WHERE workspace_id = ? ORDER BY created_at DESC',
+      [req.workspace.id]
+    );
     const jobs = result.rows;
     jobs.forEach(j => { j.search_criteria = JSON.parse(j.search_criteria || '{}'); });
     res.json(jobs);
@@ -4796,57 +4857,80 @@ app.get(`${BASE_PATH}/api/discovery/jobs`, async (req, res) => {
   }
 });
 
-// Get discovery job with results
+// Get a discovery job + its results — scoped to caller's workspace.
 app.get(`${BASE_PATH}/api/discovery/jobs/:id`, async (req, res) => {
   try {
-    const job = await queryOne("SELECT * FROM discovery_jobs WHERE id=?", [req.params.id]);
+    const job = await queryOne(
+      'SELECT * FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
     if (!job) return res.status(404).json({ error: 'Job not found' });
     job.search_criteria = JSON.parse(job.search_criteria || '{}');
 
-    const resultsResult = await query("SELECT * FROM discovery_results WHERE job_id=? ORDER BY relevance_score DESC, subscribers DESC", [job.id]);
+    const resultsResult = await query(
+      'SELECT * FROM discovery_results WHERE job_id=? ORDER BY relevance_score DESC, subscribers DESC',
+      [job.id]
+    );
     res.json({ ...job, results: resultsResult.rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Process discovery results through pipeline
+// Process discovery results through the pipeline. Scoped to caller's
+// workspace; creates pipeline_jobs tagged with the same workspace_id.
 app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, async (req, res) => {
   try {
-    const job = await queryOne("SELECT * FROM discovery_jobs WHERE id=?", [req.params.id]);
+    const job = await queryOne(
+      'SELECT * FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
     const { min_relevance = 30, max_process = 10 } = req.body;
 
-    const resultsResult = await query("SELECT * FROM discovery_results WHERE job_id=? AND status='found' AND relevance_score >= ? ORDER BY relevance_score DESC LIMIT ?",
-      [job.id, min_relevance, max_process]);
+    const resultsResult = await query(
+      "SELECT * FROM discovery_results WHERE job_id=? AND status='found' AND relevance_score >= ? ORDER BY relevance_score DESC LIMIT ?",
+      [job.id, min_relevance, max_process]
+    );
     const results = resultsResult.rows;
+
+    // If the job has no campaign (shouldn't happen post-fix, but defensive),
+    // fall back to the workspace's default campaign.
+    const campaignId = job.campaign_id || (await defaultCampaignForWorkspace(req.workspace.id));
+    if (!campaignId) {
+      return res.status(400).json({ error: 'No campaign to associate with these jobs', code: 'NO_CAMPAIGN' });
+    }
 
     const processed = [];
     for (const r of results) {
-      // Create pipeline job for each
       const pipelineId = uuidv4();
       const username = r.channel_url.split('/').pop();
 
-      await exec("INSERT INTO pipeline_jobs (id, profile_url, platform, username, campaign_id, stage, source) VALUES (?, ?, ?, ?, ?, 'scrape', 'discovery')",
-        [pipelineId, r.channel_url, r.platform, username, job.campaign_id || 'hakko-q1-all']);
+      await exec(
+        "INSERT INTO pipeline_jobs (id, workspace_id, profile_url, platform, username, campaign_id, stage, source) VALUES (?, ?, ?, ?, ?, ?, 'scrape', 'discovery')",
+        [pipelineId, req.workspace.id, r.channel_url, r.platform, username, campaignId]
+      );
 
-      await exec("UPDATE discovery_results SET pipeline_job_id=?, status='queued' WHERE id=?",
-        [pipelineId, r.id]);
+      await exec(
+        "UPDATE discovery_results SET pipeline_job_id=?, status='queued' WHERE id=?",
+        [pipelineId, r.id]
+      );
 
-      // Run pipeline async with delay between each to respect API limits
-      runPipeline(pipelineId, r.channel_url, r.platform, username, job.campaign_id || 'hakko-q1-all').catch(e => {
+      // Run pipeline async with a small spacer between kicks so the
+      // per-host scrape APIs don't see a burst.
+      runPipeline(pipelineId, r.channel_url, r.platform, username, campaignId).catch(e => {
         console.error(`Pipeline error for ${r.channel_name}:`, e.message);
       });
 
       processed.push({ channel: r.channel_name, pipelineId });
-
-      // Delay between pipeline runs
       await new Promise(r => setTimeout(r, 1000));
     }
 
-    await exec("UPDATE discovery_jobs SET total_processed=total_processed+? WHERE id=?",
-      [processed.length, job.id]);
+    await exec(
+      'UPDATE discovery_jobs SET total_processed=total_processed+? WHERE id=?',
+      [processed.length, job.id]
+    );
 
     res.json({ processed: processed.length, jobs: processed });
   } catch (e) {

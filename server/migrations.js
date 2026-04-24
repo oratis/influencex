@@ -667,6 +667,18 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-25-discovery-error-message',
+    description: 'Persist discovery job failure reason so the UI can show why a run failed',
+    up: async ({ exec }) => {
+      try {
+        await exec('ALTER TABLE discovery_jobs ADD COLUMN error_message TEXT');
+      } catch (e) {
+        if (!/duplicate|already exists/i.test(e.message)) throw e;
+      }
+    },
+  },
+
+  {
     id: '2026-04-25-invitations',
     description: 'Invitations table for invite-only signup (public /api/auth/register is removed)',
     up: async ({ exec }) => {
