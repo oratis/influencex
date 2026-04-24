@@ -141,6 +141,17 @@ function register({ jobQueue, query, queryOne, exec, mailAgent, notifications })
         `UPDATE contacts SET status = ?, send_error = ? WHERE id = ?`,
         [isTerminal ? 'failed' : 'pending', err.slice(0, 500), contactId]
       );
+      // Sync pipeline_job if present: on terminal failure, bounce back to
+      // 'review' so the admin can edit/retry; on transient, stay at 'send'
+      // because the queue will retry automatically.
+      if (isTerminal) {
+        try {
+          await exec(
+            "UPDATE pipeline_jobs SET stage='review', error=?, updated_at=CURRENT_TIMESTAMP WHERE contact_id=?",
+            [err.slice(0, 500), contactId]
+          );
+        } catch (e) { log.warn('[email-jobs] pipeline failure sync:', e.message); }
+      }
       await recordEvent({
         workspaceId: contact.workspace_id,
         contactId,
@@ -165,6 +176,20 @@ function register({ jobQueue, query, queryOne, exec, mailAgent, notifications })
         [result.messageId || null, contactId]
       );
     }
+
+    // If this contact was spawned from a pipeline_job (pipeline/review → approve
+    // path), sync the pipeline row so the Pipeline page reflects the send
+    // outcome. Silently skipped when the contact has no linked pipeline_job
+    // (i.e. the ContactModule direct-send path).
+    try {
+      await exec(
+        "UPDATE pipeline_jobs SET email_sent_at=CURRENT_TIMESTAMP, smtp_message_id=?, stage='monitor', updated_at=CURRENT_TIMESTAMP WHERE contact_id=?",
+        [result.messageId || null, contactId]
+      );
+    } catch (e) {
+      log.warn('[email-jobs] failed to sync pipeline_jobs stage:', e.message);
+    }
+
     await exec(
       `INSERT INTO email_replies (id, workspace_id, contact_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at)
        VALUES (?, ?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,

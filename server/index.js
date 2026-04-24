@@ -853,7 +853,7 @@ app.post(`${BASE_PATH}/api/contacts/generate`, async (req, res) => {
     const campaign = await s.queryOne('SELECT * FROM campaigns WHERE id = ? AND workspace_id = ?', [campaign_id, req.workspace.id]);
     if (!kol || !campaign) return res.status(404).json({ error: 'KOL or Campaign not found' });
 
-    const email = generateOutreachEmail(kol, campaign, cooperation_type || 'affiliate', price_quote);
+    const email = await generateOutreachEmail(kol, campaign, cooperation_type || 'affiliate', price_quote);
     const id = uuidv4();
     await s.exec(
       'INSERT INTO contacts (id, workspace_id, kol_id, campaign_id, email_subject, email_body, cooperation_type, price_quote, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -1533,7 +1533,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, async
     const results = await transaction(async (tx) => {
       const txResults = [];
       for (const kol of newKols) {
-        const email = generateOutreachEmail(kol, campaign, cooperation_type || 'affiliate', price_quote);
+        const email = await generateOutreachEmail(kol, campaign, cooperation_type || 'affiliate', price_quote);
         const id = uuidv4();
         await tx.exec(
           'INSERT INTO contacts (id, workspace_id, kol_id, campaign_id, email_subject, email_body, cooperation_type, price_quote, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -4347,7 +4347,7 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId, wo
   const campaignObj = campaign || { name: 'HakkoAI', description: 'AI gaming assistant' };
   if (campaign?.platforms) campaignObj.platforms = JSON.parse(campaign.platforms || '[]');
 
-  const emailContent = generateOutreachEmail(
+  const emailContent = await generateOutreachEmail(
     { display_name: d.display_name || username, platform, followers: d.followers, username, category: d.category, engagement_rate: d.engagement_rate, avg_views: d.avg_views, bio: d.bio },
     campaignObj,
     'affiliate', ''
@@ -4450,7 +4450,13 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, async (req, res) => {
 });
 
 // Approve and send email
-app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
+// Approve the review-stage draft and queue it for send. Routes through the
+// same email.send job queue as /api/contacts/:id/send — the worker updates
+// the contact row (status, sent_at, email_replies) and the pipeline UI
+// JOINs contacts to reflect live state. This removes the old parallel
+// approve → sync sendEmail path that used a deprecated signature and
+// couldn't leverage workspace-specific mailbox_accounts.
+app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const job = await s.queryOne(
@@ -4463,57 +4469,30 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, async (req, res) => {
     const emailTo = req.body.email_to || job.email_to;
     if (!emailTo) return res.status(400).json({ error: 'No email address available for this KOL. Set email_to.' });
 
-    // Mark as approved
+    if (!job.contact_id) {
+      return res.status(500).json({
+        error: 'Pipeline job has no linked contact — was it created before the pipeline→contact linker was added? Reject and retry.',
+        code: 'NO_CONTACT',
+      });
+    }
+
+    // Mark pipeline + contact as pending; enqueue the send. Worker handles
+    // the actual Resend call, status updates, and email_replies insert.
     await s.exec(
       "UPDATE pipeline_jobs SET email_approved=1, email_to=?, stage='send', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
       [emailTo, job.id, req.workspace.id]
     );
+    await s.exec(
+      "UPDATE contacts SET status='pending', send_error=NULL, kol_email=COALESCE(kol_email, ?), email_subject=?, email_body=? WHERE id=? AND workspace_id=?",
+      [emailTo, job.email_subject, job.email_body, job.contact_id, req.workspace.id]
+    );
 
-    // === Stage 3: SEND ===
-    if (!mailAgent.isConfigured()) {
-      await s.exec(
-        "UPDATE pipeline_jobs SET stage='review', error='SMTP not configured', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
-        [job.id, req.workspace.id]
-      );
-      return res.json({ success: false, error: 'SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS env vars.' });
-    }
+    const jobId = jobQueue.push('email.send', {
+      contactId: job.contact_id,
+      toOverride: emailTo,
+    }, { maxRetries: 3 });
 
-    const sendResult = await mailAgent.sendEmail({
-      to: emailTo,
-      subject: job.email_subject,
-      body: job.email_body,
-      workspaceId: req.workspace.id,
-    });
-
-    if (sendResult.success) {
-      await s.exec(
-        "UPDATE pipeline_jobs SET email_sent_at=CURRENT_TIMESTAMP, smtp_message_id=?, stage='monitor', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
-        [sendResult.messageId, job.id, req.workspace.id]
-      );
-
-      // Update contact status
-      if (job.contact_id) {
-        await s.exec(
-          "UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
-          [job.contact_id, req.workspace.id]
-        );
-      }
-
-      // Save outbound email to email_replies for thread tracking
-      const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@localhost';
-      await s.exec(
-        "INSERT INTO email_replies (id, workspace_id, contact_id, pipeline_job_id, direction, from_email, to_email, subject, body_text, resend_email_id, received_at) VALUES (?, ?, ?, ?, 'outbound', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-        [uuidv4(), req.workspace.id, job.contact_id, job.id, fromEmail, emailTo, job.email_subject, job.email_body, sendResult.messageId]
-      );
-
-      res.json({ success: true, messageId: sendResult.messageId });
-    } else {
-      await s.exec(
-        "UPDATE pipeline_jobs SET stage='review', error=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
-        [sendResult.error, job.id, req.workspace.id]
-      );
-      res.json({ success: false, error: sendResult.error });
-    }
+    res.json({ success: true, queued: true, jobQueueId: jobId, contactId: job.contact_id, pipelineJobId: job.id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -4536,7 +4515,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, async (req, res) => {
       [job.campaign_id, req.workspace.id]
     )) || { name: 'HakkoAI', description: 'AI gaming assistant' };
 
-    const emailContent = generateOutreachEmail(
+    const emailContent = await generateOutreachEmail(
       { display_name: scrapeData.display_name || job.username, platform: job.platform, followers: scrapeData.followers || 0, username: job.username, category: scrapeData.category, engagement_rate: scrapeData.engagement_rate, avg_views: scrapeData.avg_views, bio: scrapeData.bio },
       campaign,
       'affiliate', ''
@@ -4918,8 +4897,9 @@ app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, async (req, res) => {
       );
 
       // Run pipeline async with a small spacer between kicks so the
-      // per-host scrape APIs don't see a burst.
-      runPipeline(pipelineId, r.channel_url, r.platform, username, campaignId).catch(e => {
+      // per-host scrape APIs don't see a burst. workspaceId is required
+      // so the write stage creates a contact row inside the right tenant.
+      runPipeline(pipelineId, r.channel_url, r.platform, username, campaignId, req.workspace.id).catch(e => {
         console.error(`Pipeline error for ${r.channel_name}:`, e.message);
       });
 
@@ -5284,7 +5264,9 @@ function generateSampleKols(platforms, count, criteria) {
   return kols;
 }
 
-function generateOutreachEmail(kol, campaign, cooperationType, priceQuote) {
+// Template fallback used when no LLM is configured or an LLM call fails.
+// Kept separate so it can be inlined in the LLM path as the last resort.
+function generateOutreachEmailTemplate(kol, campaign, cooperationType, priceQuote) {
   const displayName = kol.display_name || kol.username;
   const isAffiliate = cooperationType === 'affiliate';
 
@@ -5313,6 +5295,72 @@ Best regards,
 ${campaign.name} Partnership Team`;
 
   return { subject, body };
+}
+
+// LLM-powered outreach email generator. Calls the default LLM provider to
+// produce a personalized subject + body per KOL. Falls back silently to the
+// template when no LLM is configured, the LLM times out, or the response
+// can't be parsed. Callers get a consistent { subject, body } shape either
+// way. Was previously pure template — see Bug #9 in KOL_FLOW_TEST_2026-04.
+async function generateOutreachEmail(kol, campaign, cooperationType, priceQuote) {
+  const templateOut = generateOutreachEmailTemplate(kol, campaign, cooperationType, priceQuote);
+
+  if (!llm.isConfigured()) return templateOut;
+
+  const displayName = kol.display_name || kol.username;
+  const followerText = kol.followers
+    ? (kol.followers >= 1000 ? kol.followers.toLocaleString() : String(kol.followers))
+    : 'unknown';
+  const isAffiliate = cooperationType === 'affiliate';
+
+  const system = `You write concise, personalized B2B outreach emails to social media creators. Each email must:
+- Open with a specific, genuine observation about THIS creator (use their niche, follower count, engagement, bio — not generic flattery).
+- Be 110–160 words. Short paragraphs.
+- Make a clear, actionable ask tied to the campaign's cooperation type.
+- Avoid emoji and avoid the phrase "I hope this message finds you well".
+- Sign off as "${campaign.name} Partnership Team".
+Output must be a single JSON object with exactly two string fields: "subject" and "body". No markdown, no prose outside JSON.`;
+
+  const cooperationBlurb = isAffiliate
+    ? `Affiliate program — revenue share on referrals. Signup URL: https://www.hakko.ai/affiliates`
+    : `Paid collaboration. Budget: ${priceQuote || 'negotiable'}. Deliverable: sponsored video/post.`;
+
+  const user = `Creator:
+- Name: ${displayName}
+- Platform: ${kol.platform}
+- Followers: ${followerText}
+- Category: ${kol.category || 'unspecified'}
+- Engagement rate: ${kol.engagement_rate != null ? kol.engagement_rate + '%' : 'unknown'}
+- Avg views: ${kol.avg_views != null ? kol.avg_views.toLocaleString() : 'unknown'}
+- Bio: ${(kol.bio || '').slice(0, 300)}
+
+Campaign:
+- Name: ${campaign.name}
+- Description: ${campaign.description || '(no description)'}
+
+Cooperation type: ${cooperationType || 'affiliate'}
+${cooperationBlurb}
+
+Write the outreach email. Respond with JSON only.`;
+
+  try {
+    const res = await llm.complete({
+      messages: [{ role: 'user', content: user }],
+      system,
+      maxTokens: 600,
+      temperature: 0.6,
+    });
+    const raw = (res.text || '').trim();
+    // Best-effort JSON extraction: some models wrap in ``` fences despite instructions.
+    const jsonStr = raw.match(/\{[\s\S]*\}/)?.[0];
+    if (!jsonStr) throw new Error('no JSON object in response');
+    const parsed = JSON.parse(jsonStr);
+    if (!parsed.subject || !parsed.body) throw new Error('missing subject/body in LLM output');
+    return { subject: String(parsed.subject).trim(), body: String(parsed.body).trim(), generator: 'llm' };
+  } catch (e) {
+    console.warn('[outreach-email] LLM failed, falling back to template:', e.message);
+    return templateOut;
+  }
 }
 
 function calculateAIScore(kol, criteria, campaignDesc) {
@@ -5417,7 +5465,7 @@ async function scrapeAndEnrichKol(id, profileUrl, platform, username) {
     );
 
     // Generate outreach email based on real profile data
-    const emailContent = generateOutreachEmail(
+    const emailContent = await generateOutreachEmail(
       { display_name: d.display_name || username, platform, followers: d.followers, username },
       { name: 'HakkoAI', description: 'Hakko AI - Next-gen AI gaming assistant' },
       'affiliate', ''
