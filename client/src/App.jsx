@@ -20,7 +20,6 @@ import ContentStudio from './pages/ContentStudio';
 import ConductorPage from './pages/ConductorPage';
 import ConnectionsPage from './pages/ConnectionsPage';
 import CalendarPage from './pages/CalendarPage';
-import BillingPage from './pages/BillingPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import CommunityInboxPage from './pages/CommunityInboxPage';
 import AdsPage from './pages/AdsPage';
@@ -45,7 +44,6 @@ function useNavItems() {
     { path: '/studio', label: t('nav.studio'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg> },
     { path: '/calendar', label: t('nav.calendar'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> },
     { path: '/connections', label: t('nav.connections'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> },
-    { path: '/billing', label: t('nav.billing'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg> },
     { path: '/analytics', label: t('nav.analytics'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg> },
     { path: '/inbox', label: t('nav.community'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg> },
     { path: '/ads', label: t('nav.ads'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 11l18-5v13L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> },
@@ -153,7 +151,6 @@ function AppContent() {
               <Route path="/conductor" element={<ConductorPage />} />
               <Route path="/connections" element={<ConnectionsPage />} />
               <Route path="/calendar" element={<CalendarPage />} />
-              <Route path="/billing" element={<BillingPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/inbox" element={<CommunityInboxPage />} />
               <Route path="/ads" element={<AdsPage />} />

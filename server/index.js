@@ -7,7 +7,7 @@ const { query, queryOne, exec, transaction, initializeDatabase, usePostgres, get
 const { v4: uuidv4 } = require('uuid');
 const { authMiddleware, registerUser, loginUser, destroySession, getSession } = require('./auth');
 const authGoogle = require('./auth-google');
-const billing = require('./billing');
+// Stripe billing intentionally removed — all features are free for invited users.
 const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId } = require('./workspace-middleware');
 const ga4 = require('./ga4');
 const feishu = require('./feishu');
@@ -103,9 +103,6 @@ app.use((req, res, next) => {
     express.json({
       verify: (req, _res, buf) => { req.rawBody = buf; }
     })(req, res, next);
-  } else if (req.path === `${BASE_PATH}/api/billing/webhook`) {
-    // Stripe webhook needs the raw string body for signature verification
-    express.raw({ type: 'application/json' })(req, res, next);
   } else {
     express.json()(req, res, next);
   }
@@ -255,56 +252,8 @@ app.get(`${BASE_PATH}/api/auth/google/status`, (req, res) => {
   res.json({ configured: authGoogle.isConfigured() });
 });
 
-// --- Stripe billing -------------------------------------------------------
-// Public: list plans + configured state (so the Billing page can render w/o auth timing)
-app.get(`${BASE_PATH}/api/billing/plans`, (req, res) => {
-  res.json({ configured: billing.isConfigured(), plans: billing.listPlans() });
-});
-
-// Authenticated: current workspace's subscription
-app.get(`${BASE_PATH}/api/billing/subscription`, authMiddleware, workspaceContext, async (req, res) => {
-  try {
-    const sub = await billing.getSubscription(req.workspace.id);
-    res.json(sub);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Start a Stripe Checkout session for a paid plan
-app.post(`${BASE_PATH}/api/billing/checkout`, authMiddleware, workspaceContext, async (req, res) => {
-  try {
-    const { plan } = req.body;
-    if (!plan) return res.status(400).json({ error: 'plan is required' });
-    const result = await billing.createCheckoutSession({
-      workspaceId: req.workspace.id,
-      userEmail: req.user.email,
-      planId: plan,
-    });
-    res.json(result);
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-// Open Stripe Customer Portal (change plan / update card / cancel)
-app.post(`${BASE_PATH}/api/billing/portal`, authMiddleware, workspaceContext, async (req, res) => {
-  try {
-    const result = await billing.createPortalSession({ workspaceId: req.workspace.id });
-    res.json(result);
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-// Stripe webhook — receives events (signed). Must use the raw body.
-app.post(`${BASE_PATH}/api/billing/webhook`, async (req, res) => {
-  try {
-    const signature = req.headers['stripe-signature'];
-    if (!signature) return res.status(400).json({ error: 'Missing stripe-signature header' });
-    const event = billing.verifyWebhookSignature(req.body, signature);
-    // Respond 200 immediately; processing is async-safe
-    res.json({ received: true });
-    billing.handleWebhookEvent(event).catch(e => console.error('[stripe webhook]', e));
-  } catch (e) {
-    console.error('[stripe webhook verify]', e.message);
-    res.status(400).json({ error: `Webhook Error: ${e.message}` });
-  }
-});
+// Stripe billing routes removed. Platform is invite-only and free; plan
+// field on workspaces is preserved for future use but has no functional effect.
 
 // List workspaces the current user is a member of (for switcher UI)
 app.get(`${BASE_PATH}/api/auth/workspaces`, authMiddleware, async (req, res) => {

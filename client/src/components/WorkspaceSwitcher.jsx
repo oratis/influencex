@@ -57,7 +57,7 @@ export default function WorkspaceSwitcher() {
             {currentWorkspace.name}
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {t(`roles.${currentWorkspace.role || 'member'}`)} · {currentWorkspace.plan || 'starter'}
+            {t(`roles.${currentWorkspace.role || 'member'}`)}
           </div>
         </div>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" style={{ opacity: 0.5, transform: showMenu ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>

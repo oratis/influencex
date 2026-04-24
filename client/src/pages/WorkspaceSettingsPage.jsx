@@ -180,7 +180,6 @@ export default function WorkspaceSettingsPage() {
             <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
               <div><strong>{t('workspace.meta_id')}:</strong> <code style={{ fontSize: 11 }}>{currentWorkspace.id}</code></div>
               <div><strong>{t('workspace.meta_slug')}:</strong> <code style={{ fontSize: 11 }}>{currentWorkspace.slug}</code></div>
-              <div><strong>{t('workspace.meta_plan')}:</strong> {currentWorkspace.plan || 'starter'}</div>
               <div><strong>{t('workspace.meta_joined')}:</strong> {currentWorkspace.joined_at ? new Date(currentWorkspace.joined_at).toLocaleDateString() : '—'}</div>
             </div>
           </div>

@@ -35,7 +35,7 @@ export default function LandingPage() {
           <a href="https://github.com/oratis/influencex" target="_blank" rel="noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.github')}</a>
           <a href="/api/docs" target="_blank" rel="noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.api_docs')}</a>
           <Link to="/login" className="btn btn-secondary btn-sm">{t('auth.sign_in')}</Link>
-          <Link to="/signup" className="btn btn-primary btn-sm">{t('landing.start_free')}</Link>
+          <Link to="/login" className="btn btn-primary btn-sm">{t('auth.sign_in')}</Link>
         </div>
       </div>
 
@@ -61,15 +61,12 @@ export default function LandingPage() {
           {t('landing.hero_subtitle')}
         </p>
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 24 }}>
-          <Link to="/signup" className="btn btn-primary" style={{ fontSize: 16, padding: '14px 28px' }}>
-            {t('landing.start_free')}
+          <Link to="/login" className="btn btn-primary" style={{ fontSize: 16, padding: '14px 28px' }}>
+            {t('auth.sign_in')}
           </Link>
           <a href="https://github.com/oratis/influencex" target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ fontSize: 16, padding: '14px 28px' }}>
             {t('landing.star_on_github')}
           </a>
-        </div>
-        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-          {t('landing.no_card_note')}
         </div>
       </div>
 
@@ -121,37 +118,6 @@ export default function LandingPage() {
               }}>{s.step}</div>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.title}</div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>{s.desc}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Pricing */}
-      <div style={{ maxWidth: 1100, margin: '80px auto', padding: '0 24px' }}>
-        <h2 style={{ textAlign: 'center', fontSize: 32, marginBottom: 12 }}>{t('landing.pricing_title')}</h2>
-        <p style={{ textAlign: 'center', color: 'var(--text-secondary)', marginBottom: 40 }}>
-          {t('landing.pricing_subtitle')}
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 20 }}>
-          {[
-            { name: t('landing.plan_oss_name'), price: t('landing.plan_oss_price'), desc: t('landing.plan_oss_desc'), cta: t('landing.plan_oss_cta'), ctaUrl: 'https://github.com/oratis/influencex', featured: false },
-            { name: t('landing.plan_starter_name'), price: '$49/mo', desc: t('landing.plan_starter_desc'), cta: t('landing.plan_starter_cta'), ctaUrl: '/signup', featured: true },
-            { name: t('landing.plan_growth_name'), price: '$199/mo', desc: t('landing.plan_growth_desc'), cta: t('landing.plan_starter_cta'), ctaUrl: '/signup', featured: false },
-            { name: t('landing.plan_enterprise_name'), price: t('landing.plan_enterprise_price'), desc: t('landing.plan_enterprise_desc'), cta: t('landing.plan_enterprise_cta'), ctaUrl: 'mailto:contact@influencexes.com', featured: false },
-          ].map(p => (
-            <div key={p.name} style={{
-              padding: 24, borderRadius: 12,
-              border: p.featured ? '2px solid var(--accent)' : '1px solid var(--border)',
-              background: p.featured ? 'var(--accent-light)' : 'rgba(255,255,255,0.02)',
-              position: 'relative',
-            }}>
-              {p.featured && <div style={{ position: 'absolute', top: -10, right: 16, fontSize: 10, background: 'var(--accent)', color: 'white', padding: '3px 10px', borderRadius: 10, fontWeight: 700 }}>{t('landing.most_popular')}</div>}
-              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>{p.name}</div>
-              <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 12 }}>{p.price}</div>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 20, minHeight: 60 }}>{p.desc}</div>
-              <a href={p.ctaUrl} target={p.ctaUrl.startsWith('http') || p.ctaUrl.startsWith('mailto') ? '_blank' : undefined} rel="noreferrer" className={`btn ${p.featured ? 'btn-primary' : 'btn-secondary'}`} style={{ width: '100%', justifyContent: 'center' }}>
-                {p.cta}
-              </a>
             </div>
           ))}
         </div>
