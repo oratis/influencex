@@ -13,6 +13,8 @@ const ga4 = require('./ga4');
 const feishu = require('./feishu');
 const scraper = require('./scraper');
 const mailAgent = require('./email');
+const log = require('./logger');
+const metrics = require('./metrics');
 const dataAgent = require('./content-metrics');
 const discoveryAgent = require('./youtube-discovery');
 const youtubeQuota = require('./youtube-quota');
@@ -107,6 +109,13 @@ app.use((req, res, next) => {
     express.json()(req, res, next);
   }
 });
+
+// HTTP metrics middleware — records every request's method/route/status +
+// latency histogram. Mounted before any business logic so 4xx auth rejects
+// also show up. /metrics endpoint exposes the data (token-gated).
+app.use(metrics.httpMetricsMiddleware);
+
+app.get(`${BASE_PATH}/metrics`, metrics.metricsHandler({ jobQueue, llm }));
 
 // Serve static frontend files with long-term caching for hashed assets.
 // Vite emits content-hashed filenames in /assets (e.g. index-abc123.js),
@@ -415,10 +424,47 @@ app.post(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, 
     );
     const origin = req.headers.origin || `https://${req.headers.host}`;
     const link = `${origin}${BASE_PATH}/#/accept-invite?token=${token}`;
+
+    // Best-effort: also email the invitee. Admins still get the link in the
+    // response as a fallback for when send fails or they want to share it
+    // through a different channel (Slack/Feishu/etc).
+    let emailSent = false;
+    let emailError = null;
+    try {
+      const ws = await queryOne('SELECT name FROM workspaces WHERE id = ?', [req.params.id]);
+      const inviterName = req.user.name || req.user.email || 'A teammate';
+      const wsName = ws?.name || 'a workspace';
+      const subject = `${inviterName} invited you to ${wsName} on InfluenceX`;
+      const body = [
+        `Hi,`,
+        ``,
+        `${inviterName} (${req.user.email}) invited you to join "${wsName}" on InfluenceX as ${role}.`,
+        ``,
+        `Click the link below to set your password and accept the invitation:`,
+        link,
+        ``,
+        `This link is single-use and expires on ${new Date(expiresAt).toLocaleDateString()}.`,
+        ``,
+        `If you weren't expecting this email, you can safely ignore it — nothing happens until you click the link.`,
+        ``,
+        `— InfluenceX`,
+      ].join('\n');
+      const sendRes = await mailAgent.sendEmail({ to: email, subject, body, fromName: 'InfluenceX' });
+      emailSent = !!sendRes.success;
+      if (!sendRes.success) emailError = sendRes.error || 'send failed';
+    } catch (e) {
+      emailError = e.message;
+      log.warn('[invitations] auto-email failed:', e.message);
+    }
+
     res.json({
       success: true,
       kind: 'new_invitation',
-      invitation: { id: inviteId, email, role, token, link, expires_at: expiresAt },
+      invitation: {
+        id: inviteId, email, role, token, link, expires_at: expiresAt,
+        email_sent: emailSent,
+        email_error: emailError,
+      },
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -82,7 +82,13 @@ export default function WorkspaceSettingsPage() {
           role: result.invitation.role,
           link: result.invitation.link,
           expires_at: result.invitation.expires_at,
+          emailSent: !!result.invitation.email_sent,
+          emailError: result.invitation.email_error || null,
         });
+      } else if (result.kind === 'existing_user') {
+        // Email already had an account → silently added as member, no
+        // invite link needed. Distinct toast so admin knows what happened.
+        toast.success(t('workspace.added_existing_member', { email, role }));
       } else {
         toast.success(t('workspace.invited', { email, role }));
       }
@@ -301,6 +307,16 @@ export default function WorkspaceSettingsPage() {
               <p style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                 {t('workspace.invite_link_expires', { date: new Date(inviteLinkModal.expires_at).toLocaleDateString() })}
               </p>
+              {inviteLinkModal.emailSent && (
+                <p style={{ fontSize: 12, color: 'var(--success)', marginTop: 8, padding: '6px 10px', background: 'var(--success-bg)', borderRadius: 6 }}>
+                  {t('workspace.invite_email_sent', { email: inviteLinkModal.email })}
+                </p>
+              )}
+              {inviteLinkModal.emailError && (
+                <p style={{ fontSize: 12, color: 'var(--warning)', marginTop: 8, padding: '6px 10px', background: 'var(--warning-bg)', borderRadius: 6 }}>
+                  {t('workspace.invite_email_failed', { email: inviteLinkModal.email, error: inviteLinkModal.emailError })}
+                </p>
+              )}
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setInviteLinkModal(null)}>{t('common.close')}</button>
