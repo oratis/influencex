@@ -191,6 +191,7 @@ export const api = {
   pickTemplateVariant: (contactId, template_id) => request(`/contacts/${contactId}/pick-variant`, { method: 'POST', body: { template_id } }),
   getTemplateStats: (id) => request(`/email-templates/${id}/stats`),
   promoteTemplateWinner: (id, winner_id) => request(`/email-templates/${id}/promote-winner`, { method: 'POST', body: { winner_id } }),
+  setTemplateAutoPromote: (id, enabled) => request(`/email-templates/${id}/auto-promote`, { method: 'PATCH', body: { enabled } }),
   renderEmailTemplate: (id, variables) => request(`/email-templates/${id}/render`, { method: 'POST', body: { variables } }),
   renderContactTemplate: (contactId, data) => request(`/contacts/${contactId}/render-template`, { method: 'POST', body: data }),
 

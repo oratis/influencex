@@ -667,6 +667,18 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-25-template-auto-promote-winner',
+    description: 'Per-template flag: auto-promote the winning variant once a/b is statistically significant',
+    up: async ({ exec }) => {
+      try {
+        await exec('ALTER TABLE email_templates ADD COLUMN auto_promote_winner INTEGER DEFAULT 0');
+      } catch (e) {
+        if (!/duplicate|already exists/i.test(e.message)) throw e;
+      }
+    },
+  },
+
+  {
     id: '2026-04-25-discovery-error-message',
     description: 'Persist discovery job failure reason so the UI can show why a run failed',
     up: async ({ exec }) => {

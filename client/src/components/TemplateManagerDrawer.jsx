@@ -165,6 +165,13 @@ export default function TemplateManagerDrawer({ onClose }) {
                                   await loadVariants(tp.id);
                                 } catch (e) { toast.error(e.message); }
                               }}
+                              onToggleAutoPromote={async (enabled) => {
+                                try {
+                                  await api.setTemplateAutoPromote(tp.id, enabled);
+                                  toast.success(enabled ? t('templates.auto_promote_on') : t('templates.auto_promote_off'));
+                                  await loadVariants(tp.id);
+                                } catch (e) { toast.error(e.message); }
+                              }}
                               t={t}
                             />
                           </div>
@@ -265,20 +272,38 @@ function TemplateEditor({ template, onCancel, onSave, t }) {
   );
 }
 
-function VariantsPanel({ parent, variants, stats, onAddVariant, onPromoteWinner, t }) {
+function VariantsPanel({ parent, variants, stats, onAddVariant, onPromoteWinner, onToggleAutoPromote, t }) {
   const rows = stats?.variants || [];
   const winnerId = stats?.winner_variant_id || null;
   const suggested = stats?.suggested_winner || null;
+  const autoPromote = !!stats?.auto_promote_winner;
+  const autoPromotedNow = !!stats?.auto_promoted_now;
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <div style={{ fontSize: 12, fontWeight: 600 }}>{t('templates.variants_title')}</div>
-        <button className="btn btn-primary btn-sm" style={{ fontSize: 11 }} onClick={onAddVariant}>
-          + {t('templates.add_variant')}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, cursor: 'pointer', color: 'var(--text-secondary)' }}>
+            <input
+              type="checkbox"
+              checked={autoPromote}
+              onChange={e => onToggleAutoPromote?.(e.target.checked)}
+              style={{ accentColor: 'var(--accent)' }}
+            />
+            {t('templates.auto_promote_label')}
+          </label>
+          <button className="btn btn-primary btn-sm" style={{ fontSize: 11 }} onClick={onAddVariant}>
+            + {t('templates.add_variant')}
+          </button>
+        </div>
       </div>
 
+      {autoPromotedNow && (
+        <div style={{ padding: 8, background: 'var(--success-bg)', borderRadius: 4, marginBottom: 8, fontSize: 11, color: 'var(--success)' }}>
+          {t('templates.winner_auto_promoted')}
+        </div>
+      )}
       {(winnerId || suggested) && (
         <div style={{ padding: 8, background: 'var(--bg-elevated)', borderRadius: 4, marginBottom: 8, fontSize: 11 }}>
           {winnerId && (
@@ -315,20 +340,24 @@ function VariantsPanel({ parent, variants, stats, onAddVariant, onPromoteWinner,
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => (
-                <tr key={r.id}>
-                  <td>
-                    <span className={`badge ${r.isParent ? 'badge-gray' : 'badge-purple'}`} style={{ fontSize: 10 }}>
-                      {r.isParent ? t('templates.variant_parent') : r.variant_label}
-                    </span>
-                  </td>
-                  <td>{r.sent}</td>
-                  <td>{r.opened}</td>
-                  <td>{r.replied}</td>
-                  <td style={{ color: r.open_rate > 40 ? 'var(--success)' : 'var(--text-secondary)' }}>{r.open_rate}%</td>
-                  <td style={{ color: r.reply_rate > 10 ? 'var(--success)' : 'var(--text-secondary)' }}>{r.reply_rate}%</td>
-                </tr>
-              ))}
+              {rows.map(r => {
+                const isWinner = r.id === winnerId;
+                return (
+                  <tr key={r.id} style={isWinner ? { background: 'var(--success-bg)', fontWeight: 600 } : undefined}>
+                    <td>
+                      {isWinner && <span style={{ marginRight: 4 }} title={t('templates.winner_active_short')}>🏆</span>}
+                      <span className={`badge ${isWinner ? 'badge-green' : r.isParent ? 'badge-gray' : 'badge-purple'}`} style={{ fontSize: 10 }}>
+                        {r.isParent ? t('templates.variant_parent') : r.variant_label}
+                      </span>
+                    </td>
+                    <td>{r.sent}</td>
+                    <td>{r.opened}</td>
+                    <td>{r.replied}</td>
+                    <td style={{ color: r.open_rate > 40 ? 'var(--success)' : 'var(--text-secondary)' }}>{r.open_rate}%</td>
+                    <td style={{ color: r.reply_rate > 10 ? 'var(--success)' : 'var(--text-secondary)' }}>{r.reply_rate}%</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

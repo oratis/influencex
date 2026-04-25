@@ -12,6 +12,8 @@
  */
 
 const llm = require('../llm');
+const bvSearch = require('../brand-voice-search');
+const { usePostgres } = require('../database');
 
 const SYSTEM_PROMPT_BASE = `You are a senior content writer. Your job: produce ONE piece of content that is tailored to the specified format, audience, and brand voice.
 
@@ -112,11 +114,35 @@ module.exports = {
   async run(input, ctx) {
     ctx.emit('progress', { step: 'writing', message: `Writing ${input.format}: "${(input.brief || '').slice(0, 60)}..."` });
 
-    const brandVoiceBlock = input.brand_voice ? `
+    // Brand-voice resolution: if caller didn't pass one explicitly, try to
+    // find the closest saved voice in this workspace via embedding similarity.
+    // Falls back silently to "no brand voice" when:
+    //   - no workspaceId / db in ctx
+    //   - workspace has no voices yet
+    //   - none are similar enough to the brief (< 0.4 cosine)
+    let brandVoice = input.brand_voice;
+    if (!brandVoice && ctx?.workspaceId && ctx?.db && input.brief) {
+      try {
+        const found = await bvSearch.findBestBrandVoice({
+          workspaceId: ctx.workspaceId,
+          brief: input.brief,
+          db: ctx.db,
+          usePostgres,
+        });
+        if (found) {
+          brandVoice = found;
+          ctx.emit('progress', { step: 'brand_voice', message: `Auto-selected brand voice "${found.name}" based on brief.` });
+        }
+      } catch (e) {
+        ctx.logger?.warn?.('brand-voice auto-select failed:', e.message);
+      }
+    }
+
+    const brandVoiceBlock = brandVoice ? `
 Brand voice:
-- Tone: ${(input.brand_voice.tone_words || []).join(', ') || 'professional-friendly'}
-${input.brand_voice.do_examples?.length ? '- Good examples:\n  ' + input.brand_voice.do_examples.map(e => `• ${e}`).join('\n  ') : ''}
-${input.brand_voice.dont_examples?.length ? '- Avoid:\n  ' + input.brand_voice.dont_examples.map(e => `• ${e}`).join('\n  ') : ''}
+- Tone: ${(brandVoice.tone_words || []).join(', ') || 'professional-friendly'}
+${brandVoice.do_examples?.length ? '- Good examples:\n  ' + brandVoice.do_examples.map(e => `• ${e}`).join('\n  ') : ''}
+${brandVoice.dont_examples?.length ? '- Avoid:\n  ' + brandVoice.dont_examples.map(e => `• ${e}`).join('\n  ') : ''}
 ` : '';
 
     const userMessage = `Format: ${input.format}

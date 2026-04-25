@@ -122,8 +122,9 @@ async function scrapeYouTube(profileUrl, username) {
     // Detect category from description/title
     const category = detectCategory(snippet.description + ' ' + snippet.title);
 
-    // Enhanced email discovery: try bio text, then follow links in description
-    const email = await discoverEmail(snippet.description || '', '');
+    // Enhanced email discovery: try bio text, then follow links in description.
+    // Pass channel title as displayName for Hunter Email-Finder fallback.
+    const email = await discoverEmail(snippet.description || '', '', snippet.title);
 
     return {
       success: true,
@@ -216,7 +217,7 @@ async function scrapeTikTok(profileUrl, username) {
       const engagementRate = userData.followers > 0 ? +((userData.total_likes / Math.max(userData.total_videos, 1)) / userData.followers * 100).toFixed(2) : 0;
 
       // Enhanced email discovery for TikTok bio
-      const email = await discoverEmail(userData.bio || '', '');
+      const email = await discoverEmail(userData.bio || '', '', userData.display_name || username);
 
       return {
         success: true,
@@ -239,7 +240,7 @@ async function scrapeTikTok(profileUrl, username) {
 
     // Fallback: use what we got from meta tags
     if (followers > 0 || ogImage) {
-      const email = await discoverEmail(ogDesc || '', '');
+      const email = await discoverEmail(ogDesc || '', '', ogTitle || username);
       return {
         success: true,
         partial: true,
@@ -332,7 +333,7 @@ async function scrapeTwitch(profileUrl, username) {
         category: user.broadcaster_type === 'partner' ? 'Gaming' : 'Entertainment',
         country: '',
         language: '',
-        email: await discoverEmail(user.description || '', ''),
+        email: await discoverEmail(user.description || '', '', user.display_name || username),
       },
     };
   } catch (e) {
@@ -529,7 +530,8 @@ async function scrapeWebsiteForEmail(url) {
   }
 }
 
-// Hunter.io domain search (if API key configured)
+// Hunter.io domain search (if API key configured). Returns the highest-
+// confidence email found at the domain, or '' if no hits / no API key.
 async function hunterDomainSearch(domain) {
   const apiKey = process.env.HUNTER_API_KEY;
   if (!apiKey) return '';
@@ -537,7 +539,6 @@ async function hunterDomainSearch(domain) {
     const res = await fetch(`https://api.hunter.io/v2/domain-search?domain=${domain}&api_key=${apiKey}&limit=5`);
     const data = await res.json();
     if (data.data?.emails?.length > 0) {
-      // Return highest confidence email
       const sorted = data.data.emails.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
       return sorted[0].value;
     }
@@ -547,15 +548,60 @@ async function hunterDomainSearch(domain) {
   }
 }
 
-// Main: discover email using all available methods
-async function discoverEmail(text, existingEmail) {
-  // If we already have an email from direct regex, return it
+// Hunter.io Email Finder — uses {first, last, domain} to *predict* an email
+// by matching the domain's known address pattern. Higher hit rate than
+// domain-search for KOLs whose company / personal site doesn't list emails
+// publicly. Returns '' on miss / low confidence (< 50) / no API key.
+//
+// Cost note: Hunter charges per Email Finder call. We call this only as a
+// last resort, after domain-search and direct-text extraction already failed.
+async function hunterEmailFinder(firstName, lastName, domain) {
+  const apiKey = process.env.HUNTER_API_KEY;
+  if (!apiKey || !firstName || !domain) return '';
+  try {
+    const params = new URLSearchParams({
+      domain,
+      first_name: firstName,
+      api_key: apiKey,
+    });
+    if (lastName) params.set('last_name', lastName);
+    const res = await fetch(`https://api.hunter.io/v2/email-finder?${params}`);
+    const data = await res.json();
+    const email = data?.data?.email;
+    const score = data?.data?.score; // 0..100; Hunter recommends >= 50 as deliverable
+    if (email && score >= 50) return email;
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+// Split a creator display name into { first, last } for Email Finder.
+// Heuristic: first whitespace-separated token = first name; the rest joined
+// = last name. Skips emoji and parenthetical handles. Returns null when the
+// name doesn't look like a real human name (single token, all-numeric, etc.).
+function parseHumanName(displayName) {
+  if (!displayName || typeof displayName !== 'string') return null;
+  // Strip emoji + bracketed handles like "Jane Smith (the_jane)" → "Jane Smith"
+  const cleaned = displayName
+    .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}]/gu, '')
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null; // single-token "MrBeast" / "PewDiePie" — Email Finder won't help
+  if (tokens.some(t => /^\d+$/.test(t))) return null;
+  return { first: tokens[0], last: tokens.slice(1).join(' ') };
+}
+
+// Main: discover email using all available methods. `displayName` is used
+// only as the last-resort Hunter Email Finder input.
+async function discoverEmail(text, existingEmail, displayName) {
   if (existingEmail) return existingEmail;
 
   const directEmail = extractEmailFromText(text);
   if (directEmail) return directEmail;
 
-  // Extract all URLs from the text
   const urls = extractUrls(text);
   if (urls.length === 0) return '';
 
@@ -570,7 +616,7 @@ async function discoverEmail(text, existingEmail) {
     }
   }
 
-  // Try personal/business websites
+  // Try personal/business websites + Hunter domain-search.
   for (const url of urls) {
     if (isPersonalWebsite(url)) {
       const email = await scrapeWebsiteForEmail(url);
@@ -579,13 +625,32 @@ async function discoverEmail(text, existingEmail) {
         return email;
       }
 
-      // Try Hunter.io for the domain
       try {
         const domain = new URL(url).hostname.replace('www.', '');
         const hunterEmail = await hunterDomainSearch(domain);
         if (hunterEmail) {
-          console.log(`[ContactDiscovery] Found email via Hunter.io (${domain}): ${hunterEmail}`);
+          console.log(`[ContactDiscovery] Found email via Hunter.io domain-search (${domain}): ${hunterEmail}`);
           return hunterEmail;
+        }
+      } catch {}
+    }
+  }
+
+  // Last resort: Hunter Email Finder using the creator's name + the first
+  // domain we extracted (even non-personal — sometimes a creator links a
+  // company site we didn't classify). Costs more than domain-search, so
+  // only when everything else missed.
+  const name = parseHumanName(displayName);
+  if (name) {
+    for (const url of urls) {
+      try {
+        const domain = new URL(url).hostname.replace('www.', '');
+        // Skip social-platform domains where Email Finder would be noisy.
+        if (/youtube\.com|tiktok\.com|instagram\.com|twitter\.com|x\.com|linkedin\.com|facebook\.com/i.test(domain)) continue;
+        const found = await hunterEmailFinder(name.first, name.last, domain);
+        if (found) {
+          console.log(`[ContactDiscovery] Found email via Hunter Email Finder (${name.first} ${name.last} @ ${domain}): ${found}`);
+          return found;
         }
       } catch {}
     }
@@ -666,4 +731,6 @@ module.exports = {
   scrapeTwitch,
   discoverEmail,
   extractEmailFromText,
+  parseHumanName,
+  hunterEmailFinder,
 };

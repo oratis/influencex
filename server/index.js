@@ -15,6 +15,7 @@ const scraper = require('./scraper');
 const mailAgent = require('./email');
 const log = require('./logger');
 const metrics = require('./metrics');
+const bvSearch = require('./brand-voice-search');
 const dataAgent = require('./content-metrics');
 const discoveryAgent = require('./youtube-discovery');
 const youtubeQuota = require('./youtube-quota');
@@ -2871,7 +2872,6 @@ app.post(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
     if (!name) return res.status(400).json({ error: 'name is required' });
     const id = uuidv4();
     const s = scoped(req.workspace.id);
-    // If setting this as default, unset any other defaults first
     if (is_default) {
       await s.exec('UPDATE brand_voices SET is_default = 0 WHERE workspace_id = ?', [req.workspace.id]);
     }
@@ -2879,6 +2879,30 @@ app.post(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
       'INSERT INTO brand_voices (id, workspace_id, name, description, tone_words, do_examples, dont_examples, style_guide, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [id, req.workspace.id, name, description || '', JSON.stringify(tone_words || []), JSON.stringify(do_examples || []), JSON.stringify(dont_examples || []), style_guide || '', is_default ? 1 : 0]
     );
+
+    // Best-effort embedding — failures don't block creation. The
+    // content-text agent will skip this voice if embedding is null.
+    bvSearch.embedBrandVoice({ name, description, tone_words, do_examples, dont_examples, style_guide })
+      .then(async vec => {
+        if (!vec) return;
+        try {
+          if (usePostgres) {
+            await exec(
+              'UPDATE brand_voices SET embedding = $1::vector, embedding_model = $2, embedding_dims = $3 WHERE id = $4',
+              [`[${vec.join(',')}]`, 'text-embedding-3-small', vec.length, id]
+            );
+          } else {
+            await exec(
+              'UPDATE brand_voices SET embedding = ?, embedding_model = ?, embedding_dims = ? WHERE id = ?',
+              [JSON.stringify(vec), 'text-embedding-3-small', vec.length, id]
+            );
+          }
+        } catch (e) {
+          log.warn('[brand-voice] persist embedding failed:', e.message);
+        }
+      })
+      .catch(e => log.warn('[brand-voice] embedding pipeline failed:', e.message));
+
     res.json({ id, name });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -3534,6 +3558,26 @@ app.post(`${BASE_PATH}/api/contacts/:id/pick-variant`, async (req, res) => {
 
 // Promote a variant (or the parent itself) as the winner. Subsequent
 // pick-variant calls will route 100% of traffic to this variant.
+// Toggle the auto-promote flag on a parent template. When ON, the stats
+// endpoint will set winner_variant_id automatically once the suggested
+// winner is statistically significant. Admin controls this per-template.
+app.patch(`${BASE_PATH}/api/email-templates/:id/auto-promote`, async (req, res) => {
+  try {
+    const enabled = !!req.body?.enabled;
+    const s = scoped(req.workspace.id);
+    const parent = await s.queryOne(
+      'SELECT id FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      [req.params.id, req.workspace.id]
+    );
+    if (!parent) return res.status(404).json({ error: 'Parent template not found' });
+    await s.exec(
+      'UPDATE email_templates SET auto_promote_winner = ? WHERE id = ? AND workspace_id = ?',
+      [enabled ? 1 : 0, req.params.id, req.workspace.id]
+    );
+    res.json({ success: true, auto_promote_winner: enabled });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, async (req, res) => {
   try {
     const { winner_id } = req.body || {};
@@ -3570,7 +3614,7 @@ app.get(`${BASE_PATH}/api/email-templates/:id/stats`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const parent = await s.queryOne(
-      'SELECT id, name, winner_variant_id FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
+      'SELECT id, name, winner_variant_id, auto_promote_winner FROM email_templates WHERE id = ? AND workspace_id = ? AND variant_of IS NULL',
       [req.params.id, req.workspace.id]
     );
     if (!parent) return res.status(404).json({ error: 'Parent template not found' });
@@ -3645,10 +3689,32 @@ app.get(`${BASE_PATH}/api/email-templates/:id/stats`, async (req, res) => {
       }
     }
 
+    // Auto-promotion: when the parent template has auto_promote_winner=1
+    // and we have a significant suggestion AND no winner is yet set, persist
+    // the winner now. Admin can still manually clear/change it later. This
+    // runs on stats reads (cheap, observable) rather than a background job
+    // — the stats endpoint is what surfaces A/B state to the UI anyway.
+    let autoPromoted = false;
+    if (parent.auto_promote_winner && !parent.winner_variant_id && suggestedWinner) {
+      try {
+        await s.exec(
+          'UPDATE email_templates SET winner_variant_id = ? WHERE id = ? AND workspace_id = ?',
+          [suggestedWinner.id, parent.id, req.workspace.id]
+        );
+        parent.winner_variant_id = suggestedWinner.id;
+        autoPromoted = true;
+        log.info('[ab] auto-promoted winner', { template: parent.id, variant: suggestedWinner.id, p: suggestedWinner.p_value });
+      } catch (e) {
+        log.warn('[ab] auto-promote failed:', e.message);
+      }
+    }
+
     res.json({
       parent,
       variants: payload,
       winner_variant_id: parent.winner_variant_id || null,
+      auto_promote_winner: !!parent.auto_promote_winner,
+      auto_promoted_now: autoPromoted,
       suggested_winner: suggestedWinner,
       min_sample_for_significance: MIN_SAMPLE,
     });

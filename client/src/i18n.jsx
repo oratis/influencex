@@ -881,6 +881,11 @@ const MESSAGES = {
       winner_promote: 'Promote winner',
       winner_promoted: 'Winner promoted — new sends route to this variant',
       winner_cleared: 'Winner cleared — back to even split',
+      winner_active_short: 'Winner',
+      winner_auto_promoted: '✨ Auto-promoted — the winning variant met the significance threshold and was selected automatically.',
+      auto_promote_label: 'Auto-promote winner',
+      auto_promote_on: 'Auto-promote enabled — winner will be selected once significant',
+      auto_promote_off: 'Auto-promote disabled',
     },
     kol_db: {
       title: 'KOL Database',
@@ -2295,6 +2300,11 @@ const MESSAGES = {
       winner_promote: '采纳为赢家',
       winner_promoted: '赢家已采纳——后续发送将全部走该变体',
       winner_cleared: '已清除赢家——恢复均匀分配',
+      winner_active_short: '赢家',
+      winner_auto_promoted: '✨ 已自动采纳 —— 赢家变体达到显著性阈值，已自动选中。',
+      auto_promote_label: '自动采纳赢家',
+      auto_promote_on: '已开启自动采纳 —— 显著性达标后将自动选中赢家',
+      auto_promote_off: '已关闭自动采纳',
     },
     kol_db: {
       title: '达人库',
