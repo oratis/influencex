@@ -722,6 +722,62 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-04-27-invite-codes',
+    description: 'Generic invite codes for public signup. Admin generates a code; anyone with the code can register (multi-use, optional expiry).',
+    up: async ({ exec }) => {
+      // Distinct from the per-email `invitations` table: invite_codes are
+      // generic, sharable codes (e.g. "INFLX-7K3M9X") that don't bind to a
+      // specific email. Admin creates the code and chooses target workspace +
+      // default role. Each registration consumes one "use"; code is exhausted
+      // when used_count >= max_uses, or revoked_at is set.
+      await exec(`
+        CREATE TABLE IF NOT EXISTS invite_codes (
+          id TEXT PRIMARY KEY,
+          code TEXT NOT NULL UNIQUE,
+          workspace_id TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'editor',
+          max_uses INTEGER NOT NULL DEFAULT 1,
+          used_count INTEGER NOT NULL DEFAULT 0,
+          expires_at TIMESTAMP,
+          revoked_at TIMESTAMP,
+          note TEXT,
+          created_by TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      for (const stmt of [
+        'CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code)',
+        'CREATE INDEX IF NOT EXISTS idx_invite_codes_workspace ON invite_codes(workspace_id)',
+        'CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes(created_by)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
+  {
+    id: '2026-04-27-invite-code-redemptions',
+    description: 'Audit trail of who used which invite code',
+    up: async ({ exec }) => {
+      await exec(`
+        CREATE TABLE IF NOT EXISTS invite_code_redemptions (
+          id TEXT PRIMARY KEY,
+          invite_code_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          email TEXT NOT NULL,
+          redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      for (const stmt of [
+        'CREATE INDEX IF NOT EXISTS idx_invite_redemptions_code ON invite_code_redemptions(invite_code_id)',
+        'CREATE INDEX IF NOT EXISTS idx_invite_redemptions_user ON invite_code_redemptions(user_id)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

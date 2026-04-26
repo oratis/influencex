@@ -26,6 +26,8 @@ import AdsPage from './pages/AdsPage';
 import TranslatePage from './pages/TranslatePage';
 import LandingPage from './pages/LandingPage';
 import AcceptInvitePage from './pages/AcceptInvitePage';
+import SignupWithCodePage from './pages/SignupWithCodePage';
+import InviteCodesPage from './pages/InviteCodesPage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -35,12 +37,14 @@ const DataModule = lazy(() => import('./pages/DataModule'));
 const RoiDashboard = lazy(() => import('./pages/RoiDashboard'));
 
 function PageFallback() {
-  return <div className="page-container"><div className="empty-state"><p>Loading...</p></div></div>;
+  const { t } = useI18n();
+  return <div className="page-container"><div className="empty-state"><p>{t('common.loading')}</p></div></div>;
 }
 
-function useNavItems() {
+function useNavItems(user) {
   const { t } = useI18n();
-  return [
+  const isAdmin = user?.role === 'admin';
+  const items = [
     { path: '/conductor', label: t('nav.conductor'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> },
     { path: '/studio', label: t('nav.studio'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg> },
     { path: '/calendar', label: t('nav.calendar'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> },
@@ -58,13 +62,21 @@ function useNavItems() {
     { path: '/kol-database', label: t('nav.kol_database'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> },
     { path: '/users', label: t('nav.users'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="8" r="4"/><path d="M20 21v-2a7 7 0 0 0-14 0v2"/></svg> },
   ];
+  if (isAdmin) {
+    items.push({
+      path: '/invite-codes',
+      label: t('nav.invite_codes'),
+      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>,
+    });
+  }
+  return items;
 }
 
 function AppContent() {
   const { user, loading, logout } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const { t } = useI18n();
-  const navItems = useNavItems();
+  const navItems = useNavItems(user);
 
   if (loading) {
     return (
@@ -79,9 +91,10 @@ function AppContent() {
     );
   }
 
-  // /accept-invite works regardless of auth state. If the user is already
-  // logged in with a different email, the accept flow returns EMAIL_EXISTS
-  // and nudges them to log in instead.
+  // /accept-invite and /signup work regardless of auth state. /signup is
+  // the public invite-code signup; /accept-invite is the per-email invitation
+  // flow. If the user is already logged in with a different email, both flows
+  // return EMAIL_EXISTS and nudge them to log in instead.
   if (window.location.hash.startsWith('#/accept-invite')) {
     return (
       <Routes>
@@ -90,15 +103,24 @@ function AppContent() {
       </Routes>
     );
   }
+  if (window.location.hash.startsWith('#/signup')) {
+    return (
+      <Routes>
+        <Route path="/signup" element={<SignupWithCodePage />} />
+        <Route path="*" element={<SignupWithCodePage />} />
+      </Routes>
+    );
+  }
 
   if (!user) {
-    // Public routes. Signup is disabled — /signup redirects to /login.
-    // /accept-invite renders the invitation flow (creates account + logs in).
+    // Public routes. /signup uses the invite-code flow (anyone with a valid
+    // code can register). /accept-invite renders the per-email invitation
+    // flow (creates account + logs in).
     return (
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<AuthPage />} />
-        <Route path="/signup" element={<Navigate to="/login" replace />} />
+        <Route path="/signup" element={<SignupWithCodePage />} />
         <Route path="/auth" element={<AuthPage />} />
         <Route path="/accept-invite" element={<AcceptInvitePage />} />
         <Route path="*" element={<AuthPage />} />
@@ -162,7 +184,7 @@ function AppContent() {
           <GlobalHeader />
           <main className="main-content" onClick={() => showUserMenu && setShowUserMenu(false)}>
             <Routes>
-              <Route path="/" element={<Navigate to="/pipeline" replace />} />
+              <Route path="/" element={<HomeRedirect />} />
               <Route path="/conductor" element={<ConductorPage />} />
               <Route path="/connections" element={<ConnectionsPage />} />
               <Route path="/calendar" element={<CalendarPage />} />
@@ -180,6 +202,7 @@ function AppContent() {
               <Route path="/data" element={<Suspense fallback={<PageFallback />}><DataModule /></Suspense>} />
               <Route path="/kol-database" element={<KolDatabase />} />
               <Route path="/users" element={<UsersPage />} />
+              <Route path="/invite-codes" element={<InviteCodesPage />} />
               <Route path="/workspace/settings" element={<WorkspaceSettingsPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
@@ -188,6 +211,15 @@ function AppContent() {
       </div>
     </CampaignProvider>
   );
+}
+
+// Smart landing: first-time users with zero campaigns get sent to Conductor
+// (the best place to bootstrap a plan from scratch). Returning users with
+// at least one campaign land on Pipeline (their main daily workspace).
+function HomeRedirect() {
+  const { campaigns, loading } = useCampaign();
+  if (loading) return null;
+  return <Navigate to={campaigns.length > 0 ? '/pipeline' : '/conductor'} replace />;
 }
 
 function GlobalHeader() {

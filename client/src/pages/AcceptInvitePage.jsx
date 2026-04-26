@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../AuthContext';
 import { useI18n } from '../i18n';
+import PasswordInput from '../components/PasswordInput';
 
 // Invite-acceptance page reached via /#/accept-invite?token=... shared by an
 // admin. We:
@@ -139,10 +140,9 @@ export default function AcceptInvitePage() {
               />
             </div>
             <div className="form-group">
-              <label className="form-label">{t('auth.password')}</label>
-              <input
-                className="form-input"
-                type="password"
+              <label className="form-label" htmlFor="accept-password">{t('auth.password')}</label>
+              <PasswordInput
+                id="accept-password"
                 placeholder={t('auth.password_new_placeholder')}
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}

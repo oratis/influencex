@@ -486,20 +486,20 @@ function MailboxEditorModal({ mailbox, onCancel, onSave, t }) {
     <>
       <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
         <div style={{ flex: 2 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>SMTP Host</label>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_host')}</label>
           <input className="form-input" value={form.credentials.smtp_host} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_host: e.target.value } }))} placeholder="smtp.gmail.com" />
         </div>
         <div style={{ flex: 1 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>Port</label>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_port')}</label>
           <input type="number" className="form-input" value={form.credentials.smtp_port} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_port: parseInt(e.target.value) || 587 } }))} />
         </div>
       </div>
       <div style={{ marginBottom: 10 }}>
-        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>SMTP User</label>
+        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_user')}</label>
         <input className="form-input" value={form.credentials.smtp_user} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_user: e.target.value } }))} />
       </div>
       <div style={{ marginBottom: 12 }}>
-        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>SMTP Password</label>
+        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_password')}</label>
         <input type="password" className="form-input" placeholder={isEdit ? t('connections.mailbox_api_key_edit_ph') : ''} value={form.credentials.smtp_pass} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_pass: e.target.value } }))} />
       </div>
     </>

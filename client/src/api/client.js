@@ -79,6 +79,13 @@ export function toastApiError(err, toast, t) {
     // Auth flow already redirects to login; skip toast to avoid noise.
     return err.message || '';
   }
+  // Suppress "Workspace context required" — the server now auto-creates a
+  // workspace on login + auth/me, so this error mostly fires on race
+  // conditions where the SPA loaded before /auth/me settled. Toasting it
+  // would just add noise during onboarding.
+  if (err.message && /Workspace context required/i.test(err.message)) {
+    return err.message;
+  }
   const msg = err.message || t('common.error');
   toast?.error?.(msg);
   return msg;
@@ -357,4 +364,9 @@ export const api = {
 
   // Translate — batched multi-language localization.
   translate: (data) => request('/translate', { method: 'POST', body: data }),
+
+  // Invite codes (admin-managed, public-redeemable)
+  listInviteCodes: () => request('/invite-codes'),
+  createInviteCode: (data) => request('/invite-codes', { method: 'POST', body: data }),
+  revokeInviteCode: (id) => request(`/invite-codes/${id}`, { method: 'DELETE' }),
 };

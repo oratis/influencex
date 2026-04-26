@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../AuthContext';
 import { useI18n } from '../i18n';
+import PasswordInput from '../components/PasswordInput';
 
 // Login-only page. Account creation is invite-only — admins send invitation
 // links handled by AcceptInvitePage (/accept-invite?token=...).
@@ -97,10 +98,9 @@ export default function AuthPage() {
               />
             </div>
             <div className="form-group">
-              <label className="form-label">{t('auth.password')}</label>
-              <input
-                className="form-input"
-                type="password"
+              <label className="form-label" htmlFor="auth-password">{t('auth.password')}</label>
+              <PasswordInput
+                id="auth-password"
                 placeholder={t('auth.password_placeholder')}
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
@@ -120,6 +120,20 @@ export default function AuthPage() {
               {loading ? t('auth.signing_in') : t('auth.sign_in')}
             </button>
           </form>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: '#888', fontSize: 12 }}>
+            <div style={{ flex: 1, height: 1, background: '#333' }} />
+            <span>{t('auth.divider_or')}</span>
+            <div style={{ flex: 1, height: 1, background: '#333' }} />
+          </div>
+
+          <a
+            href="#/signup"
+            className="btn btn-secondary auth-submit"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', textDecoration: 'none' }}
+          >
+            {t('auth.have_invite_code_btn')}
+          </a>
 
           <div className="auth-footer">
             <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', marginTop: 12 }}>

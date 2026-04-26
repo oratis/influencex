@@ -1,4 +1,5 @@
 import React, { useState, useCallback, createContext, useContext } from 'react';
+import { useI18n } from '../i18n';
 
 const ConfirmContext = createContext();
 
@@ -7,19 +8,36 @@ export function useConfirm() {
 }
 
 export function ConfirmProvider({ children }) {
+  const { t } = useI18n();
   const [state, setState] = useState(null);
 
-  const confirm = useCallback((message, { title = 'Confirm', confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) => {
+  const confirm = useCallback((message, { title, confirmText, cancelText, danger = false } = {}) => {
     return new Promise((resolve) => {
-      setState({ message, title, confirmText, cancelText, danger, resolve });
+      setState({
+        message,
+        title: title || t('common.confirm'),
+        confirmText: confirmText || t('common.confirm'),
+        cancelText: cancelText || t('common.cancel'),
+        danger,
+        resolve,
+      });
     });
-  }, []);
+  }, [t]);
 
-  const prompt = useCallback((message, { title = 'Input', placeholder = '', defaultValue = '', confirmText = 'OK' } = {}) => {
+  const prompt = useCallback((message, { title, placeholder = '', defaultValue = '', confirmText } = {}) => {
     return new Promise((resolve) => {
-      setState({ message, title, confirmText, cancelText: 'Cancel', resolve, isPrompt: true, placeholder, defaultValue });
+      setState({
+        message,
+        title: title || t('common.input'),
+        confirmText: confirmText || t('common.ok'),
+        cancelText: t('common.cancel'),
+        resolve,
+        isPrompt: true,
+        placeholder,
+        defaultValue,
+      });
     });
-  }, []);
+  }, [t]);
 
   const handleClose = (result) => {
     state?.resolve(result);
@@ -35,6 +53,7 @@ export function ConfirmProvider({ children }) {
 }
 
 function ConfirmModal({ state, onClose }) {
+  const { t } = useI18n();
   const [inputValue, setInputValue] = useState(state.defaultValue || '');
 
   return (
@@ -42,7 +61,7 @@ function ConfirmModal({ state, onClose }) {
       <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '440px' }}>
         <div className="modal-header">
           <h3>{state.title}</h3>
-          <button className="btn-icon" onClick={() => onClose(state.isPrompt ? null : false)} aria-label="Close" title="Close">✕</button>
+          <button className="btn-icon" onClick={() => onClose(state.isPrompt ? null : false)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
         </div>
         <div className="modal-body">
           <p style={{ fontSize: '14px', lineHeight: '1.5', color: 'var(--text-secondary)' }}>{state.message}</p>

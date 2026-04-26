@@ -165,13 +165,15 @@ const sendEmailWorkspaceLimiter = rateLimit({
 
 // ==================== Auth API ====================
 
-// Public /api/auth/register is intentionally removed — the platform is
-// invite-only. New accounts are created by accepting an invitation via
-// POST /api/invitations/:token/accept. The 410 Gone status makes it
-// explicit to any old client code (or probe) that the endpoint is dead.
+// Public /api/auth/register without an invite code is intentionally removed —
+// the platform is invite-only. Two valid signup paths exist:
+//   1) POST /api/auth/register-with-code  — uses an admin-generated invite code
+//   2) POST /api/invitations/:token/accept — uses a per-email invitation link
+// The 410 Gone status makes it explicit to any old client code (or probe)
+// that the legacy endpoint is dead.
 app.post(`${BASE_PATH}/api/auth/register`, (req, res) => {
   res.status(410).json({
-    error: 'Public registration is disabled. Ask a workspace admin to invite you.',
+    error: 'Public registration is disabled. Use an invite code at /signup or ask a workspace admin for an invite link.',
     code: 'REGISTRATION_DISABLED',
   });
 });
@@ -182,6 +184,11 @@ app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
     const result = await loginUser(email, password);
     if (result.error) return res.status(401).json({ error: result.error });
+
+    // Safety net: if the user has zero workspaces (e.g. orphaned account),
+    // auto-create one. This prevents the "no workspace" limbo where every
+    // /api/* call fails with `Workspace context required`.
+    await ensureUserHasWorkspace(result.user.id, result.user.name || result.user.email);
 
     // Enrich with workspace info so the client can populate the switcher
     // immediately and the session has a default workspace to scope requests.
@@ -211,6 +218,8 @@ app.get(`${BASE_PATH}/api/auth/me`, async (req, res) => {
     const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
     const user = await getSession(token);
     if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    // Safety net for orphaned sessions whose workspace was deleted.
+    await ensureUserHasWorkspace(user.id, user.name || user.email);
     const workspaces = await listUserWorkspaces(user.id);
     const currentWorkspaceId = workspaces[0]?.id || null;
     res.json({ ...user, workspaces, currentWorkspaceId });
@@ -533,6 +542,208 @@ app.post(`${BASE_PATH}/api/invitations/:token/accept`, authLimiter, async (req, 
 
     // Auto-login so the client can hop straight into the app.
     const login = await loginUser(invite.email, password);
+    res.json(login);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Invite Codes (admin-managed, public-redeemable) ====================
+//
+// Distinct from per-email `invitations`: invite_codes are generic, sharable
+// strings that any new user can use to register. Only platform admins
+// (users.role = 'admin') can create them. Each code targets a specific
+// workspace + role; redeeming creates the user and joins them in one step.
+
+function generateInviteCode() {
+  // Format: INFLX-XXXXXXXX (8-char base32; ~40 bits of entropy). Avoids
+  // ambiguous chars (0/O, 1/I/L) so users can read codes off chat or paper.
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 8; i++) {
+    s += alphabet[crypto.randomInt(0, alphabet.length)];
+  }
+  return `INFLX-${s}`;
+}
+
+// Admin-only: create a new invite code.
+// Body: { workspaceId, role?, maxUses?, expiresInDays?, note? }
+app.post(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only platform admins can create invite codes' });
+    }
+    const { workspaceId, role = 'editor', maxUses = 1, expiresInDays, note } = req.body || {};
+    if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required' });
+    if (!['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+    const uses = parseInt(maxUses, 10);
+    if (!Number.isFinite(uses) || uses < 1 || uses > 1000) return res.status(400).json({ error: 'maxUses must be between 1 and 1000' });
+
+    const ws = await queryOne('SELECT id FROM workspaces WHERE id = ?', [workspaceId]);
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+
+    let expiresAt = null;
+    if (expiresInDays != null) {
+      const days = parseInt(expiresInDays, 10);
+      if (!Number.isFinite(days) || days < 1 || days > 365) return res.status(400).json({ error: 'expiresInDays must be between 1 and 365' });
+      expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    // Try a few times in the rare case of code collision.
+    let code = null;
+    for (let i = 0; i < 5; i++) {
+      const candidate = generateInviteCode();
+      const dup = await queryOne('SELECT id FROM invite_codes WHERE code = ?', [candidate]);
+      if (!dup) { code = candidate; break; }
+    }
+    if (!code) return res.status(500).json({ error: 'Could not generate unique invite code, try again' });
+
+    const id = uuidv4();
+    await exec(
+      `INSERT INTO invite_codes (id, code, workspace_id, role, max_uses, used_count, expires_at, note, created_by)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      [id, code, workspaceId, role, uses, expiresAt, note || null, req.user.id]
+    );
+
+    res.json({
+      id, code, workspace_id: workspaceId, role, max_uses: uses, used_count: 0,
+      expires_at: expiresAt, note: note || null, created_by: req.user.id, created_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin-only: list all invite codes (across all workspaces).
+app.get(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only platform admins can list invite codes' });
+    }
+    const result = await query(
+      `SELECT ic.*, w.name AS workspace_name, u.email AS created_by_email
+       FROM invite_codes ic
+       LEFT JOIN workspaces w ON ic.workspace_id = w.id
+       LEFT JOIN users u ON ic.created_by = u.id
+       ORDER BY ic.created_at DESC`
+    );
+    res.json({ codes: result.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin-only: revoke (soft-delete) an invite code.
+app.delete(`${BASE_PATH}/api/invite-codes/:id`, authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only platform admins can revoke invite codes' });
+    }
+    const ic = await queryOne('SELECT id, revoked_at FROM invite_codes WHERE id = ?', [req.params.id]);
+    if (!ic) return res.status(404).json({ error: 'Invite code not found' });
+    if (ic.revoked_at) return res.json({ success: true, already_revoked: true });
+    await exec('UPDATE invite_codes SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Public: look up an invite code (no auth needed). Returns workspace name +
+// remaining uses so the signup page can show context. Does NOT reveal the
+// creator email or full audit trail.
+app.get(`${BASE_PATH}/api/invite-codes/lookup/:code`, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!code) return res.status(400).json({ error: 'Code is required', code: 'CODE_REQUIRED' });
+    const ic = await queryOne(
+      `SELECT ic.id, ic.code, ic.role, ic.max_uses, ic.used_count, ic.expires_at, ic.revoked_at, w.name AS workspace_name
+       FROM invite_codes ic LEFT JOIN workspaces w ON ic.workspace_id = w.id
+       WHERE ic.code = ?`,
+      [code]
+    );
+    if (!ic) return res.status(404).json({ error: 'Invite code not found', code: 'CODE_NOT_FOUND' });
+    if (ic.revoked_at) return res.status(410).json({ error: 'This invite code has been revoked', code: 'CODE_REVOKED' });
+    if (ic.expires_at && new Date(ic.expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This invite code has expired', code: 'CODE_EXPIRED' });
+    }
+    if (ic.used_count >= ic.max_uses) {
+      return res.status(410).json({ error: 'This invite code has reached its usage limit', code: 'CODE_EXHAUSTED' });
+    }
+    res.json({
+      code: ic.code,
+      workspace_name: ic.workspace_name,
+      role: ic.role,
+      remaining_uses: ic.max_uses - ic.used_count,
+      expires_at: ic.expires_at,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Public: register a new account using an invite code.
+// Body: { code, email, password, name }
+app.post(`${BASE_PATH}/api/auth/register-with-code`, authLimiter, async (req, res) => {
+  try {
+    const { code: rawCode, email, password, name } = req.body || {};
+    const code = String(rawCode || '').trim().toUpperCase();
+    if (!code) return res.status(400).json({ error: 'Invite code is required', code: 'CODE_REQUIRED' });
+    if (!email || !password || !name) return res.status(400).json({ error: 'email, password, and name are required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    // Re-validate the code under the same rules as /lookup, then atomically
+    // increment used_count. SQLite + Postgres both honor row-level updates so
+    // a SELECT-then-UPDATE-WHERE-used_count<max is the simplest way to keep
+    // two concurrent redemptions from over-consuming.
+    const ic = await queryOne(
+      `SELECT id, workspace_id, role, max_uses, used_count, expires_at, revoked_at
+       FROM invite_codes WHERE code = ?`,
+      [code]
+    );
+    if (!ic) return res.status(404).json({ error: 'Invite code not found', code: 'CODE_NOT_FOUND' });
+    if (ic.revoked_at) return res.status(410).json({ error: 'Invite code revoked', code: 'CODE_REVOKED' });
+    if (ic.expires_at && new Date(ic.expires_at) < new Date()) {
+      return res.status(410).json({ error: 'Invite code expired', code: 'CODE_EXPIRED' });
+    }
+    if (ic.used_count >= ic.max_uses) {
+      return res.status(410).json({ error: 'Invite code exhausted', code: 'CODE_EXHAUSTED' });
+    }
+
+    const dup = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
+    if (dup) return res.status(409).json({ error: 'An account with this email already exists — log in instead', code: 'EMAIL_EXISTS' });
+
+    // Reserve a use first (optimistic lock). If this UPDATE didn't bump the
+    // counter (because another request beat us), bail out before creating
+    // the user.
+    const before = ic.used_count;
+    await exec(
+      `UPDATE invite_codes SET used_count = used_count + 1
+       WHERE id = ? AND used_count = ? AND used_count < max_uses`,
+      [ic.id, before]
+    );
+    const after = await queryOne('SELECT used_count FROM invite_codes WHERE id = ?', [ic.id]);
+    if (!after || after.used_count !== before + 1) {
+      return res.status(409).json({ error: 'Code was just used by someone else, please try again', code: 'CODE_RACE' });
+    }
+
+    const created = await registerUser(email, password, name);
+    if (created.error) {
+      // Roll back the use we reserved so the code isn't burned.
+      await exec('UPDATE invite_codes SET used_count = used_count - 1 WHERE id = ?', [ic.id]);
+      return res.status(400).json({ error: created.error });
+    }
+
+    await exec(
+      'INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)',
+      [ic.workspace_id, created.id, ic.role, null]
+    );
+    await exec(
+      'INSERT INTO invite_code_redemptions (id, invite_code_id, user_id, email) VALUES (?, ?, ?, ?)',
+      [uuidv4(), ic.id, created.id, email]
+    );
+
+    const login = await loginUser(email, password);
     res.json(login);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -5280,16 +5491,65 @@ app.use(BASE_PATH, (req, res, next) => {
 });
 
 // ==================== Auto-setup on startup ====================
+// Idempotent: make sure the user owns at least one workspace. Returns the
+// workspace_id of an existing membership if any, otherwise creates a new
+// workspace (and membership as admin) and returns its id. Used at login,
+// auth/me, and after invite-code redemption so a brand-new user never lands
+// in an "no workspace" limbo state that breaks every /api/* call.
+async function ensureUserHasWorkspace(userId, displayName) {
+  const existing = await queryOne(
+    'SELECT workspace_id FROM workspace_members WHERE user_id = ? LIMIT 1',
+    [userId]
+  );
+  if (existing) return existing.workspace_id;
+
+  const wsId = uuidv4();
+  const baseName = (displayName || 'My').toString().split('@')[0];
+  const slug = (baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'workspace')
+    + '-' + wsId.replace(/-/g, '').slice(0, 6);
+  const wsName = `${baseName}'s workspace`;
+  await exec(
+    'INSERT INTO workspaces (id, name, slug, owner_user_id, plan) VALUES (?, ?, ?, ?, ?)',
+    [wsId, wsName, slug, userId, 'starter']
+  );
+  await exec(
+    'INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)',
+    [wsId, userId, 'admin']
+  );
+  log.info(`[onboarding] auto-created workspace "${wsName}" for user ${userId}`);
+  return wsId;
+}
+
 async function initializeDefaultData() {
-  // Create default admin account from env vars (skip if not configured)
+  // Create default admin account from env vars (skip if not configured).
+  // Promotes the user to role='admin' so they can manage invite codes and
+  // perform other platform-admin actions. If the user already exists but
+  // isn't an admin, we still upgrade them — env vars are the source of truth.
   const adminEmail = process.env.ADMIN_EMAIL;
   const adminPassword = process.env.ADMIN_PASSWORD;
   const adminName = process.env.ADMIN_NAME || 'Admin';
   if (adminEmail && adminPassword) {
-    const existing = await queryOne('SELECT id FROM users WHERE email = ?', [adminEmail]);
+    const existing = await queryOne('SELECT id, role FROM users WHERE email = ?', [adminEmail]);
+    let userId;
     if (!existing) {
-      await registerUser(adminEmail, adminPassword, adminName);
-      console.log(`Default admin account created: ${adminEmail}`);
+      const created = await registerUser(adminEmail, adminPassword, adminName);
+      if (!created.error) {
+        await exec('UPDATE users SET role = ? WHERE id = ?', ['admin', created.id]);
+        userId = created.id;
+        console.log(`Default admin account created: ${adminEmail}`);
+      }
+    } else {
+      userId = existing.id;
+      if (existing.role !== 'admin') {
+        await exec('UPDATE users SET role = ? WHERE id = ?', ['admin', existing.id]);
+        console.log(`Promoted ${adminEmail} to admin role`);
+      }
+    }
+    // Make sure the bootstrap admin always has a workspace they own. Without
+    // this, the first login lands in "no workspace" limbo and every page
+    // breaks with `Workspace context required`.
+    if (userId) {
+      await ensureUserHasWorkspace(userId, adminName);
     }
   }
 
