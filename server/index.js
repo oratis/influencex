@@ -824,10 +824,12 @@ const WORKSPACE_SKIP_PREFIXES = [
   '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
   '/quota/', '/cache/', '/queue/', '/apify/',
   '/query/', '/scheduler/', '/stats',
-  '/publish/oauth/', // OAuth callbacks resolve workspace from state row
   '/mailboxes/oauth/gmail/callback', // Gmail OAuth callback resolves workspace from state
 ];
 app.use(`${BASE_PATH}/api`, (req, res, next) => {
+  // OAuth callbacks resolve workspace from the state row (no auth, no headers).
+  // The /init endpoint, in contrast, IS authenticated and requires workspace context.
+  if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
   if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
     return next();
   }
