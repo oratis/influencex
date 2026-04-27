@@ -1,4 +1,5 @@
 import React from 'react';
+import * as sentry from '../sentry';
 
 // Catches render-time exceptions in children. Falls back to a simple card
 // with reload + optional reset. Keep this a class component — hooks can't
@@ -17,6 +18,7 @@ class ErrorBoundary extends React.Component {
     if (typeof window !== 'undefined' && window.console) {
       console.error('[ErrorBoundary] caught:', error, info?.componentStack);
     }
+    sentry.captureException(error, { extra: { componentStack: info?.componentStack } });
   }
 
   handleReload = () => {

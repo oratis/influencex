@@ -1,4 +1,10 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+
+// Sentry MUST be initialized before any other module that we want traced.
+// Without SENTRY_DSN this is a silent no-op so dev / sandbox runs unchanged.
+const sentry = require('./sentry');
+sentry.init();
+
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
@@ -197,6 +203,8 @@ app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
     // immediately and the session has a default workspace to scope requests.
     const workspaces = await listUserWorkspaces(result.user.id);
     const currentWorkspaceId = workspaces[0]?.id || null;
+
+    sentry.setUser({ id: result.user.id, email: result.user.email });
 
     res.json({ ...result, workspaces, currentWorkspaceId });
   } catch (e) {
@@ -5759,6 +5767,18 @@ function detectCategoryForDiscovery(text) {
   for (const c of cats) { const s = c.kw.filter(k => lower.includes(k)).length; if (s > best.score) best = { name: c.name, score: s }; }
   return best.name;
 }
+
+// Admin-only debug endpoint to verify Sentry wiring in prod. Throws a
+// synthetic error which the Sentry middleware below should capture.
+app.get(`${BASE_PATH}/api/admin/sentry-debug`, authMiddleware, (req, res, next) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'admin only' });
+  // The thrown error gets picked up by sentry.setupExpressErrorHandler.
+  throw new Error('[sentry-debug] synthetic error from /api/admin/sentry-debug');
+});
+
+// Sentry error handler must come AFTER all route handlers but BEFORE the
+// SPA fallback / any other 404 handler. No-op when SENTRY_DSN is unset.
+sentry.setupExpressErrorHandler(app);
 
 // SPA fallback - use middleware approach for Express 5 compatibility
 app.use(BASE_PATH, (req, res, next) => {

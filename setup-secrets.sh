@@ -56,6 +56,8 @@ SECRET_NAMES=(
   MODASH_API_KEY
   SERPAPI_API_KEY
   YOUTUBE_API_KEY
+  # Observability
+  SENTRY_DSN
   # SSO
   GOOGLE_OAUTH_CLIENT_SECRET
   # Publishing OAuth secrets

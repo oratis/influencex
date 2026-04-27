@@ -35,6 +35,7 @@
   "type": "commonjs",
   "dependencies": {
     "@google-analytics/data": "^5.2.1",
+    "@sentry/node": "^9.47.1",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "compression": "^1.8.1",

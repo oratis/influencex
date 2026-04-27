@@ -59,6 +59,13 @@ STRIPE_SECRET_KEY=STRIPE_SECRET_KEY:latest,\
 STRIPE_WEBHOOK_SECRET=STRIPE_WEBHOOK_SECRET:latest,\
 DATABASE_URL=DATABASE_URL:latest\
 "
+# Optional: enable Sentry by uncommenting the line below AFTER running
+# setup-secrets.sh with SENTRY_DSN set in your .env. The Cloud Run deploy
+# will fail if the secret doesn't yet exist, so create it first.
+#   SENTRY_DSN=SENTRY_DSN:latest,\
+# (Append the line above into the SECRETS_CSV string — keep the trailing
+#  comma + backslash. Without SENTRY_DSN the server runs with Sentry as a
+#  no-op, no behavior change.)
 
 # Non-sensitive env vars. OAuth client IDs, CORS, LLM routing, mail sender
 # identity, public sheet IDs — none of these are secrets (they're visible to
