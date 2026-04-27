@@ -369,4 +369,8 @@ export const api = {
 
   // Reviews + sentiment harvest (Phase D)
   harvestReviews: (data) => request('/reviews/harvest', { method: 'POST', body: data }),
+
+  // Discovery results — export + save-to-KOL-Database
+  exportDiscoveryResultsUrl: (jobId) => `${BASE}/discovery/jobs/${jobId}/export`,
+  saveDiscoveryResultsToDb: (jobId, data) => request(`/discovery/jobs/${jobId}/save-to-db`, { method: 'POST', body: data }),
 };

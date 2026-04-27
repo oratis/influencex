@@ -5342,6 +5342,86 @@ app.get(`${BASE_PATH}/api/discovery/jobs`, async (req, res) => {
 });
 
 // Get a discovery job + its results — scoped to caller's workspace.
+// Save selected discovery results into the workspace's KOL Database
+// WITHOUT triggering an outreach pipeline. Useful when the user wants to
+// shelf candidates for later — alternative to /process which queues emails.
+//
+// Body: { result_ids: [...] }   (or empty / omitted = save all "found")
+// Returns counts of inserted vs skipped (already-existing handle).
+app.post(`${BASE_PATH}/api/discovery/jobs/:id/save-to-db`, async (req, res) => {
+  try {
+    const job = await queryOne(
+      'SELECT id FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const { result_ids } = req.body || {};
+    let rows;
+    if (Array.isArray(result_ids) && result_ids.length > 0) {
+      const placeholders = result_ids.map(() => '?').join(',');
+      const r = await query(
+        `SELECT * FROM discovery_results WHERE job_id=? AND id IN (${placeholders})`,
+        [job.id, ...result_ids]
+      );
+      rows = r.rows;
+    } else {
+      const r = await query(
+        "SELECT * FROM discovery_results WHERE job_id=? AND status='found'",
+        [job.id]
+      );
+      rows = r.rows;
+    }
+
+    let inserted = 0, skipped = 0;
+    for (const r of rows) {
+      const username = r.channel_url.split('/').pop().replace(/^@/, '');
+      const existing = await queryOne(
+        'SELECT id FROM kol_database WHERE workspace_id = ? AND platform = ? AND username = ?',
+        [req.workspace.id, r.platform, username]
+      );
+      if (existing) { skipped++; continue; }
+      try {
+        await exec(
+          `INSERT INTO kol_database (id, workspace_id, platform, username, display_name, profile_url,
+              followers, ai_score, scrape_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+          [uuidv4(), req.workspace.id, r.platform, username, r.channel_name || username,
+           r.channel_url, r.subscribers || 0, r.relevance_score || null]
+        );
+        inserted++;
+      } catch (e) {
+        if (/UNIQUE|duplicate/i.test(e.message)) skipped++;
+        else throw e;
+      }
+    }
+
+    res.json({ success: true, total: rows.length, inserted, skipped });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Export the candidate list of a discovery job to CSV. Uses the
+// `discoveryResults` column preset so the file's columns match the on-screen
+// table users see in DiscoveryPage.
+app.get(`${BASE_PATH}/api/discovery/jobs/:id/export`, exportLimiter, async (req, res) => {
+  try {
+    const job = await queryOne(
+      'SELECT id, status FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const r = await query(
+      'SELECT * FROM discovery_results WHERE job_id=? ORDER BY relevance_score DESC, subscribers DESC',
+      [job.id]
+    );
+    sendCsv(res, r.rows || [], csvExport.COLUMNS.discoveryResults, `discovery-${req.params.id.slice(0, 8)}.csv`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get(`${BASE_PATH}/api/discovery/jobs/:id`, async (req, res) => {
   try {
     const job = await queryOne(

@@ -98,6 +98,17 @@ const COLUMNS = {
     { key: 'shares', label: 'Shares' },
     { key: 'kol_name', label: 'Creator' },
   ],
+
+  discoveryResults: [
+    { key: 'platform', label: 'Platform' },
+    { key: 'channel_name', label: 'Creator' },
+    { key: 'channel_url', label: 'Profile URL' },
+    { key: 'subscribers', label: 'Followers' },
+    { key: 'relevance_score', label: 'Score' },
+    { key: 'email', label: 'Email' },
+    { key: 'status', label: 'Status' },
+    { key: 'created_at', label: 'Found At', format: formatDateTime },
+  ],
 };
 
 module.exports = { toCsv, formatDateTime, COLUMNS };

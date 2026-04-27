@@ -97,6 +97,26 @@ export default function DiscoveryPage() {
     setImporting(false);
   }
 
+  async function handleSaveToDb() {
+    if (!job?.id) return;
+    setImporting(true);
+    try {
+      const ids = selectedIds.size > 0 ? Array.from(selectedIds) : null;
+      const r = await api.saveDiscoveryResultsToDb(job.id, ids ? { result_ids: ids } : {});
+      toast.success(t('discovery.saved_to_db', { inserted: r.inserted, skipped: r.skipped }));
+      setSelectedIds(new Set());
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setImporting(false);
+  }
+
+  function handleExportCsv() {
+    if (!job?.id) return;
+    api.downloadCsv(`/discovery/jobs/${job.id}/export`, `discovery-${job.id.slice(0, 8)}.csv`)
+      .catch(e => toast.error(e.message));
+  }
+
   function pollJob(jobId) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
@@ -223,14 +243,30 @@ export default function DiscoveryPage() {
 
       {results.length > 0 && (
         <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
             <h3 style={{ fontSize: 15, margin: 0 }}>{t('discovery.results_title')}</h3>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {selectedIds.size > 0 && (
                 <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                   {t('discovery.selected_count', { count: selectedIds.size })}
                 </span>
               )}
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={handleExportCsv}
+                disabled={!job?.id}
+                title={t('discovery.export_csv_title')}
+              >
+                {t('discovery.export_csv')}
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={handleSaveToDb}
+                disabled={importing || !job?.id}
+                title={t('discovery.save_to_db_title')}
+              >
+                {t('discovery.save_to_db_btn')}
+              </button>
               <button
                 className="btn btn-primary btn-sm"
                 onClick={handleBulkAdd}
