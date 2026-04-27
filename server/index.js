@@ -3253,6 +3253,88 @@ app.patch(`${BASE_PATH}/api/inbox-messages/:id`, async (req, res) => {
   }
 });
 
+// Sync comments from Instagram / TikTok URLs into inbox_messages via Apify.
+// Body: { platform: 'instagram' | 'tiktok', urls: ['...', ...], limit_per?: 50 }
+// Idempotent — the (workspace_id, platform, external_id) unique index prevents
+// dups on re-sync. Returns counts of inserted vs skipped.
+app.post(`${BASE_PATH}/api/inbox-messages/sync-apify`, async (req, res) => {
+  try {
+    const commentHarvest = require('./comment-harvest');
+    const { platform, urls, limit_per = 50 } = req.body || {};
+    if (!platform || !['instagram', 'tiktok'].includes(platform)) {
+      return res.status(400).json({ error: 'platform must be instagram or tiktok' });
+    }
+    if (!Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ error: 'urls array required' });
+    }
+    if (urls.length > 20) return res.status(400).json({ error: 'Max 20 URLs per sync', code: 'TOO_MANY_URLS' });
+
+    const harvest = platform === 'instagram'
+      ? await commentHarvest.harvestInstagramComments({
+          postUrls: urls,
+          limitPerPost: Math.min(parseInt(limit_per, 10) || 50, 200),
+          workspaceId: req.workspace.id,
+        })
+      : await commentHarvest.harvestTikTokComments({
+          videoUrls: urls,
+          limitPerVideo: Math.min(parseInt(limit_per, 10) || 50, 200),
+          workspaceId: req.workspace.id,
+        });
+
+    if (!harvest.success) {
+      return res.status(502).json({ error: harvest.error || 'Apify harvest failed', code: 'HARVEST_FAILED' });
+    }
+
+    let inserted = 0, skipped = 0;
+    for (const c of harvest.comments) {
+      try {
+        const id = uuidv4();
+        await exec(
+          `INSERT INTO inbox_messages (id, workspace_id, platform, kind, external_id,
+                  author_handle, author_name, text, url, occurred_at, fetched_at, raw)
+           VALUES (?, ?, ?, 'comment', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+          [id, req.workspace.id, platform, c.external_id || null,
+           c.author_handle || null, c.author_name || null, c.body || null,
+           c.source_url || null, c.created_at || null, JSON.stringify(c).slice(0, 4000)]
+        );
+        inserted++;
+      } catch (e) {
+        // UNIQUE violation = already synced, skip silently
+        if (/UNIQUE|duplicate/i.test(e.message)) skipped++;
+        else throw e;
+      }
+    }
+
+    res.json({ success: true, total: harvest.comments.length, inserted, skipped });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Standalone review harvest (no LLM analysis, returns reviews + rule-based
+// sentiment summary). Cheaper than running review-miner if you just want the
+// raw data. Body: { source: 'steam'|'app-store'|'play-store', app_id, country?, limit? }
+app.post(`${BASE_PATH}/api/reviews/harvest`, async (req, res) => {
+  try {
+    const reviewHarvest = require('./review-harvest');
+    const { source, app_id, country = 'us', limit = 200 } = req.body || {};
+    if (!source || !app_id) return res.status(400).json({ error: 'source + app_id required' });
+    const cappedLimit = Math.min(parseInt(limit, 10) || 200, 500);
+
+    let r;
+    const opts = { appId: app_id, country, limit: cappedLimit, workspaceId: req.workspace.id };
+    if (source === 'steam') r = await reviewHarvest.harvestSteamReviews(opts);
+    else if (source === 'app-store') r = await reviewHarvest.harvestAppStoreReviews(opts);
+    else if (source === 'play-store') r = await reviewHarvest.harvestPlayStoreReviews(opts);
+    else return res.status(400).json({ error: 'source must be steam, app-store, or play-store' });
+
+    if (!r.success) return res.status(502).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/ads/plan — synchronous wrapper around the ads agent.
 // Returns { plan, cost, runId } once the agent finishes, or 400 on validation /
 // 504 on timeout. The underlying run is still persisted to agent_runs /
@@ -5289,13 +5371,28 @@ app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, async (req, res) => {
     );
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
-    const { min_relevance = 30, max_process = 10 } = req.body;
+    const { min_relevance = 30, max_process = 10, result_ids } = req.body;
 
-    const resultsResult = await query(
-      "SELECT * FROM discovery_results WHERE job_id=? AND status='found' AND relevance_score >= ? ORDER BY relevance_score DESC LIMIT ?",
-      [job.id, min_relevance, max_process]
-    );
-    const results = resultsResult.rows;
+    // Two modes:
+    //   1. Top-N by score (legacy): { min_relevance, max_process }
+    //   2. Explicit selection from UI: { result_ids: [...] }
+    // When result_ids is present, it wins — the user has hand-picked these.
+    let results;
+    if (Array.isArray(result_ids) && result_ids.length > 0) {
+      // Build a placeholder list. SQLite + Postgres both accept "?, ?, ?".
+      const placeholders = result_ids.map(() => '?').join(',');
+      const r = await query(
+        `SELECT * FROM discovery_results WHERE job_id=? AND status='found' AND id IN (${placeholders})`,
+        [job.id, ...result_ids]
+      );
+      results = r.rows;
+    } else {
+      const r = await query(
+        "SELECT * FROM discovery_results WHERE job_id=? AND status='found' AND relevance_score >= ? ORDER BY relevance_score DESC LIMIT ?",
+        [job.id, min_relevance, max_process]
+      );
+      results = r.rows;
+    }
 
     // If the job has no campaign (shouldn't happen post-fix, but defensive),
     // fall back to the workspace's default campaign.

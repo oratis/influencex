@@ -13,6 +13,10 @@ export default function CommunityInboxPage() {
   const [selected, setSelected] = useState(null);
   const [draftBusy, setDraftBusy] = useState(false);
   const [fetchBusy, setFetchBusy] = useState(false);
+  const [showApifySync, setShowApifySync] = useState(false);
+  const [apifyPlatform, setApifyPlatform] = useState('instagram');
+  const [apifyUrls, setApifyUrls] = useState('');
+  const [apifyBusy, setApifyBusy] = useState(false);
   const [classifyBusy, setClassifyBusy] = useState(false);
   const toast = useToast();
 
@@ -45,6 +49,22 @@ export default function CommunityInboxPage() {
       await load();
     } catch (e) { toast.error(e.message); }
     setFetchBusy(false);
+  }
+
+  async function handleApifySync() {
+    const urls = apifyUrls.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    if (urls.length === 0) { toast.warning(t('inbox.apify_sync_urls_required')); return; }
+    setApifyBusy(true);
+    try {
+      const r = await api.syncInboxFromApify({ platform: apifyPlatform, urls, limit_per: 50 });
+      toast.success(t('inbox.apify_sync_done', { inserted: r.inserted, skipped: r.skipped }));
+      setShowApifySync(false);
+      setApifyUrls('');
+      await load();
+    } catch (e) {
+      toast.error(e.message);
+    }
+    setApifyBusy(false);
   }
 
   async function handleClassify() {
@@ -105,6 +125,9 @@ export default function CommunityInboxPage() {
           <p>{t('inbox.subtitle')}</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-secondary" onClick={() => setShowApifySync(true)}>
+            {t('inbox.btn_apify_sync')}
+          </button>
           <button className="btn btn-secondary" onClick={handleClassify} disabled={classifyBusy}>
             {classifyBusy ? t('inbox.btn_classifying') : t('inbox.btn_classify')}
           </button>
@@ -258,6 +281,56 @@ export default function CommunityInboxPage() {
           )}
         </div>
       </div>
+
+      {showApifySync && (
+        <div className="modal-overlay" onClick={() => setShowApifySync(false)} style={{ zIndex: 1500 }}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div className="modal-header">
+              <h3>{t('inbox.apify_sync_title')}</h3>
+              <button className="btn-icon" onClick={() => setShowApifySync(false)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+                {t('inbox.apify_sync_subtitle')}
+              </p>
+              <div className="form-group">
+                <label className="form-label" htmlFor="apify-platform">{t('inbox.apify_sync_platform')}</label>
+                <select
+                  id="apify-platform"
+                  className="form-input"
+                  value={apifyPlatform}
+                  onChange={e => setApifyPlatform(e.target.value)}
+                >
+                  <option value="instagram">Instagram</option>
+                  <option value="tiktok">TikTok</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label" htmlFor="apify-urls">{t('inbox.apify_sync_urls')}</label>
+                <textarea
+                  id="apify-urls"
+                  className="form-input"
+                  rows={5}
+                  placeholder={apifyPlatform === 'instagram'
+                    ? 'https://www.instagram.com/p/ABCDE/\nhttps://www.instagram.com/reel/XYZ/'
+                    : 'https://www.tiktok.com/@user/video/123\nhttps://www.tiktok.com/@user/video/456'}
+                  value={apifyUrls}
+                  onChange={e => setApifyUrls(e.target.value)}
+                />
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                  {t('inbox.apify_sync_hint')}
+                </p>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowApifySync(false)}>{t('common.cancel')}</button>
+              <button className="btn btn-primary" onClick={handleApifySync} disabled={apifyBusy}>
+                {apifyBusy ? t('common.loading') : t('inbox.apify_sync_submit')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

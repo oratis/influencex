@@ -28,6 +28,8 @@ export default function DiscoveryPage() {
   const [job, setJob] = useState(null);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState([]);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [importing, setImporting] = useState(false);
   const pollRef = useRef(null);
 
   useEffect(() => {
@@ -64,6 +66,35 @@ export default function DiscoveryPage() {
       toast.error(msg);
       setRunning(false);
     }
+  }
+
+  function toggleSelect(id) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds(prev => {
+      if (prev.size === results.length) return new Set();
+      return new Set(results.map(r => r.id).filter(Boolean));
+    });
+  }
+
+  async function handleBulkAdd() {
+    if (selectedIds.size === 0 || !job?.id) return;
+    setImporting(true);
+    try {
+      const r = await api.processDiscoveryResults(job.id, { result_ids: Array.from(selectedIds) });
+      toast.success(t('discovery.bulk_added', { count: r.processed || 0 }));
+      setSelectedIds(new Set());
+    } catch (e) {
+      const msg = e.code === 'NO_CAMPAIGN' ? t('discovery.no_campaign') : e.message;
+      toast.error(msg);
+    }
+    setImporting(false);
   }
 
   function pollJob(jobId) {
@@ -192,11 +223,35 @@ export default function DiscoveryPage() {
 
       {results.length > 0 && (
         <div className="card">
-          <h3 style={{ fontSize: 15, marginTop: 0, marginBottom: 12 }}>{t('discovery.results_title')}</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ fontSize: 15, margin: 0 }}>{t('discovery.results_title')}</h3>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {selectedIds.size > 0 && (
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {t('discovery.selected_count', { count: selectedIds.size })}
+                </span>
+              )}
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleBulkAdd}
+                disabled={selectedIds.size === 0 || importing}
+              >
+                {importing ? t('common.loading') : t('discovery.bulk_add_btn')}
+              </button>
+            </div>
+          </div>
           <div className="table-container">
             <table>
               <thead>
                 <tr>
+                  <th style={{ width: 40 }}>
+                    <input
+                      type="checkbox"
+                      aria-label={t('discovery.select_all')}
+                      checked={results.length > 0 && selectedIds.size === results.filter(r => r.id).length}
+                      onChange={toggleSelectAll}
+                    />
+                  </th>
                   <th>{t('discovery.col_username')}</th>
                   <th>{t('discovery.col_platform')}</th>
                   <th>{t('discovery.col_followers')}</th>
@@ -207,6 +262,16 @@ export default function DiscoveryPage() {
               <tbody>
                 {results.slice(0, 200).map((r, i) => (
                   <tr key={r.id || `${r.platform}-${r.username}-${i}`}>
+                    <td>
+                      {r.id ? (
+                        <input
+                          type="checkbox"
+                          aria-label={t('discovery.select_row')}
+                          checked={selectedIds.has(r.id)}
+                          onChange={() => toggleSelect(r.id)}
+                        />
+                      ) : null}
+                    </td>
                     <td>
                       <a href={r.profile_url || r.channel_url || '#'} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>
                         {r.display_name || r.channel_name || r.username}

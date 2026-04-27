@@ -14,6 +14,7 @@
 
 const llm = require('../llm');
 const { safeFetch } = require('../web/web-fetch');
+const reviewHarvest = require('../review-harvest');
 
 const SYSTEM_PROMPT = `You are a voice-of-customer analyst. Given product info (and optionally raw reviews), extract structured insights.
 
@@ -107,6 +108,11 @@ module.exports = {
         items: { type: 'string' },
         description: 'Optional: public review pages to fetch + mine (Trustpilot, Capterra, App Store RSS, etc). Max 5 URLs.',
       },
+      apify_steam_app_id: { type: 'string', description: 'Optional: Steam appId (e.g. "12210"). Pulls latest reviews via Apify.' },
+      apify_app_store_app_id: { type: 'string', description: 'Optional: App Store app ID. Pulls latest reviews via Apify.' },
+      apify_play_store_app_id: { type: 'string', description: 'Optional: Play Store package name (e.g. "com.example.app").' },
+      apify_country: { type: 'string', description: 'Optional country code for App / Play Store (default "us").' },
+      apify_review_limit: { type: 'number', description: 'Max reviews to pull per source (default 100, max 500).' },
       audience_context: { type: 'string' },
     },
   },
@@ -141,9 +147,40 @@ module.exports = {
       }
     }
 
+    // Optionally harvest reviews from app stores via Apify. Each source feeds
+    // a normalized review list into the corpus; we cap at 500 per source so
+    // huge AAA games don't blow the LLM context budget.
+    const apifyHarvests = [];
+    const limit = Math.min(parseInt(input.apify_review_limit, 10) || 100, 500);
+    const apifyCountry = input.apify_country || 'us';
+    const wsId = ctx?.workspaceId || ctx?.workspace_id || null;
+    if (input.apify_steam_app_id) {
+      ctx.emit('progress', { step: 'apify-steam', message: `Harvesting Steam reviews for app ${input.apify_steam_app_id}...` });
+      const r = await reviewHarvest.harvestSteamReviews({ appId: input.apify_steam_app_id, limit, workspaceId: wsId });
+      if (r.success) apifyHarvests.push({ source: `steam:${input.apify_steam_app_id}`, ...r });
+      else ctx.emit('progress', { step: 'apify-steam-fail', message: r.error });
+    }
+    if (input.apify_app_store_app_id) {
+      ctx.emit('progress', { step: 'apify-appstore', message: `Harvesting App Store reviews...` });
+      const r = await reviewHarvest.harvestAppStoreReviews({ appId: input.apify_app_store_app_id, country: apifyCountry, limit, workspaceId: wsId });
+      if (r.success) apifyHarvests.push({ source: `appstore:${input.apify_app_store_app_id}`, ...r });
+      else ctx.emit('progress', { step: 'apify-appstore-fail', message: r.error });
+    }
+    if (input.apify_play_store_app_id) {
+      ctx.emit('progress', { step: 'apify-playstore', message: `Harvesting Play Store reviews...` });
+      const r = await reviewHarvest.harvestPlayStoreReviews({ appId: input.apify_play_store_app_id, country: apifyCountry, limit, workspaceId: wsId });
+      if (r.success) apifyHarvests.push({ source: `playstore:${input.apify_play_store_app_id}`, ...r });
+      else ctx.emit('progress', { step: 'apify-playstore-fail', message: r.error });
+    }
+
+    const apifyText = apifyHarvests.flatMap(h =>
+      (h.reviews || []).map(r => `[${h.source} ⭐${r.rating} ${r.sentiment.label}] ${r.body}`)
+    ).join('\n\n');
+
     const combinedRaw = [
       input.raw_reviews || '',
       ...scraped.map(s => `--- FROM ${s.url} (${s.title || ''}) ---\n${s.text}`),
+      apifyText && `--- FROM Apify (${apifyHarvests.map(h => h.source).join(', ')}) ---\n${apifyText}`,
     ].filter(Boolean).join('\n\n');
 
     const hasData = !!combinedRaw.trim();
@@ -180,7 +217,10 @@ Extract insights. Call publish_review_insights.`;
 
     return {
       ...toolUse.input,
-      sources: { scraped_urls: scraped.map(s => ({ url: s.url, title: s.title })) },
+      sources: {
+        scraped_urls: scraped.map(s => ({ url: s.url, title: s.title })),
+        apify: apifyHarvests.map(h => ({ source: h.source, count: h.reviews?.length || 0, summary: h.summary })),
+      },
       cost: res.usage,
     };
   },

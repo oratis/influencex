@@ -363,4 +363,10 @@ export const api = {
     return request(`/admin/apify-runs${q ? '?' + q : ''}`);
   },
   reapApifyRuns: () => request('/admin/apify-runs/reap', { method: 'POST' }),
+
+  // Inbox sync via Apify (IG / TikTok comments)
+  syncInboxFromApify: (data) => request('/inbox-messages/sync-apify', { method: 'POST', body: data }),
+
+  // Reviews + sentiment harvest (Phase D)
+  harvestReviews: (data) => request('/reviews/harvest', { method: 'POST', body: data }),
 };
