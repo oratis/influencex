@@ -18,6 +18,8 @@ const dataAgent = require('./content-metrics');
 const discoveryAgent = require('./youtube-discovery');
 const igDiscovery = require('./instagram-discovery');
 const tiktokDiscovery = require('./tiktok-discovery');
+const xDiscovery = require('./x-discovery');
+const redditDiscovery = require('./reddit-discovery');
 const apifyQuota = require('./apify-quota');
 const youtubeQuota = require('./youtube-quota');
 const { runPendingMigrations } = require('./migrations');
@@ -26,6 +28,7 @@ const csvExport = require('./csv-export');
 const rbac = require('./rbac');
 const scheduler = require('./scheduler');
 const scheduledPublish = require('./scheduled-publish');
+const apifyWatchdog = require('./apify-watchdog');
 const { rateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
@@ -628,6 +631,35 @@ app.get(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
        ORDER BY ic.created_at DESC`
     );
     res.json({ codes: result.rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin-only: list recent Apify runs for ops debugging. Optional ?status=failed
+// or ?status=timeout to triage. Returns the latest 100 by default.
+app.get(`${BASE_PATH}/api/admin/apify-runs`, authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only platform admins can view Apify runs' });
+    }
+    const status = req.query.status || null;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const runs = await apifyWatchdog.listRecentRuns({ query }, { status, limit });
+    res.json({ runs, threshold_minutes: apifyWatchdog.STUCK_THRESHOLD_MINUTES });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin-only: trigger a watchdog sweep on demand (in addition to the cron).
+app.post(`${BASE_PATH}/api/admin/apify-runs/reap`, authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only platform admins can reap stuck runs' });
+    }
+    const r = await apifyWatchdog.reapStuckRuns({ exec, query });
+    res.json(r);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1567,6 +1599,84 @@ app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
     res.json({ success: true, recorded });
   } catch (e) {
     console.error('[Email Events] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==================== Apify webhooks (skeleton) ====================
+//
+// Apify can fire webhooks when an actor run finishes / fails / aborts. This
+// receiver verifies the optional shared secret and updates the apify_runs row
+// for the matching run_id. Used by the async run mode (Roadmap §4.1) — the
+// current sync mode bypasses this entirely, but having the endpoint live now
+// means we can switch any actor to async without another deploy.
+const APIFY_WEBHOOK_SECRET = process.env.APIFY_WEBHOOK_SECRET || '';
+
+function verifyApifySignature(req) {
+  if (!APIFY_WEBHOOK_SECRET) return true; // skip if not configured
+  const provided = req.headers['x-apify-webhook-signature'] || req.headers['apify-webhook-signature'] || '';
+  if (!provided) return false;
+  const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body));
+  const expected = crypto.createHmac('sha256', APIFY_WEBHOOK_SECRET).update(rawBody).digest('hex');
+  // Constant-time compare. Apify's signature is hex.
+  try {
+    return crypto.timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+app.post(`${BASE_PATH}/api/webhooks/apify`, async (req, res) => {
+  if (APIFY_WEBHOOK_SECRET && !verifyApifySignature(req)) {
+    console.warn('[apify-webhook] Invalid signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+  try {
+    // Apify webhook payload shape:
+    //   { eventType: 'ACTOR.RUN.SUCCEEDED' | '...FAILED' | '...ABORTED' | '...TIMED_OUT',
+    //     resource: { id, actId, status, defaultDatasetId, ... },
+    //     userId, createdAt, ... }
+    const evt = req.body || {};
+    const runId = evt.resource?.id;
+    const actorId = evt.resource?.actId;
+    const status = evt.resource?.status;
+
+    if (!runId) {
+      return res.status(400).json({ error: 'Missing resource.id', code: 'NO_RUN_ID' });
+    }
+
+    // Map Apify status → our internal status enum.
+    const statusMap = {
+      SUCCEEDED: 'succeeded',
+      FAILED: 'failed',
+      ABORTED: 'failed',
+      TIMED_OUT: 'timeout',
+      RUNNING: 'running',
+    };
+    const internalStatus = statusMap[status] || 'failed';
+
+    // Update the matching apify_runs row (by run_id Apify gave us). If we
+    // never recorded this run (e.g. webhook arrives for an actor we don't
+    // own), insert a new row so ops can still see the event.
+    const existing = await queryOne('SELECT id FROM apify_runs WHERE run_id = ? LIMIT 1', [runId]);
+    if (existing) {
+      await exec(
+        `UPDATE apify_runs SET status = ?, finished_at = CURRENT_TIMESTAMP,
+         result_summary = COALESCE(result_summary, ?), error_message = COALESCE(error_message, ?)
+         WHERE id = ?`,
+        [internalStatus, JSON.stringify({ via: 'webhook' }), evt.resource?.statusMessage || null, existing.id]
+      );
+    } else {
+      await exec(
+        `INSERT INTO apify_runs (id, actor_id, run_id, status, result_summary, started_at, finished_at)
+         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [uuidv4(), actorId || 'unknown', runId, internalStatus, JSON.stringify({ via: 'webhook', orphan: true })]
+      );
+    }
+
+    res.json({ ok: true, runId, status: internalStatus });
+  } catch (e) {
+    console.error('[apify-webhook] error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4469,7 +4579,7 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId, wo
   // === Stage 1: SCRAPE ===
   console.log(`[Pipeline ${jobId}] Stage 1: Scraping ${username} on ${platform}...`);
 
-  const scrapeResult = await scraper.scrapeProfile(profileUrl, platform, username);
+  const scrapeResult = await scraper.scrapeProfile(profileUrl, platform, username, { workspaceId });
 
   if (!scrapeResult.success) {
     await exec("UPDATE pipeline_jobs SET stage='error', error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", [scrapeResult.error, jobId]);
@@ -4963,12 +5073,28 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
                 keywords: searchKeywords,
                 maxResults: max_results || 50,
                 minSubscribers: min_subscribers || 1000,
+                workspaceId: req.workspace?.id,
               });
             } else if (platform === 'tiktok') {
               r = await tiktokDiscovery.searchTikTokHashtag({
                 keywords: searchKeywords,
                 maxResults: max_results || 50,
                 minSubscribers: min_subscribers || 1000,
+                workspaceId: req.workspace?.id,
+              });
+            } else if (platform === 'x') {
+              r = await xDiscovery.searchXKeyword({
+                keywords: searchKeywords,
+                maxResults: max_results || 50,
+                minSubscribers: min_subscribers || 1000,
+                workspaceId: req.workspace?.id,
+              });
+            } else if (platform === 'reddit') {
+              r = await redditDiscovery.searchRedditKeyword({
+                keywords: searchKeywords,
+                maxResults: max_results || 50,
+                minSubscribers: min_subscribers || 100,
+                workspaceId: req.workspace?.id,
               });
             } else {
               errors.push(`${platform}: unsupported`);
@@ -5294,7 +5420,7 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
                 // Scrape TikTok profile
                 try {
                   const profileUrl = `https://www.tiktok.com/@${ttUsername}`;
-                  const result = await scraper.scrapeTikTok(profileUrl, ttUsername);
+                  const result = await scraper.scrapeTikTok(profileUrl, ttUsername, { workspaceId: req.workspace?.id });
                   if (!result.success || !result.data) continue;
                   if (result.data.followers < minSubscribers) continue;
 
@@ -5464,6 +5590,7 @@ async function initializeDefaultData() {
       scheduledPublish.start({
         query, queryOne, exec, uuidv4, publishOauth, agentRuntime,
       });
+      apifyWatchdog.start({ exec, query });
       // Register all v2 agents with the runtime
       const registered = agentsV2.registerAll();
       console.log(`[agents-v2] Registered ${registered.length} agents: ${registered.join(', ')}`);
@@ -5696,7 +5823,7 @@ function extractUsernameFromUrl(url, platform) {
 async function scrapeAndEnrichKol(id, profileUrl, platform, username) {
   try {
     // Use real APIs to fetch profile data
-    const result = await scraper.scrapeProfile(profileUrl, platform, username);
+    const result = await scraper.scrapeProfile(profileUrl, platform, username, { workspaceId: req.workspace?.id });
 
     if (!result.success) {
       // API not configured or failed - mark with error, don't generate fake data

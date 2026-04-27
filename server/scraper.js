@@ -11,8 +11,42 @@
  */
 
 const fetch = require('./proxy-fetch');
+const apify = require('./apify-client');
+const apifyQuota = require('./apify-quota');
+const profileCache = require('./kol-profile-cache');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const MODASH_API_KEY = process.env.MODASH_API_KEY;
+
+// Lazy db facade for cache hits (avoid require cycles in tests).
+function getDb() {
+  try { return require('./database'); } catch { return null; }
+}
+
+// Convert Apify's flat KOL profile shape (from apify-client.js) into the
+// nested `{ success, data: {...} }` shape that scraper.js callers expect.
+// Reused by scrapeTikTok and scrapeInstagram fallback paths.
+function apifyToScraperResult(apifyResult) {
+  if (!apifyResult.success) return apifyResult;
+  return {
+    success: true,
+    source: 'apify',
+    data: {
+      display_name: apifyResult.display_name || apifyResult.username,
+      avatar_url: apifyResult.avatar_url || '',
+      bio: apifyResult.bio || '',
+      followers: apifyResult.followers || 0,
+      following: apifyResult.following || 0,
+      engagement_rate: 0,
+      avg_views: 0,
+      total_videos: apifyResult.total_videos || 0,
+      category: '',
+      country: '',
+      language: '',
+      email: apifyResult.email || null,
+      verified: apifyResult.verified || false,
+    },
+  };
+}
 
 // ==================== YouTube Data API v3 ====================
 
@@ -150,14 +184,42 @@ async function scrapeYouTube(profileUrl, username) {
 
 // ==================== TikTok (lightweight, no API key) ====================
 
-async function scrapeTikTok(profileUrl, username) {
+async function scrapeTikTok(profileUrl, username, opts = {}) {
   // TikTok has no free official API for profile data.
-  // Strategy:
-  // 1. Try fetching the profile page and extracting meta tags (og:image, description, etc.)
-  // 2. If MODASH_API_KEY is set, use Modash for full data
+  // Strategy (in priority order):
+  //   1. MODASH_API_KEY — paid, reliable
+  //   2. APIFY_TOKEN — pay-per-run, reliable (preferred fallback)
+  //   3. HTML page scrape with meta tags — best-effort, often partial
+
+  // Cache check first — same KOL within TTL_DAYS skips paid scraping.
+  const db = getDb();
+  if (db && opts.skipCache !== true) {
+    const cached = await profileCache.lookup(db, 'tiktok', username);
+    if (cached) {
+      return { success: true, source: cached.source, cached: true, data: cached.data };
+    }
+  }
 
   if (MODASH_API_KEY) {
-    return scrapeViaModash(username, 'tiktok');
+    const r = await scrapeViaModash(username, 'tiktok');
+    if (r.success && db) await profileCache.put(db, 'tiktok', username, r.data, 'modash');
+    return r;
+  }
+
+  if (apify.isConfigured()) {
+    const check = apifyQuota.canCall('clockworks/tiktok-scraper', 1, opts.workspaceId);
+    if (check.allowed) {
+      const r = await apify.scrapeTikTok(profileUrl, { workspaceId: opts.workspaceId });
+      if (r.success) {
+        apifyQuota.record('clockworks/tiktok-scraper', 1, opts.workspaceId);
+        const result = apifyToScraperResult(r);
+        if (db) await profileCache.put(db, 'tiktok', username, result.data, 'apify');
+        return result;
+      }
+      // fall through to HTML scrape on Apify failure
+    } else {
+      console.warn(`[apify] TikTok scrape blocked by quota (${check.reason}) for ws=${opts.workspaceId || '-'}`);
+    }
   }
 
   try {
@@ -272,16 +334,42 @@ async function scrapeTikTok(profileUrl, username) {
 
 // ==================== Instagram ====================
 
-async function scrapeInstagram(profileUrl, username) {
+async function scrapeInstagram(profileUrl, username, opts = {}) {
+  const db = getDb();
+  if (db && opts.skipCache !== true) {
+    const cached = await profileCache.lookup(db, 'instagram', username);
+    if (cached) {
+      return { success: true, source: cached.source, cached: true, data: cached.data };
+    }
+  }
+
   if (MODASH_API_KEY) {
-    return scrapeViaModash(username, 'instagram');
+    const r = await scrapeViaModash(username, 'instagram');
+    if (r.success && db) await profileCache.put(db, 'instagram', username, r.data, 'modash');
+    return r;
+  }
+
+  if (apify.isConfigured()) {
+    const check = apifyQuota.canCall('apify/instagram-profile-scraper', 1, opts.workspaceId);
+    if (!check.allowed) {
+      return { success: false, error: `Apify quota exceeded (${check.reason}). Try again tomorrow or raise APIFY_WORKSPACE_DAILY_RUN_QUOTA.` };
+    }
+    const r = await apify.scrapeInstagram(username, { workspaceId: opts.workspaceId });
+    if (r.success) {
+      apifyQuota.record('apify/instagram-profile-scraper', 1, opts.workspaceId);
+      const result = apifyToScraperResult(r);
+      if (db) await profileCache.put(db, 'instagram', username, result.data, 'apify');
+      return result;
+    }
+    // Instagram has no fallback below — surface the Apify error directly.
+    return r;
   }
 
   // Instagram aggressively blocks server-side requests.
-  // Without Modash or similar, we can only return what we extract from the URL.
+  // Without Modash or Apify, we cannot reliably fetch profile data.
   return {
     success: false,
-    error: 'Instagram requires MODASH_API_KEY for profile data (Meta blocks direct server requests).',
+    error: 'Instagram requires MODASH_API_KEY or APIFY_TOKEN (Meta blocks direct server requests).',
   };
 }
 
@@ -700,11 +788,11 @@ function detectCategory(text) {
 
 // ==================== Main dispatcher ====================
 
-async function scrapeProfile(profileUrl, platform, username) {
+async function scrapeProfile(profileUrl, platform, username, opts = {}) {
   switch (platform) {
     case 'youtube': return scrapeYouTube(profileUrl, username);
-    case 'tiktok': return scrapeTikTok(profileUrl, username);
-    case 'instagram': return scrapeInstagram(profileUrl, username);
+    case 'tiktok': return scrapeTikTok(profileUrl, username, opts);
+    case 'instagram': return scrapeInstagram(profileUrl, username, opts);
     case 'twitch': return scrapeTwitch(profileUrl, username);
     case 'x': return scrapeX(profileUrl, username);
     default: return { success: false, error: `Unsupported platform: ${platform}` };

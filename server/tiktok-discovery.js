@@ -35,7 +35,7 @@ function scoreCreator(videos, hashtagsMatched) {
   return Math.round(Math.min(100, tagBoost + engBoost));
 }
 
-async function searchTikTokHashtag({ keywords, maxResults = 50, minSubscribers = 1000 }) {
+async function searchTikTokHashtag({ keywords, maxResults = 50, minSubscribers = 1000, workspaceId } = {}) {
   if (!apify.isConfigured()) {
     return { success: false, error: 'APIFY_TOKEN not configured' };
   }
@@ -49,9 +49,9 @@ async function searchTikTokHashtag({ keywords, maxResults = 50, minSubscribers =
   const creators = new Map();
 
   for (const tag of hashtags) {
-    const check = quota.canCall(ACTOR_ID, perTag);
+    const check = quota.canCall(ACTOR_ID, perTag, workspaceId);
     if (!check.allowed) {
-      console.warn(`[apify-quota] TikTok discovery skipped for #${tag} — daily quota exhausted (runs ${check.runs}/${check.runLimit}, items ${check.items}/${check.itemsLimit})`);
+      console.warn(`[apify-quota] TikTok discovery skipped for #${tag} — quota exhausted (${check.reason}; runs ${check.runs}/${check.runLimit}, items ${check.items}/${check.itemsLimit})`);
       break;
     }
 
@@ -60,13 +60,13 @@ async function searchTikTokHashtag({ keywords, maxResults = 50, minSubscribers =
       hashtags: [tag],
       resultsPerPage: perTag,
       shouldDownloadVideos: false,
-    });
+    }, { workspaceId });
 
     if (!result.success) {
       console.warn(`[tiktok-discovery] hashtag #${tag} failed:`, result.error);
       continue;
     }
-    quota.record(ACTOR_ID, result.items?.length || 0);
+    quota.record(ACTOR_ID, result.items?.length || 0, workspaceId);
 
     for (const video of (result.items || [])) {
       const author = video.authorMeta || video.author || {};

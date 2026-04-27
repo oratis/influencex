@@ -16,6 +16,7 @@
  */
 
 const fetch = require('./proxy-fetch');
+const { v4: uuidv4 } = require('uuid');
 const APIFY_TOKEN = process.env.APIFY_TOKEN;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
@@ -23,10 +24,53 @@ function isConfigured() {
   return !!APIFY_TOKEN;
 }
 
-async function runActor(actorId, input, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+// Try to require database lazily so unit tests can mock or skip.
+// Returns a thin facade: { exec(sql, params), available: bool }
+function getPersistence() {
+  try {
+    const { exec } = require('./database');
+    return { exec, available: true };
+  } catch {
+    return { exec: () => {}, available: false };
+  }
+}
+
+async function persistRunStart(persistence, runRow) {
+  if (!persistence.available) return;
+  try {
+    await persistence.exec(
+      `INSERT INTO apify_runs (id, workspace_id, actor_id, status, input_payload, started_at)
+       VALUES (?, ?, ?, 'running', ?, CURRENT_TIMESTAMP)`,
+      [runRow.id, runRow.workspaceId || null, runRow.actorId, JSON.stringify(runRow.input || {}).slice(0, 4000)]
+    );
+  } catch (e) {
+    // Persistence failures must NEVER break the actual scrape.
+    console.warn('[apify] persistence start failed:', e.message);
+  }
+}
+
+async function persistRunFinish(persistence, id, patch) {
+  if (!persistence.available) return;
+  try {
+    await persistence.exec(
+      `UPDATE apify_runs SET status=?, duration_ms=?, result_summary=?, error_message=?, finished_at=CURRENT_TIMESTAMP
+       WHERE id=?`,
+      [patch.status, patch.durationMs || null, patch.resultSummary || null, patch.errorMessage || null, id]
+    );
+  } catch (e) {
+    console.warn('[apify] persistence finish failed:', e.message);
+  }
+}
+
+async function runActor(actorId, input, { timeoutMs = DEFAULT_TIMEOUT_MS, workspaceId, persistence } = {}) {
   if (!isConfigured()) {
     return { success: false, error: 'Apify not configured (set APIFY_TOKEN)' };
   }
+
+  const persist = persistence || getPersistence();
+  const runId = uuidv4();
+  const startedAt = Date.now();
+  await persistRunStart(persist, { id: runId, workspaceId, actorId, input });
 
   const url = `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items?token=${APIFY_TOKEN}&timeout=${Math.floor(timeoutMs / 1000)}`;
 
@@ -43,13 +87,31 @@ async function runActor(actorId, input, { timeoutMs = DEFAULT_TIMEOUT_MS } = {})
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      return { success: false, error: `Apify returned ${res.status}: ${text.slice(0, 200)}` };
+      const errMsg = `Apify returned ${res.status}: ${text.slice(0, 200)}`;
+      await persistRunFinish(persist, runId, {
+        status: res.status === 408 ? 'timeout' : 'failed',
+        durationMs: Date.now() - startedAt,
+        errorMessage: errMsg,
+      });
+      return { success: false, error: errMsg, runId };
     }
 
     const data = await res.json();
-    return { success: true, items: Array.isArray(data) ? data : [data] };
+    const items = Array.isArray(data) ? data : [data];
+    await persistRunFinish(persist, runId, {
+      status: 'succeeded',
+      durationMs: Date.now() - startedAt,
+      resultSummary: JSON.stringify({ itemCount: items.length }),
+    });
+    return { success: true, items, runId };
   } catch (e) {
-    return { success: false, error: e.message };
+    const aborted = e.name === 'AbortError';
+    await persistRunFinish(persist, runId, {
+      status: aborted ? 'timeout' : 'failed',
+      durationMs: Date.now() - startedAt,
+      errorMessage: e.message,
+    });
+    return { success: false, error: e.message, runId };
   }
 }
 
@@ -57,14 +119,14 @@ async function runActor(actorId, input, { timeoutMs = DEFAULT_TIMEOUT_MS } = {})
  * Scrape an Instagram profile.
  * Returns a normalized KOL object or { success: false }.
  */
-async function scrapeInstagram(username) {
+async function scrapeInstagram(username, opts = {}) {
   const clean = username.replace(/^@/, '').replace(/^https?:\/\/(www\.)?instagram\.com\//, '').split('/')[0];
   if (!clean) return { success: false, error: 'Invalid Instagram username' };
 
   const result = await runActor('apify/instagram-profile-scraper', {
     usernames: [clean],
     resultsLimit: 1,
-  });
+  }, { workspaceId: opts.workspaceId });
 
   if (!result.success) return result;
   const profile = result.items?.[0];
@@ -89,14 +151,14 @@ async function scrapeInstagram(username) {
 /**
  * Scrape a TikTok profile. Tries clockworks/tiktok-scraper first.
  */
-async function scrapeTikTok(url) {
+async function scrapeTikTok(url, opts = {}) {
   const profileUrl = /^https?:/.test(url) ? url : `https://www.tiktok.com/@${url.replace(/^@/, '')}`;
 
   const result = await runActor('clockworks/tiktok-scraper', {
     profiles: [profileUrl],
     resultsPerPage: 1,
     shouldDownloadVideos: false,
-  });
+  }, { workspaceId: opts.workspaceId });
 
   if (!result.success) return result;
   const profile = result.items?.[0];

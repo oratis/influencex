@@ -778,6 +778,65 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-04-27-apify-runs',
+    description: 'Persist every Apify actor invocation: status, cost, duration, error. Lets ops debug stuck runs and enforce per-workspace budgets.',
+    up: async ({ exec }) => {
+      // run_id = Apify's run identifier when sync mode returns it (or a local
+      // uuid for inline runs). status: pending|running|succeeded|failed|timeout.
+      // cost_usd is best-effort; Apify returns it on completion for paid actors.
+      // payload + result_summary stored as TEXT JSON; SQLite has no JSONB.
+      await exec(`
+        CREATE TABLE IF NOT EXISTS apify_runs (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT,
+          actor_id TEXT NOT NULL,
+          run_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          cost_usd REAL DEFAULT 0,
+          duration_ms INTEGER,
+          input_payload TEXT,
+          result_summary TEXT,
+          error_message TEXT,
+          started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          finished_at TIMESTAMP
+        )
+      `);
+      for (const stmt of [
+        'CREATE INDEX IF NOT EXISTS idx_apify_runs_workspace ON apify_runs(workspace_id)',
+        'CREATE INDEX IF NOT EXISTS idx_apify_runs_status ON apify_runs(status)',
+        'CREATE INDEX IF NOT EXISTS idx_apify_runs_actor ON apify_runs(actor_id)',
+        'CREATE INDEX IF NOT EXISTS idx_apify_runs_started ON apify_runs(started_at)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
+  {
+    id: '2026-04-27-kol-profile-cache',
+    description: 'Cache scraped KOL profiles for 7 days so repeat lookups (Pipeline restart, KOL Database refresh) skip the Apify cost.',
+    up: async ({ exec }) => {
+      await exec(`
+        CREATE TABLE IF NOT EXISTS kol_profile_cache (
+          id TEXT PRIMARY KEY,
+          platform TEXT NOT NULL,
+          username TEXT NOT NULL,
+          profile_data TEXT NOT NULL,
+          source TEXT,
+          cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          expires_at TIMESTAMP NOT NULL
+        )
+      `);
+      for (const stmt of [
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_kol_cache_lookup ON kol_profile_cache(platform, username)',
+        'CREATE INDEX IF NOT EXISTS idx_kol_cache_expires ON kol_profile_cache(expires_at)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

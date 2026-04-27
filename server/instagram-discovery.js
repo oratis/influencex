@@ -56,7 +56,7 @@ function scoreCreator(posts, hashtagsMatched) {
  * Returns the same shape as youtube-discovery so the dispatcher can merge
  * results across platforms transparently.
  */
-async function searchInstagramHashtag({ keywords, maxResults = 50, minSubscribers = 1000 }) {
+async function searchInstagramHashtag({ keywords, maxResults = 50, minSubscribers = 1000, workspaceId } = {}) {
   if (!apify.isConfigured()) {
     return { success: false, error: 'APIFY_TOKEN not configured' };
   }
@@ -72,9 +72,9 @@ async function searchInstagramHashtag({ keywords, maxResults = 50, minSubscriber
   const creators = new Map();
 
   for (const tag of hashtags) {
-    const check = quota.canCall(ACTOR_ID, perTag);
+    const check = quota.canCall(ACTOR_ID, perTag, workspaceId);
     if (!check.allowed) {
-      console.warn(`[apify-quota] Instagram discovery skipped for #${tag} — daily quota exhausted (runs ${check.runs}/${check.runLimit}, items ${check.items}/${check.itemsLimit})`);
+      console.warn(`[apify-quota] Instagram discovery skipped for #${tag} — quota exhausted (${check.reason}; runs ${check.runs}/${check.runLimit}, items ${check.items}/${check.itemsLimit})`);
       break;
     }
 
@@ -82,13 +82,13 @@ async function searchInstagramHashtag({ keywords, maxResults = 50, minSubscriber
       hashtags: [tag],
       resultsLimit: perTag,
       resultsType: 'posts',
-    });
+    }, { workspaceId });
 
     if (!result.success) {
       console.warn(`[ig-discovery] hashtag #${tag} failed:`, result.error);
       continue;
     }
-    quota.record(ACTOR_ID, result.items?.length || 0);
+    quota.record(ACTOR_ID, result.items?.length || 0, workspaceId);
 
     for (const post of (result.items || [])) {
       const username = post.ownerUsername || post.owner?.username;
