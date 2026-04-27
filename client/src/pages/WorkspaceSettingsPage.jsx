@@ -18,8 +18,10 @@ export default function WorkspaceSettingsPage() {
   // When an admin invites an unregistered email, the server returns a token
   // link. We surface it here so the admin can copy/share it.
   const [inviteLinkModal, setInviteLinkModal] = useState(null);
+  const [inviteForm, setInviteForm] = useState(null);
+  const [inviteSubmitting, setInviteSubmitting] = useState(false);
   const toast = useToast();
-  const { confirm: confirmDialog, prompt: promptDialog } = useConfirm();
+  const { confirm: confirmDialog } = useConfirm();
 
   useEffect(() => {
     setName(currentWorkspace?.name || '');
@@ -59,24 +61,22 @@ export default function WorkspaceSettingsPage() {
     }
   }
 
-  async function handleInvite() {
-    const email = await promptDialog(t('workspace.invite_email_prompt'), {
-      title: t('workspace.invite_title'),
-      placeholder: t('workspace.invite_email_placeholder'),
-    });
-    if (!email) return;
-    const role = await promptDialog(t('workspace.role_prompt'), {
-      title: t('workspace.role_title'),
-      defaultValue: 'editor',
-    });
-    if (!['admin', 'editor', 'viewer'].includes(role)) {
-      toast.error(t('workspace.role_invalid'));
+  function handleInvite() {
+    setInviteForm({ email: '', role: 'editor' });
+  }
+
+  async function submitInvite() {
+    const email = (inviteForm?.email || '').trim();
+    const role = inviteForm?.role || 'editor';
+    if (!email) {
+      toast.error(t('workspace.invite_email_required'));
       return;
     }
+    setInviteSubmitting(true);
     try {
-      const result = await api.inviteToWorkspace(currentId, { email: email.trim(), role });
+      const result = await api.inviteToWorkspace(currentId, { email, role });
+      setInviteForm(null);
       if (result.kind === 'new_invitation' && result.invitation?.link) {
-        // Unregistered email → show the admin the invite link to share.
         setInviteLinkModal({
           email: result.invitation.email,
           role: result.invitation.role,
@@ -86,8 +86,6 @@ export default function WorkspaceSettingsPage() {
           emailError: result.invitation.email_error || null,
         });
       } else if (result.kind === 'existing_user') {
-        // Email already had an account → silently added as member, no
-        // invite link needed. Distinct toast so admin knows what happened.
         toast.success(t('workspace.added_existing_member', { email, role }));
       } else {
         toast.success(t('workspace.invited', { email, role }));
@@ -95,6 +93,8 @@ export default function WorkspaceSettingsPage() {
       loadMembers();
     } catch (e) {
       toast.error(e.message);
+    } finally {
+      setInviteSubmitting(false);
     }
   }
 
@@ -278,6 +278,99 @@ export default function WorkspaceSettingsPage() {
           >
             {t('workspace.danger_btn')}
           </button>
+        </div>
+      )}
+
+      {inviteForm && (
+        <div className="modal-overlay" onClick={() => !inviteSubmitting && setInviteForm(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+            <div className="modal-header">
+              <h3>{t('workspace.invite_title')}</h3>
+              <button
+                className="btn-icon"
+                onClick={() => setInviteForm(null)}
+                disabled={inviteSubmitting}
+                aria-label={t('common.close')}
+                title={t('common.close')}
+              >✕</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                  {t('workspace.invite_email_prompt')}
+                </label>
+                <input
+                  className="form-input"
+                  type="email"
+                  placeholder={t('workspace.invite_email_placeholder')}
+                  value={inviteForm.email}
+                  onChange={e => setInviteForm(f => ({ ...f, email: e.target.value }))}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && inviteForm.email.trim() && !inviteSubmitting) submitInvite();
+                  }}
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                  {t('workspace.role_title')}
+                </label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {[
+                    { value: 'admin', desc: t('workspace.role_admin_desc') },
+                    { value: 'editor', desc: t('workspace.role_editor_desc') },
+                    { value: 'viewer', desc: t('workspace.role_viewer_desc') },
+                  ].map(opt => {
+                    const selected = inviteForm.role === opt.value;
+                    return (
+                      <label
+                        key={opt.value}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: 10,
+                          padding: '10px 12px',
+                          border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                          borderRadius: 6,
+                          background: selected ? 'var(--accent-bg, rgba(59,130,246,0.08))' : 'transparent',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="invite-role"
+                          value={opt.value}
+                          checked={selected}
+                          onChange={() => setInviteForm(f => ({ ...f, role: opt.value }))}
+                          style={{ marginTop: 3 }}
+                        />
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 13, textTransform: 'capitalize' }}>{opt.value}</div>
+                          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>{opt.desc}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn btn-secondary"
+                onClick={() => setInviteForm(null)}
+                disabled={inviteSubmitting}
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={submitInvite}
+                disabled={inviteSubmitting || !inviteForm.email.trim()}
+              >
+                {inviteSubmitting ? t('workspace.loading') : t('workspace.invite_submit')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
