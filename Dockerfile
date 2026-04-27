@@ -5,13 +5,15 @@ WORKDIR /app
 # Install build tools for better-sqlite3
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
-# Install server dependencies
+# Install server dependencies. --legacy-peer-deps lets the OpenTelemetry
+# auto-instrumentations package resolve its conflicting peer constraints
+# (otel/core 1.x vs 2.x); without this `npm ci` fails on ERESOLVE.
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --only=production --legacy-peer-deps
 
 # Install client dependencies and build
 COPY client/package*.json client/
-RUN cd client && npm ci
+RUN cd client && npm ci --legacy-peer-deps
 COPY client/ client/
 RUN cd client && npx vite build
 
