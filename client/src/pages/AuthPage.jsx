@@ -119,6 +119,10 @@ export default function AuthPage() {
             <button type="submit" className="btn btn-primary auth-submit" disabled={loading}>
               {loading ? t('auth.signing_in') : t('auth.sign_in')}
             </button>
+
+            <p style={{ fontSize: 12, textAlign: 'center', marginTop: 8 }}>
+              <a href="#/forgot-password" style={{ color: 'var(--text-muted)' }}>{t('auth.forgot_password')}</a>
+            </p>
           </form>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: '#888', fontSize: 12 }}>

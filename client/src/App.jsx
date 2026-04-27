@@ -27,7 +27,11 @@ import TranslatePage from './pages/TranslatePage';
 import LandingPage from './pages/LandingPage';
 import AcceptInvitePage from './pages/AcceptInvitePage';
 import SignupWithCodePage from './pages/SignupWithCodePage';
+import ForgotPasswordPage from './pages/ForgotPasswordPage';
+import ResetPasswordPage from './pages/ResetPasswordPage';
 import InviteCodesPage from './pages/InviteCodesPage';
+import ApifyRunsPage from './pages/ApifyRunsPage';
+import DiscoveryPage from './pages/DiscoveryPage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -58,6 +62,7 @@ function useNavItems(user) {
     { path: '/roi', label: t('nav.roi'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg> },
     { path: '/contacts', label: t('nav.contacts'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg> },
     { path: '/kol-database', label: t('nav.kol_database'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> },
+    { path: '/discovery', label: t('nav.discovery'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> },
     { path: '/users', label: t('nav.users'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="8" r="4"/><path d="M20 21v-2a7 7 0 0 0-14 0v2"/></svg> },
   ];
   if (isAdmin) {
@@ -65,6 +70,11 @@ function useNavItems(user) {
       path: '/invite-codes',
       label: t('nav.invite_codes'),
       icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>,
+    });
+    items.push({
+      path: '/apify-runs',
+      label: t('nav.apify_runs'),
+      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v5h5"/><path d="M21 12a9 9 0 0 0-15.7-6.3L3 8"/><path d="M21 21v-5h-5"/><path d="M3 12a9 9 0 0 0 15.7 6.3L21 16"/></svg>,
     });
   }
   return items;
@@ -109,6 +119,25 @@ function AppContent() {
       </Routes>
     );
   }
+  // Forgot + reset password are reachable regardless of session — we don't
+  // want to hijack the reset link if the user happens to be logged into
+  // another account in the same browser.
+  if (window.location.hash.startsWith('#/forgot-password')) {
+    return (
+      <Routes>
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="*" element={<ForgotPasswordPage />} />
+      </Routes>
+    );
+  }
+  if (window.location.hash.startsWith('#/reset-password')) {
+    return (
+      <Routes>
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="*" element={<ResetPasswordPage />} />
+      </Routes>
+    );
+  }
 
   if (!user) {
     // Public routes. /signup uses the invite-code flow (anyone with a valid
@@ -119,6 +148,8 @@ function AppContent() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<AuthPage />} />
         <Route path="/signup" element={<SignupWithCodePage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/auth" element={<AuthPage />} />
         <Route path="/accept-invite" element={<AcceptInvitePage />} />
         <Route path="*" element={<AuthPage />} />
@@ -198,8 +229,10 @@ function AppContent() {
               <Route path="/roi" element={<Suspense fallback={<PageFallback />}><RoiDashboard /></Suspense>} />
               <Route path="/contacts" element={<ContactModule />} />
               <Route path="/kol-database" element={<KolDatabase />} />
+              <Route path="/discovery" element={<DiscoveryPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/invite-codes" element={<InviteCodesPage />} />
+              <Route path="/apify-runs" element={<ApifyRunsPage />} />
               <Route path="/workspace/settings" element={<WorkspaceSettingsPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>

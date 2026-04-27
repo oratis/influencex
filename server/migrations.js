@@ -814,6 +814,29 @@ const MIGRATIONS = [
   },
 
   {
+    id: '2026-04-27-password-reset',
+    description: 'Password reset tokens. One-time, expires in 1 hour. Stored hashed (sha256) so a DB leak does not let an attacker reset accounts.',
+    up: async ({ exec }) => {
+      await exec(`
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMP NOT NULL,
+          used_at TIMESTAMP,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      for (const stmt of [
+        'CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id)',
+        'CREATE INDEX IF NOT EXISTS idx_password_reset_hash ON password_reset_tokens(token_hash)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+    },
+  },
+
+  {
     id: '2026-04-27-kol-profile-cache',
     description: 'Cache scraped KOL profiles for 7 days so repeat lookups (Pipeline restart, KOL Database refresh) skip the Apify cost.',
     up: async ({ exec }) => {

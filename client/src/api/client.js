@@ -356,4 +356,11 @@ export const api = {
   listInviteCodes: () => request('/invite-codes'),
   createInviteCode: (data) => request('/invite-codes', { method: 'POST', body: data }),
   revokeInviteCode: (id) => request(`/invite-codes/${id}`, { method: 'DELETE' }),
+
+  // Apify ops (admin only)
+  listApifyRuns: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/admin/apify-runs${q ? '?' + q : ''}`);
+  },
+  reapApifyRuns: () => request('/admin/apify-runs/reap', { method: 'POST' }),
 };

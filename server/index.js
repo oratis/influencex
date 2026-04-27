@@ -204,6 +204,99 @@ app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
   }
 });
 
+// ==================== Forgot password / reset ====================
+//
+// Two-endpoint flow. /forgot-password creates a one-time token, hashes it
+// (sha256) before storing, emails the plain token to the user. /reset-password
+// looks up by hash, verifies expiry + unused, updates password_hash.
+//
+// Privacy: /forgot-password ALWAYS returns 200 even if the email isn't
+// registered, so the endpoint can't be used to enumerate accounts.
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function hashResetToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+app.post(`${BASE_PATH}/api/auth/forgot-password`, authLimiter, async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    const user = await queryOne('SELECT id, email, name FROM users WHERE LOWER(email) = LOWER(?)', [email]);
+    // Whether the user exists or not, return 200 — see comment above.
+    if (!user) return res.json({ ok: true });
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashResetToken(token);
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS).toISOString();
+
+    await exec(
+      'INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)',
+      [uuidv4(), user.id, tokenHash, expiresAt]
+    );
+
+    // Build reset link. Use the request's origin if available; fall back to
+    // OAUTH_CALLBACK_BASE which we already maintain for SSO redirects.
+    const origin = req.headers.origin || process.env.OAUTH_CALLBACK_BASE || `https://${req.headers.host}`;
+    const link = `${origin}${BASE_PATH}/#/reset-password?token=${encodeURIComponent(token)}`;
+
+    // Best-effort email. If it fails we still return ok to the client; the
+    // user can retry. We log failures so ops can investigate.
+    try {
+      await mailAgent.sendEmail({
+        to: user.email,
+        subject: 'Reset your InfluenceX password',
+        body: [
+          `Hi ${user.name || ''},`,
+          '',
+          'You (or someone) asked to reset your InfluenceX password.',
+          `Click the link below within ${Math.round(PASSWORD_RESET_TTL_MS / 60000)} minutes to set a new one:`,
+          '',
+          link,
+          '',
+          "If you didn't request this, you can safely ignore this email.",
+          '',
+          '— InfluenceX',
+        ].join('\n'),
+        fromName: 'InfluenceX',
+      });
+    } catch (e) {
+      console.warn('[forgot-password] email send failed:', e.message);
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post(`${BASE_PATH}/api/auth/reset-password`, authLimiter, async (req, res) => {
+  try {
+    const { token, password } = req.body || {};
+    if (!token || !password) return res.status(400).json({ error: 'Token and password required' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    const tokenHash = hashResetToken(token);
+    const row = await queryOne(
+      'SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?',
+      [tokenHash]
+    );
+    if (!row) return res.status(404).json({ error: 'Invalid or expired token', code: 'TOKEN_NOT_FOUND' });
+    if (row.used_at) return res.status(410).json({ error: 'Token already used', code: 'TOKEN_USED' });
+    if (new Date(row.expires_at) < new Date()) return res.status(410).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+
+    const bcrypt = require('bcryptjs');
+    const newHash = bcrypt.hashSync(password, 10);
+    await exec('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, row.user_id]);
+    await exec('UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = ?', [row.id]);
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post(`${BASE_PATH}/api/auth/logout`, async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
