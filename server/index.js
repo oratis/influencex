@@ -9,8 +9,6 @@ const { authMiddleware, registerUser, loginUser, destroySession, getSession } = 
 const authGoogle = require('./auth-google');
 // Stripe billing intentionally removed — all features are free for invited users.
 const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId } = require('./workspace-middleware');
-const ga4 = require('./ga4');
-const feishu = require('./feishu');
 const scraper = require('./scraper');
 const mailAgent = require('./email');
 const log = require('./logger');
@@ -23,7 +21,6 @@ const { runPendingMigrations } = require('./migrations');
 const emailTemplates = require('./email-templates');
 const csvExport = require('./csv-export');
 const rbac = require('./rbac');
-const notifications = require('./notifications');
 const scheduler = require('./scheduler');
 const scheduledPublish = require('./scheduled-publish');
 const { rateLimit } = require('./rate-limit');
@@ -137,7 +134,7 @@ app.use(BASE_PATH, express.static(path.join(__dirname, '..', 'client', 'dist'), 
 }));
 
 // Register health endpoints early (outside auth, rate limit, and BASE_PATH conventions)
-registerHealthRoutes(app, BASE_PATH, { query, usePostgres, youtubeQuota, notifications });
+registerHealthRoutes(app, BASE_PATH, { query, usePostgres, youtubeQuota });
 
 // OpenAPI spec and Swagger UI
 app.get(`${BASE_PATH}/api/openapi.json`, (req, res) => {
@@ -822,7 +819,7 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
 // docs, platform-level stats/quota/queue/cache, global email templates.
 const WORKSPACE_SKIP_PREFIXES = [
   '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
-  '/notifications/', '/quota/', '/cache/', '/queue/', '/apify/',
+  '/quota/', '/cache/', '/queue/', '/apify/',
   '/query/', '/scheduler/', '/stats',
   '/publish/oauth/', // OAuth callbacks resolve workspace from state row
   '/mailboxes/oauth/gmail/callback', // Gmail OAuth callback resolves workspace from state
@@ -1469,13 +1466,6 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
 
     console.log(`[Inbound Email] Saved. contact_id=${contactId}, pipeline_job_id=${pipelineJobId}`);
 
-    // Fire notification (fire-and-forget)
-    notifications.events.emailReply({
-      kolName: fromEmail,
-      subject: subject || '(no subject)',
-      preview: bodyText,
-    });
-
     res.json({ success: true, contactId, pipelineJobId });
   } catch (e) {
     console.error('[Inbound Email] Error:', e.message);
@@ -1887,166 +1877,6 @@ app.post(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
   }
 });
 
-// ==================== GA4 Analytics API ====================
-
-// GA4 helper: wrap calls with a timeout so gRPC issues don't hang the request
-function withTimeout(promise, ms = 8000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('GA4 timeout')), ms)),
-  ]);
-}
-
-app.get(`${BASE_PATH}/api/data/ga4/metrics`, async (req, res) => {
-  const { startDate, endDate } = req.query;
-  if (ga4.isConfigured()) {
-    try {
-      const data = await withTimeout(ga4.getWebsiteMetrics(startDate, endDate));
-      res.json(data);
-    } catch (e) {
-      console.warn('GA4 metrics error:', e.message);
-      res.json({ configured: true, error: e.message, data: [], totals: {} });
-    }
-  } else {
-    res.json(ga4.getDemoMetrics());
-  }
-});
-
-app.get(`${BASE_PATH}/api/data/ga4/traffic`, async (req, res) => {
-  const { startDate, endDate } = req.query;
-  if (ga4.isConfigured()) {
-    try {
-      const data = await withTimeout(ga4.getTrafficSources(startDate, endDate));
-      res.json(data);
-    } catch (e) {
-      console.warn('GA4 traffic error:', e.message);
-      res.json({ configured: true, error: e.message, data: [] });
-    }
-  } else {
-    res.json(ga4.getDemoTrafficSources());
-  }
-});
-
-app.get(`${BASE_PATH}/api/data/ga4/realtime`, async (req, res) => {
-  if (ga4.isConfigured()) {
-    try {
-      const data = await withTimeout(ga4.getRealtimeUsers());
-      res.json(data);
-    } catch (e) {
-      console.warn('GA4 realtime error:', e.message);
-      res.json({ configured: true, error: e.message, activeUsers: 0 });
-    }
-  } else {
-    res.json({ configured: false, demo: true, activeUsers: Math.floor(Math.random() * 15 + 3) });
-  }
-});
-
-app.get(`${BASE_PATH}/api/data/ga4/status`, (req, res) => {
-  res.json({
-    configured: ga4.isConfigured(),
-    measurementId: ga4.GA4_MEASUREMENT_ID,
-    propertyId: process.env.GA4_PROPERTY_ID || null,
-  });
-});
-
-// ==================== Feishu Sync API ====================
-
-app.get(`${BASE_PATH}/api/data/feishu/status`, (req, res) => {
-  res.json({
-    configured: feishu.isConfigured(),
-    source: 'feishu_spreadsheet',
-    sheet: '记录已发布达人内容',
-  });
-});
-
-app.post(`${BASE_PATH}/api/data/feishu/sync`, async (req, res) => {
-  if (!feishu.isConfigured()) return res.json({ configured: false, error: 'Feishu not configured. Set FEISHU_APP_ID and FEISHU_APP_SECRET.' });
-
-  try {
-    const [contentResult, regResult] = await Promise.all([
-      feishu.fetchPublishedContent(),
-      feishu.fetchRegistrationData(),
-    ]);
-
-    // Store content data in local DB
-    if (contentResult.configured && contentResult.data.length > 0) {
-      await exec('DELETE FROM content_data');
-      if (usePostgres) {
-        await transaction(async (tx) => {
-          for (const c of contentResult.data) {
-            await tx.exec(
-              'INSERT INTO content_data (id, kol_name, platform, content_title, content_url, publish_date, views, likes, comments, shares) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET kol_name=EXCLUDED.kol_name, platform=EXCLUDED.platform, content_title=EXCLUDED.content_title, content_url=EXCLUDED.content_url, publish_date=EXCLUDED.publish_date, views=EXCLUDED.views, likes=EXCLUDED.likes, comments=EXCLUDED.comments, shares=EXCLUDED.shares',
-              [uuidv4(), '', c.platform, '', c.content_url, c.publish_date || '', 0, 0, 0, 0]
-            );
-          }
-        });
-      } else {
-        await transaction(async (tx) => {
-          for (const c of contentResult.data) {
-            await tx.exec(
-              'INSERT OR REPLACE INTO content_data (id, kol_name, platform, content_title, content_url, publish_date, views, likes, comments, shares) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              [uuidv4(), '', c.platform, '', c.content_url, c.publish_date || '', 0, 0, 0, 0]
-            );
-          }
-        });
-      }
-    }
-
-    // Store registration data in local DB
-    if (regResult.configured && regResult.data.length > 0) {
-      await exec('DELETE FROM registration_data');
-      if (usePostgres) {
-        await transaction(async (tx) => {
-          for (const r of regResult.data) {
-            await tx.exec(
-              'INSERT INTO registration_data (id, date, registrations, source) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET date=EXCLUDED.date, registrations=EXCLUDED.registrations, source=EXCLUDED.source',
-              [r.date, r.date, r.total, 'feishu']
-            );
-          }
-        });
-      } else {
-        await transaction(async (tx) => {
-          for (const r of regResult.data) {
-            await tx.exec(
-              'INSERT OR REPLACE INTO registration_data (id, date, registrations, source) VALUES (?, ?, ?, ?)',
-              [r.date, r.date, r.total, 'feishu']
-            );
-          }
-        });
-      }
-    }
-
-    res.json({
-      success: true,
-      content_total: contentResult.data?.length || 0,
-      registration_total: regResult.data?.length || 0,
-      syncedAt: new Date().toISOString(),
-    });
-  } catch (e) {
-    res.json({ success: false, error: e.message });
-  }
-});
-
-// Full Feishu data endpoint
-app.get(`${BASE_PATH}/api/data/feishu/all`, async (req, res) => {
-  if (!feishu.isConfigured()) return res.json({ configured: false, error: 'Feishu not configured' });
-  try {
-    const [content, summary, registration] = await Promise.all([
-      feishu.fetchPublishedContent(),
-      feishu.getContentSummary(),
-      feishu.fetchRegistrationData(),
-    ]);
-    res.json({
-      success: true,
-      summary,
-      content: content.data || [],
-      registration: registration.data || [],
-    });
-  } catch (e) {
-    res.json({ success: false, error: e.message });
-  }
-});
-
 // Seed demo data
 app.post(`${BASE_PATH}/api/data/seed-demo`, async (req, res) => {
   try {
@@ -2259,16 +2089,11 @@ app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
 // Manually trigger a scheduler tick (useful for testing / admin)
 app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermission('system.manage'), async (req, res) => {
   try {
-    const result = await scheduler.tick({ query, exec, queryOne, mailAgent, notifications, uuidv4, jobQueue });
+    const result = await scheduler.tick({ query, exec, queryOne, mailAgent, uuidv4, jobQueue });
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
-
-// Notification sinks status
-app.get(`${BASE_PATH}/api/notifications/status`, (req, res) => {
-  res.json({ enabled_sinks: notifications.getEnabledSinks() });
 });
 
 // ==================== Agent Runtime API (Phase A Week 2) ====================
@@ -2869,7 +2694,7 @@ app.delete(`${BASE_PATH}/api/scheduled-publishes/:id`, async (req, res) => {
 app.post(`${BASE_PATH}/api/scheduled-publishes/tick`, authMiddleware, rbac.requirePermission('system.manage'), async (req, res) => {
   try {
     const result = await scheduledPublish.processDue({
-      query, queryOne, exec, uuidv4, publishOauth, agentRuntime, notifications,
+      query, queryOne, exec, uuidv4, publishOauth, agentRuntime,
     });
     res.json(result);
   } catch (e) {
@@ -3510,12 +3335,6 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
           `UPDATE conductor_plans SET status=?, plan=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
           [allOk ? 'complete' : 'error', JSON.stringify(updatedPlan), req.params.id]
         );
-        notifications.notify({
-          type: 'conductor.complete',
-          level: allOk ? 'success' : 'warning',
-          title: `Plan ${allOk ? 'complete' : 'partial'}`,
-          message: `"${plan.goal.slice(0, 80)}" — ${stepResults.filter(r => r.status === 'complete').length}/${stepResults.length} steps`,
-        });
       } catch (e) {
         console.error('[conductor run]', e);
         await exec(
@@ -4969,12 +4788,7 @@ app.get(`${BASE_PATH}/api/data/dashboard/combined`, async (req, res) => {
     `);
     const regByDate = regByDateResult.rows;
 
-    // 3. GA4 UV data
-    let gaData = [];
-    try {
-      const gaMetrics = await ga4.getWebsiteMetrics();
-      gaData = (gaMetrics.data || []).map(d => ({ date: d.date, uv: d.activeUsers || 0, sessions: d.sessions || 0 }));
-    } catch {}
+    const gaData = [];
 
     // 4. Key events (content publish dates)
     const eventsResult = await query("SELECT * FROM dashboard_events ORDER BY date");
@@ -5573,17 +5387,15 @@ async function initializeDefaultData() {
     app.listen(PORT, () => {
       console.log(`InfluenceX server running on port ${PORT} (${usePostgres ? 'PostgreSQL' : 'SQLite'})`);
       console.log(`Access at: http://localhost:${PORT}${BASE_PATH}/`);
-      const sinks = notifications.getEnabledSinks();
-      if (sinks.length) console.log(`[notifications] Active sinks: ${sinks.join(', ')}`);
       // Register background handlers on the shared job queue.
-      emailJobs.register({ jobQueue, query, queryOne, exec, mailAgent, notifications });
+      emailJobs.register({ jobQueue, query, queryOne, exec, mailAgent });
       // Safety-net sweep every 10 minutes: fail contacts stuck in 'pending'.
       setInterval(() => {
         try { jobQueue.push('email.sync_status', {}, { maxRetries: 0 }); } catch {}
       }, 10 * 60 * 1000).unref?.();
-      scheduler.start({ query, exec, queryOne, mailAgent, notifications, uuidv4, jobQueue });
+      scheduler.start({ query, exec, queryOne, mailAgent, uuidv4, jobQueue });
       scheduledPublish.start({
-        query, queryOne, exec, uuidv4, publishOauth, agentRuntime, notifications,
+        query, queryOne, exec, uuidv4, publishOauth, agentRuntime,
       });
       // Register all v2 agents with the runtime
       const registered = agentsV2.registerAll();

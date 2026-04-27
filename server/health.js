@@ -11,7 +11,7 @@ const os = require('os');
 const startTime = Date.now();
 
 function registerHealthRoutes(app, basePath, deps) {
-  const { query, usePostgres, youtubeQuota, notifications } = deps;
+  const { query, usePostgres, youtubeQuota } = deps;
 
   // Liveness — always returns 200 if the process is responsive.
   // Note: Cloud Run's Google front-end intercepts /healthz in some configs,
@@ -82,9 +82,6 @@ function registerHealthRoutes(app, basePath, deps) {
         platform: process.platform,
       },
       youtube_quota: youtubeQuota?.status?.() || null,
-      notifications: {
-        enabledSinks: notifications?.getEnabledSinks?.() || [],
-      },
     });
   });
 }

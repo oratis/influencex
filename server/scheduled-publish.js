@@ -54,13 +54,12 @@ let ticking = false;
  * @param {function} deps.exec        async (sql, params) => { rowCount? }
  * @param {function} deps.uuidv4      () => string
  * @param {object}   deps.agentRuntime   module from ./agent-runtime
- * @param {object}   deps.notifications  module from ./notifications
  * @param {object}  [deps.publishOauth]  legacy dep — no longer used directly,
  *                                       the publisher agent loads it itself.
  * @param {number}  [deps.limit=20]
  */
 async function processDue(deps) {
-  const { query, queryOne, exec, uuidv4, publishOauth, agentRuntime, notifications } = deps;
+  const { query, queryOne, exec, uuidv4, publishOauth, agentRuntime } = deps;
   const limit = deps.limit || 20;
 
   const nowIso = new Date().toISOString();
@@ -153,23 +152,6 @@ async function processDue(deps) {
           [JSON.stringify(finalOutput), row.id]
         );
         ok++;
-        const titleSnippet = (snapshot.title || snapshot.body || '').slice(0, 60);
-        if (row.mode === 'direct') {
-          const okCount = (finalOutput.results || []).filter(r => r.success).length;
-          notifications?.notify?.({
-            type: 'publish.scheduled.posted',
-            level: 'success',
-            title: 'Scheduled publish posted',
-            message: `Posted to ${okCount}/${platforms.length} platform(s) for "${titleSnippet}"`,
-          });
-        } else {
-          notifications?.notify?.({
-            type: 'publish.scheduled.ready',
-            level: 'success',
-            title: 'Scheduled publish ready',
-            message: `${platforms.length} platform intent URL(s) generated for "${titleSnippet}"`,
-          });
-        }
       }
     } catch (e) {
       // Thrown exceptions (parse errors, DB-level failures) are unusual —

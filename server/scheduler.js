@@ -35,7 +35,7 @@ let ticking = false;
 /**
  * Run one scheduler tick. Exposed for testing and manual triggering.
  */
-async function tick({ query, exec, queryOne, mailAgent, notifications, uuidv4, jobQueue }) {
+async function tick({ query, exec, queryOne, mailAgent, uuidv4, jobQueue }) {
   if (ticking) return { skipped: true };
   ticking = true;
   const result = { scheduled_sent: 0, follow_ups_sent: 0, errors: [] };

@@ -15,7 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const secrets = require('./secrets');
 const log = require('./logger');
 
-function register({ jobQueue, query, queryOne, exec, mailAgent, notifications }) {
+function register({ jobQueue, query, queryOne, exec, mailAgent }) {
   async function resolveMailbox(contact) {
     if (!contact.mailbox_account_id) {
       // try workspace default
@@ -201,12 +201,6 @@ function register({ jobQueue, query, queryOne, exec, mailAgent, notifications })
       providerMessageId: result.messageId,
       eventType: 'sent',
       payload: { provider: result.provider, to: emailTo },
-    });
-
-    notifications?.events?.emailSent?.({
-      kolName: contact.display_name || emailTo,
-      subject: contact.email_subject,
-      to: emailTo,
     });
 
     return { success: true, messageId: result.messageId };

@@ -138,17 +138,6 @@ export const api = {
   addRegistrationData: (data) => request('/data/registrations', { method: 'POST', body: data }),
   seedDemo: () => request('/data/seed-demo', { method: 'POST' }),
 
-  // GA4 Analytics
-  getGA4Metrics: (params = {}) => { const q = new URLSearchParams(params).toString(); return request(`/data/ga4/metrics${q ? '?' + q : ''}`); },
-  getGA4Traffic: (params = {}) => { const q = new URLSearchParams(params).toString(); return request(`/data/ga4/traffic${q ? '?' + q : ''}`); },
-  getGA4Realtime: () => request('/data/ga4/realtime'),
-  getGA4Status: () => request('/data/ga4/status'),
-
-  // Feishu
-  syncFeishu: () => request('/data/feishu/sync', { method: 'POST' }),
-  getFeishuStatus: () => request('/data/feishu/status'),
-  getFeishuAllData: () => request('/data/feishu/all'),
-
   // KOL Database
   getKolApiStatus: () => request('/kol-database/api-status'),
   getKolDatabase: (params = {}) => {
@@ -255,9 +244,6 @@ export const api = {
   scheduleContact: (id, scheduled_send_at) => request(`/contacts/${id}/schedule`, { method: 'POST', body: { scheduled_send_at } }),
   cancelScheduledContact: (id) => request(`/contacts/${id}/schedule`, { method: 'DELETE' }),
   triggerSchedulerTick: () => request('/scheduler/tick', { method: 'POST' }),
-
-  // Notifications
-  getNotificationStatus: () => request('/notifications/status'),
 
   // ROI Dashboard
   getCampaignRoi: (id) => request(`/campaigns/${id}/roi`),
