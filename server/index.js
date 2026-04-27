@@ -16,6 +16,9 @@ const metrics = require('./metrics');
 const bvSearch = require('./brand-voice-search');
 const dataAgent = require('./content-metrics');
 const discoveryAgent = require('./youtube-discovery');
+const igDiscovery = require('./instagram-discovery');
+const tiktokDiscovery = require('./tiktok-discovery');
+const apifyQuota = require('./apify-quota');
 const youtubeQuota = require('./youtube-quota');
 const { runPendingMigrations } = require('./migrations');
 const emailTemplates = require('./email-templates');
@@ -1897,6 +1900,24 @@ app.get(`${BASE_PATH}/api/kol-database/api-status`, (req, res) => {
 // YouTube API daily quota status
 app.get(`${BASE_PATH}/api/quota/youtube`, (req, res) => {
   res.json(youtubeQuota.status());
+});
+
+// Apify daily quota status (covers IG + TikTok actor calls)
+app.get(`${BASE_PATH}/api/quota/apify`, (req, res) => {
+  res.json(apifyQuota.status());
+});
+
+// Discovery platform availability — tells the UI which platform checkboxes
+// are usable so it can disable + label the rest. Computed from the same
+// env-var checks the discovery worker uses, so this is the source of truth.
+app.get(`${BASE_PATH}/api/discovery/platforms`, (req, res) => {
+  res.json({
+    platforms: [
+      { id: 'youtube', configured: !!process.env.YOUTUBE_API_KEY, requires: 'YOUTUBE_API_KEY' },
+      { id: 'instagram', configured: apify.isConfigured(), requires: 'APIFY_TOKEN' },
+      { id: 'tiktok', configured: apify.isConfigured(), requires: 'APIFY_TOKEN' },
+    ],
+  });
 });
 
 // ==================== RBAC ====================
@@ -4913,25 +4934,66 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
 
     // Run discovery async. Any failure writes to error_message so the UI
     // can surface a reason instead of a bare "error" badge.
+    //
+    // Per-platform dispatch: YouTube uses Data API v3, Instagram/TikTok use
+    // Apify hashtag scrapers. Each platform's results are merged into the
+    // same discovery_results rows (the `platform` column distinguishes them);
+    // the downstream pipeline scrape stage already dispatches by platform.
+    const requestedPlatforms = (Array.isArray(platforms) && platforms.length)
+      ? platforms
+      : ['youtube'];
     (async () => {
       try {
-        const result = await discoveryAgent.searchYouTubeChannels({
-          keywords: searchKeywords,
-          maxResults: max_results || 50,
-          minSubscribers: min_subscribers || 1000,
-        });
+        const allChannels = [];
+        const errors = [];
 
-        if (!result.success) {
+        for (const platform of requestedPlatforms) {
+          let r;
+          try {
+            if (platform === 'youtube') {
+              r = await discoveryAgent.searchYouTubeChannels({
+                keywords: searchKeywords,
+                maxResults: max_results || 50,
+                minSubscribers: min_subscribers || 1000,
+              });
+            } else if (platform === 'instagram') {
+              r = await igDiscovery.searchInstagramHashtag({
+                keywords: searchKeywords,
+                maxResults: max_results || 50,
+                minSubscribers: min_subscribers || 1000,
+              });
+            } else if (platform === 'tiktok') {
+              r = await tiktokDiscovery.searchTikTokHashtag({
+                keywords: searchKeywords,
+                maxResults: max_results || 50,
+                minSubscribers: min_subscribers || 1000,
+              });
+            } else {
+              errors.push(`${platform}: unsupported`);
+              continue;
+            }
+          } catch (e) {
+            errors.push(`${platform}: ${e.message}`);
+            continue;
+          }
+          if (r && r.success) {
+            allChannels.push(...(r.channels || []));
+          } else if (r && r.error) {
+            errors.push(`${platform}: ${r.error}`);
+          }
+        }
+
+        if (allChannels.length === 0) {
           await exec(
             "UPDATE discovery_jobs SET status='error', error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-            [String(result.error || 'unknown error').slice(0, 500), jobId]
+            [(errors.join('; ') || 'no candidates found').slice(0, 500), jobId]
           );
-          console.warn('[discovery] failed:', result.error);
+          console.warn('[discovery] no results:', errors.join('; '));
           return;
         }
 
         await transaction(async (tx) => {
-          for (const ch of result.channels) {
+          for (const ch of allChannels) {
             await tx.exec(
               'INSERT INTO discovery_results (id, job_id, platform, channel_url, channel_name, subscribers, relevance_score, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
               [uuidv4(), jobId, ch.platform, ch.channel_url, ch.channel_name, ch.subscribers, ch.relevance_score, 'found']
@@ -4939,9 +5001,12 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
           }
         });
 
+        // If we found *some* candidates but a subset of platforms errored,
+        // surface the partial errors alongside a 'complete' status so admins
+        // can see which platforms didn't pull their weight.
         await exec(
-          "UPDATE discovery_jobs SET status='complete', total_found=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
-          [result.channels.length, jobId]
+          "UPDATE discovery_jobs SET status='complete', total_found=?, error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id=?",
+          [allChannels.length, errors.length ? errors.join('; ').slice(0, 500) : null, jobId]
         );
       } catch (e) {
         await exec(

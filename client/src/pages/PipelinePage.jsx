@@ -63,6 +63,8 @@ export default function PipelinePage() {
   );
   const [selectedDiscovery, setSelectedDiscovery] = useState(null);
   const [discovering, setDiscovering] = useState(false);
+  const [discoveryPlatforms, setDiscoveryPlatforms] = useState(['youtube']);
+  const [platformAvailability, setPlatformAvailability] = useState([]);
   const [threadData, setThreadData] = useState(null);
   const [outreachTasks, setOutreachTasks] = useState({ pending: [], recent: [] });
   const [emailQueueStats, setEmailQueueStats] = useState(null);
@@ -131,6 +133,16 @@ export default function PipelinePage() {
     if (s.default_discovery_keywords) setDiscoveryKeywords(s.default_discovery_keywords);
     if (s.default_discovery_min_subs) setDiscoveryMinSubs(s.default_discovery_min_subs);
   }, [currentWorkspace]);
+
+  // Fetch platform availability once — tells us which checkboxes can be
+  // enabled. Gracefully degrades to youtube-only if the call fails.
+  useEffect(() => {
+    api.getDiscoveryPlatforms()
+      .then(d => setPlatformAvailability(d.platforms || []))
+      .catch(() => setPlatformAvailability([
+        { id: 'youtube', configured: true, requires: 'YOUTUBE_API_KEY' },
+      ]));
+  }, []);
 
   // Persist current discovery defaults to the workspace. Admin-only on the
   // server; non-admin callers get 403 which we surface as a toast.
@@ -202,17 +214,28 @@ export default function PipelinePage() {
   };
 
   const handleStartDiscovery = async () => {
+    if (discoveryPlatforms.length === 0) {
+      toast.error(t('pipeline.discovery_no_platform') || 'Pick at least one platform');
+      return;
+    }
     setDiscovering(true);
     try {
       await api.startDiscovery({
         campaign_id: selectedCampaignId,
         keywords: discoveryKeywords,
+        platforms: discoveryPlatforms,
         min_subscribers: discoveryMinSubs,
         max_results: 50,
       });
       loadDiscoveryJobs();
     } catch (e) { toast.error(e.message); }
     setDiscovering(false);
+  };
+
+  const togglePlatform = (id) => {
+    setDiscoveryPlatforms(prev =>
+      prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
+    );
   };
 
   const handleViewThread = async (job) => {
@@ -387,6 +410,38 @@ export default function PipelinePage() {
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
               {t('pipeline.discovery_hint')}
             </p>
+            {platformAvailability.length > 0 && (
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                {platformAvailability.map(p => {
+                  const enabled = p.configured;
+                  const checked = discoveryPlatforms.includes(p.id);
+                  return (
+                    <label
+                      key={p.id}
+                      title={enabled ? '' : `${t('pipeline.discovery_platform_unconfigured') || 'Requires'} ${p.requires}`}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        padding: '6px 10px', borderRadius: 6,
+                        border: `1px solid ${checked && enabled ? 'var(--accent)' : 'var(--border)'}`,
+                        background: checked && enabled ? 'var(--accent-bg, rgba(59,130,246,0.08))' : 'transparent',
+                        cursor: enabled ? 'pointer' : 'not-allowed',
+                        opacity: enabled ? 1 : 0.5,
+                        fontSize: 13,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={!enabled}
+                        onChange={() => togglePlatform(p.id)}
+                      />
+                      <span style={{ textTransform: 'capitalize', fontWeight: checked ? 600 : 400 }}>{p.id}</span>
+                      {!enabled && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {p.requires}</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '10px', alignItems: 'end' }}>
               <div>
                 <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>{t('pipeline.discovery_keywords')}</label>

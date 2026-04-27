@@ -171,6 +171,7 @@ export const api = {
   getDiscoveryJobs: () => request('/discovery/jobs'),
   getDiscoveryJob: (id) => request(`/discovery/jobs/${id}`),
   processDiscoveryResults: (id, data) => request(`/discovery/jobs/${id}/process`, { method: 'POST', body: data }),
+  getDiscoveryPlatforms: () => request('/discovery/platforms'),
 
   // Stats
   getStats: () => request('/stats'),
