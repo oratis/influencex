@@ -1,7 +1,13 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-// Sentry MUST be initialized before any other module that we want traced.
-// Without SENTRY_DSN this is a silent no-op so dev / sandbox runs unchanged.
+// OpenTelemetry must initialize FIRST so its auto-instrumentation can patch
+// downstream modules (http, pg, express). Without OTEL_EXPORTER_OTLP_ENDPOINT
+// this is a silent no-op.
+const otel = require('./otel');
+otel.init();
+
+// Sentry follows OTel — Sentry v9's tracing layers on top of @opentelemetry/api
+// so they share spans. Without SENTRY_DSN this is a silent no-op.
 const sentry = require('./sentry');
 sentry.init();
 
@@ -35,6 +41,7 @@ const rbac = require('./rbac');
 const scheduler = require('./scheduler');
 const scheduledPublish = require('./scheduled-publish');
 const apifyWatchdog = require('./apify-watchdog');
+const inboxSync = require('./inbox-sync');
 const { rateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
@@ -44,6 +51,7 @@ const conductor = require('./agent-runtime/conductor');
 const agentsV2 = require('./agents-v2');
 const llm = require('./llm');
 const { createQueue } = require('./job-queue');
+const { createBullQueue } = require('./bullmq-queue');
 const emailJobs = require('./email-jobs');
 const gmailOAuth = require('./mailbox-oauth-gmail');
 const secrets = require('./secrets');
@@ -52,7 +60,14 @@ const { defaultCache } = require('./cache');
 const apify = require('./apify-client');
 
 // Shared job queue for background work (scraping, enrichment, etc)
-const jobQueue = createQueue({ concurrency: parseInt(process.env.QUEUE_CONCURRENCY) || 3 });
+// Pick the queue backend at boot. With REDIS_URL set, BullMQ takes over —
+// jobs survive a process crash, multiple Cloud Run replicas can share the
+// load, and we get the metrics page for free. Without it we fall back to the
+// in-process queue (max-instances=1 still required).
+const jobQueue = process.env.REDIS_URL
+  ? createBullQueue({ concurrency: parseInt(process.env.QUEUE_CONCURRENCY) || 5 })
+  : createQueue({ concurrency: parseInt(process.env.QUEUE_CONCURRENCY) || 3 });
+console.log(`[queue] Using ${process.env.REDIS_URL ? 'BullMQ + Redis' : 'in-process'} backend`);
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -760,6 +775,20 @@ app.post(`${BASE_PATH}/api/admin/apify-runs/reap`, authMiddleware, async (req, r
       return res.status(403).json({ error: 'Only platform admins can reap stuck runs' });
     }
     const r = await apifyWatchdog.reapStuckRuns({ exec, query });
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin-only: trigger an inbox auto-sync tick now (in addition to the hourly
+// cron). Useful for verifying a workspace's inbox_auto_sync_* settings.
+app.post(`${BASE_PATH}/api/admin/inbox-sync/tick`, authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only platform admins can trigger inbox sync' });
+    }
+    const r = await inboxSync.tick({ exec, query, queryOne, uuidv4 });
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -5881,6 +5910,7 @@ async function initializeDefaultData() {
         query, queryOne, exec, uuidv4, publishOauth, agentRuntime,
       });
       apifyWatchdog.start({ exec, query });
+      inboxSync.start({ exec, query, queryOne, uuidv4 });
       // Register all v2 agents with the runtime
       const registered = agentsV2.registerAll();
       console.log(`[agents-v2] Registered ${registered.length} agents: ${registered.join(', ')}`);

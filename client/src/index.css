@@ -354,6 +354,28 @@ tr:last-child td { border-bottom: none; }
 .sidebar-user-menu-item:hover { background: var(--bg-card); color: var(--text-primary); }
 
 /* Responsive */
+/* Hamburger toggle: visible only on mobile, sits in the global header. */
+.mobile-menu-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid var(--border, transparent);
+  color: var(--text-primary);
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+.mobile-menu-btn:hover { background: var(--bg-card); }
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 90;
+}
+.sidebar-backdrop.visible { display: block; }
+
 @media (max-width: 768px) {
   .sidebar { width: 64px; }
   .sidebar-header h1, .nav-item span { display: none; }
@@ -363,4 +385,32 @@ tr:last-child td { border-bottom: none; }
   .page-container { padding: 16px; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .sidebar-user-details, .sidebar-user-info svg:last-child { display: none; }
+}
+
+/* Real mobile: sidebar becomes a slide-in drawer; main content takes full
+   width with a hamburger button to open it. */
+@media (max-width: 600px) {
+  .mobile-menu-btn { display: inline-flex; }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 240px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 4px 0 12px rgba(0,0,0,0.4);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar.open .sidebar-header h1,
+  .sidebar.open .nav-item span,
+  .sidebar.open .sidebar-user-details,
+  .sidebar.open .sidebar-user-info svg:last-child { display: revert; }
+  .main-wrapper { margin-left: 0; }
+  .stats-grid { grid-template-columns: 1fr; }
+  .global-header { flex-wrap: wrap; gap: 8px; }
+  .global-header-stats { gap: 6px; flex-wrap: wrap; }
+  .page-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .table-container { overflow-x: auto; }
 }

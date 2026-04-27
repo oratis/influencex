@@ -36,6 +36,8 @@ import ReviewsPage from './pages/ReviewsPage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 import ErrorBoundary from './components/ErrorBoundary';
+import CommandPalette from './components/CommandPalette';
+import OnboardingTour from './components/OnboardingTour';
 
 // Lazy-load heavy pages
 const RoiDashboard = lazy(() => import('./pages/RoiDashboard'));
@@ -85,6 +87,7 @@ function useNavItems(user) {
 function AppContent() {
   const { user, loading, logout } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { t } = useI18n();
   const navItems = useNavItems(user);
 
@@ -161,8 +164,15 @@ function AppContent() {
 
   return (
     <CampaignProvider>
+      <CommandPalette />
+      <OnboardingTour />
       <div className="app-layout">
-        <aside className="sidebar">
+        <div
+          className={`sidebar-backdrop ${mobileNavOpen ? 'visible' : ''}`}
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+        <aside className={`sidebar ${mobileNavOpen ? 'open' : ''}`}>
           <div className="sidebar-header">
             <div className="sidebar-logo">
               <span>🎯</span>
@@ -177,6 +187,7 @@ function AppContent() {
                 to={item.path}
                 aria-label={item.label}
                 title={item.label}
+                onClick={() => setMobileNavOpen(false)}
                 className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
               >
                 {item.icon}
@@ -212,8 +223,8 @@ function AppContent() {
           </div>
         </aside>
         <div className="main-wrapper">
-          <GlobalHeader />
-          <main className="main-content" onClick={() => showUserMenu && setShowUserMenu(false)}>
+          <GlobalHeader onToggleMobileNav={() => setMobileNavOpen(o => !o)} />
+          <main className="main-content" onClick={() => { if (showUserMenu) setShowUserMenu(false); if (mobileNavOpen) setMobileNavOpen(false); }}>
             <Routes>
               <Route path="/" element={<HomeRedirect />} />
               <Route path="/conductor" element={<ConductorPage />} />
@@ -255,13 +266,21 @@ function HomeRedirect() {
   return <Navigate to={campaigns.length > 0 ? '/pipeline' : '/conductor'} replace />;
 }
 
-function GlobalHeader() {
+function GlobalHeader({ onToggleMobileNav }) {
   const { campaigns, selectedCampaignId, selectedCampaign, selectCampaign } = useCampaign();
   const { t } = useI18n();
 
   return (
     <div className="global-header">
       <div className="global-header-left">
+        <button
+          className="mobile-menu-btn"
+          onClick={onToggleMobileNav}
+          aria-label={t('nav.toggle_menu')}
+          title={t('nav.toggle_menu')}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
         <span className="global-header-label">{t('nav.campaigns')}:</span>
         <select
           className="global-campaign-select"
