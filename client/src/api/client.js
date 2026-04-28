@@ -373,4 +373,7 @@ export const api = {
   // Discovery results — export + save-to-KOL-Database
   exportDiscoveryResultsUrl: (jobId) => `${BASE}/discovery/jobs/${jobId}/export`,
   saveDiscoveryResultsToDb: (jobId, data) => request(`/discovery/jobs/${jobId}/save-to-db`, { method: 'POST', body: data }),
+
+  // Cross-entity search (Cmd-K palette)
+  search: (q) => request(`/search?q=${encodeURIComponent(q)}`),
 };

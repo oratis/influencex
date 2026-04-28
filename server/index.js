@@ -3348,6 +3348,53 @@ app.post(`${BASE_PATH}/api/inbox-messages/sync-apify`, async (req, res) => {
   }
 });
 
+// Cross-entity search for the Cmd-K palette. Returns up to ~5 hits per
+// kind so the palette stays snappy even with large workspaces. Uses LIKE
+// with a single param so SQLite + Postgres run the same path. Workspace
+// scoping is mandatory — no cross-tenant leakage.
+app.get(`${BASE_PATH}/api/search`, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ kols: [], contacts: [], campaigns: [] });
+    const like = `%${q.replace(/[%_]/g, '\\$&')}%`;
+    const ws = req.workspace.id;
+    const limit = Math.min(parseInt(req.query.limit) || 5, 20);
+
+    const [kols, contacts, campaigns] = await Promise.all([
+      query(
+        `SELECT id, platform, username, display_name, followers
+         FROM kol_database
+         WHERE workspace_id = ?
+           AND (LOWER(username) LIKE LOWER(?) OR LOWER(display_name) LIKE LOWER(?))
+         ORDER BY followers DESC
+         LIMIT ?`,
+        [ws, like, like, limit]
+      ).then(r => r.rows || []).catch(() => []),
+      query(
+        `SELECT id, kol_id, kol_username, kol_email, status, campaign_id
+         FROM contacts
+         WHERE workspace_id = ?
+           AND (LOWER(kol_username) LIKE LOWER(?) OR LOWER(kol_email) LIKE LOWER(?))
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+        [ws, like, like, limit]
+      ).then(r => r.rows || []).catch(() => []),
+      query(
+        `SELECT id, name, status
+         FROM campaigns
+         WHERE workspace_id = ? AND LOWER(name) LIKE LOWER(?)
+         ORDER BY created_at DESC
+         LIMIT ?`,
+        [ws, like, limit]
+      ).then(r => r.rows || []).catch(() => []),
+    ]);
+
+    res.json({ kols, contacts, campaigns });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Standalone review harvest (no LLM analysis, returns reviews + rule-based
 // sentiment summary). Cheaper than running review-miner if you just want the
 // raw data. Body: { source: 'steam'|'app-store'|'play-store', app_id, country?, limit? }

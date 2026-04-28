@@ -17,6 +17,28 @@ export default function AgentsPage() {
 
   useEffect(() => { loadAll(); }, []);
 
+  // Deep-link: /#/agents?run=<id>&input=<json> opens the run modal pre-filled.
+  // Other pages use this to hand off to a specific agent (e.g. ReviewsPage →
+  // review-miner).
+  useEffect(() => {
+    const hash = window.location.hash || '';
+    const qIdx = hash.indexOf('?');
+    if (qIdx < 0) return;
+    const params = new URLSearchParams(hash.slice(qIdx));
+    const runId = params.get('run');
+    const inputRaw = params.get('input');
+    if (!runId) return;
+    setRunningAgentId(runId);
+    if (inputRaw) {
+      try {
+        const obj = JSON.parse(decodeURIComponent(inputRaw));
+        setRunInput(JSON.stringify(obj, null, 2));
+      } catch {}
+    }
+    // Strip the params so refresh doesn't re-open the modal.
+    history.replaceState(null, '', window.location.pathname + window.location.search + '#/agents');
+  }, []);
+
   async function loadAll() {
     try {
       const [a, r, c] = await Promise.all([

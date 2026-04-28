@@ -60,6 +60,17 @@ export default function OnboardingTour() {
     return () => clearTimeout(id);
   }, [loading, campaigns]);
 
+  // Manual restart from the user menu dispatches this event. We bypass the
+  // "no campaigns" guard so returning users can re-watch on demand.
+  useEffect(() => {
+    function handleRestart() {
+      setStep(0);
+      setOpen(true);
+    }
+    window.addEventListener('onboarding:restart', handleRestart);
+    return () => window.removeEventListener('onboarding:restart', handleRestart);
+  }, []);
+
   function dismiss() {
     localStorage.setItem(STORAGE_KEY, '1');
     setOpen(false);

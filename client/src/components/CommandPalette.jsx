@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '../i18n';
 import { useAuth } from '../AuthContext';
+import { api } from '../api/client';
 
 // Cmd-K / Ctrl-K command palette. Lists every nav destination plus quick
 // actions (logout, switch language). Filterable by typed query — fuzzy
@@ -13,7 +14,9 @@ export default function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
+  const [searchHits, setSearchHits] = useState({ kols: [], contacts: [], campaigns: [] });
   const inputRef = useRef(null);
+  const searchTimer = useRef(null);
 
   // Global hotkey listener.
   useEffect(() => {
@@ -84,6 +87,55 @@ export default function CommandPalette() {
   // Keep activeIdx in range as the filter changes.
   useEffect(() => { setActiveIdx(0); }, [query]);
 
+  // Debounced cross-entity search. Only kicks in when the user has typed
+  // something — otherwise the palette stays a pure nav menu.
+  useEffect(() => {
+    if (!open) return;
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    const q = query.trim();
+    if (q.length < 2) { setSearchHits({ kols: [], contacts: [], campaigns: [] }); return; }
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const r = await api.search(q);
+        setSearchHits({ kols: r.kols || [], contacts: r.contacts || [], campaigns: r.campaigns || [] });
+      } catch {
+        setSearchHits({ kols: [], contacts: [], campaigns: [] });
+      }
+    }, 200);
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+  }, [query, open]);
+
+  // Append cross-entity search hits to the filtered nav results so they all
+  // share keyboard navigation. Each hit gets a kind tag for clarity.
+  const allItems = useMemo(() => {
+    const list = [...filtered];
+    for (const k of searchHits.kols) {
+      list.push({
+        id: `search:kol:${k.id}`,
+        kind: 'kol',
+        label: `${k.display_name || k.username} · ${k.platform} · ${Number(k.followers || 0).toLocaleString()}`,
+        path: '/kol-database',
+      });
+    }
+    for (const c of searchHits.contacts) {
+      list.push({
+        id: `search:contact:${c.id}`,
+        kind: 'contact',
+        label: `${c.kol_username || c.kol_email || 'contact'} · ${c.status || 'pending'}`,
+        path: '/contacts',
+      });
+    }
+    for (const cam of searchHits.campaigns) {
+      list.push({
+        id: `search:campaign:${cam.id}`,
+        kind: 'campaign',
+        label: `${cam.name} · ${cam.status || ''}`,
+        path: `/campaigns/${cam.id}`,
+      });
+    }
+    return list;
+  }, [filtered, searchHits]);
+
   function pick(item) {
     if (!item) return;
     setOpen(false);
@@ -97,13 +149,13 @@ export default function CommandPalette() {
   function handleKeyDown(e) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setActiveIdx(i => Math.min(i + 1, filtered.length - 1));
+      setActiveIdx(i => Math.min(i + 1, allItems.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActiveIdx(i => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      pick(filtered[activeIdx]);
+      pick(allItems[activeIdx]);
     }
   }
 
@@ -131,12 +183,12 @@ export default function CommandPalette() {
           style={{ borderRadius: 0, borderTop: 'none', borderLeft: 'none', borderRight: 'none', fontSize: 15, padding: 14 }}
         />
         <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
-          {filtered.length === 0 && (
+          {allItems.length === 0 && (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
               {t('command.no_results')}
             </div>
           )}
-          {filtered.map((it, idx) => (
+          {allItems.map((it, idx) => (
             <button
               key={it.id}
               onClick={() => pick(it)}
@@ -164,7 +216,12 @@ export default function CommandPalette() {
                 textTransform: 'uppercase',
                 letterSpacing: 0.5,
               }}>
-                {it.kind === 'nav' ? t('command.tag_go') : t('command.tag_action')}
+                {it.kind === 'nav' ? t('command.tag_go')
+                  : it.kind === 'action' ? t('command.tag_action')
+                  : it.kind === 'kol' ? t('command.tag_kol')
+                  : it.kind === 'contact' ? t('command.tag_contact')
+                  : it.kind === 'campaign' ? t('command.tag_campaign')
+                  : '?'}
               </span>
               <span>{it.label}</span>
             </button>

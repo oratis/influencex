@@ -112,7 +112,29 @@ export default function ReviewsPage() {
 
       {summary && (
         <div className="card" style={{ marginBottom: 16 }}>
-          <h3 style={{ marginTop: 0, marginBottom: 12, fontSize: 16 }}>{t('reviews.summary_title')}</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ margin: 0, fontSize: 16 }}>{t('reviews.summary_title')}</h3>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                const apifyKey = source === 'steam' ? 'apify_steam_app_id'
+                  : source === 'app-store' ? 'apify_app_store_app_id'
+                  : 'apify_play_store_app_id';
+                const input = {
+                  product: appId,
+                  audience_context: '',
+                  [apifyKey]: appId,
+                  apify_country: country,
+                  apify_review_limit: parseInt(limit, 10) || 200,
+                };
+                const enc = encodeURIComponent(JSON.stringify(input));
+                window.location.hash = `#/agents?run=review-miner&input=${enc}`;
+              }}
+              title={t('reviews.run_miner_title')}
+            >
+              {t('reviews.run_miner_btn')}
+            </button>
+          </div>
           <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
             <div className="stat-card">
               <div className="stat-icon purple">∑</div>

@@ -27,8 +27,56 @@ const POSTS_PER_WORKSPACE = parseInt(process.env.INBOX_SYNC_POSTS_PER_WS) || 5;
 
 let _interval = null;
 
+// Auto-discover the workspace's own recent IG / TikTok post URLs via Apify
+// profile scrape, given the connected handle from platform_connections.
+// Returns { igUrls, ttUrls } — empty arrays when nothing connected or Apify
+// not configured.
+async function autoDiscoverPostUrls({ query }, workspaceId) {
+  const apify = require('./apify-client');
+  if (!apify.isConfigured()) return { igUrls: [], ttUrls: [] };
+  let igUrls = [], ttUrls = [];
+  try {
+    const r = await query(
+      `SELECT platform, account_name FROM platform_connections
+       WHERE workspace_id = ? AND platform IN ('instagram', 'tiktok')`,
+      [workspaceId]
+    );
+    for (const row of r.rows || []) {
+      if (!row.account_name) continue;
+      try {
+        if (row.platform === 'instagram') {
+          // The instagram-profile-scraper returns `latestPosts: [{ url, ... }]`
+          // when called with `usernames`. Cap urls at POSTS_PER_WORKSPACE.
+          const r1 = await apify.runActor('apify/instagram-profile-scraper', {
+            usernames: [row.account_name],
+            resultsLimit: 1,
+          }, { workspaceId });
+          if (r1.success) {
+            const latest = (r1.items?.[0]?.latestPosts || []).map(p => p.url).filter(Boolean);
+            igUrls = latest.slice(0, POSTS_PER_WORKSPACE);
+          }
+        } else if (row.platform === 'tiktok') {
+          const r2 = await apify.runActor('clockworks/tiktok-scraper', {
+            profiles: [`https://www.tiktok.com/@${row.account_name}`],
+            resultsPerPage: POSTS_PER_WORKSPACE,
+            shouldDownloadVideos: false,
+          }, { workspaceId });
+          if (r2.success) {
+            ttUrls = (r2.items || []).map(it => it.webVideoUrl).filter(Boolean).slice(0, POSTS_PER_WORKSPACE);
+          }
+        }
+      } catch (e) {
+        console.warn(`[inbox-sync] auto-discover ${row.platform} failed for ${workspaceId}:`, e.message);
+      }
+    }
+  } catch (e) {
+    // platform_connections might not exist yet on a fresh sandbox — ignore.
+  }
+  return { igUrls, ttUrls };
+}
+
 async function tick({ exec, query, queryOne, uuidv4 }) {
-  let synced = 0, errored = 0;
+  let synced = 0, errored = 0, autoDiscovered = 0;
   try {
     const r = await query(
       `SELECT id, name, settings FROM workspaces
@@ -44,19 +92,26 @@ async function tick({ exec, query, queryOne, uuidv4 }) {
       } catch { return false; }
     }).slice(0, MAX_WORKSPACES_PER_TICK);
 
-    if (enabled.length === 0) return { synced, errored, workspaces_checked: 0 };
+    if (enabled.length === 0) return { synced, errored, autoDiscovered, workspaces_checked: 0 };
 
     const commentHarvest = require('./comment-harvest');
 
     for (const ws of enabled) {
       try {
-        // v1: use the workspace's recent_post_urls cache if present. The user
-        // (or another agent) populates this list — we do NOT yet auto-discover
-        // posts via OAuth. That's v2.
         let settings = {};
         try { settings = typeof ws.settings === 'string' ? JSON.parse(ws.settings) : ws.settings || {}; } catch {}
-        const igUrls = (settings.inbox_auto_sync_ig_urls || []).slice(0, POSTS_PER_WORKSPACE);
-        const ttUrls = (settings.inbox_auto_sync_tt_urls || []).slice(0, POSTS_PER_WORKSPACE);
+
+        // Two URL sources: explicit settings.inbox_auto_sync_*_urls take
+        // priority; otherwise we auto-discover via the connected handle.
+        let igUrls = (settings.inbox_auto_sync_ig_urls || []).slice(0, POSTS_PER_WORKSPACE);
+        let ttUrls = (settings.inbox_auto_sync_tt_urls || []).slice(0, POSTS_PER_WORKSPACE);
+
+        if (igUrls.length === 0 && ttUrls.length === 0) {
+          const auto = await autoDiscoverPostUrls({ query }, ws.id);
+          igUrls = auto.igUrls;
+          ttUrls = auto.ttUrls;
+          if (igUrls.length + ttUrls.length > 0) autoDiscovered++;
+        }
 
         if (igUrls.length > 0) {
           const r1 = await commentHarvest.harvestInstagramComments({
@@ -88,9 +143,9 @@ async function tick({ exec, query, queryOne, uuidv4 }) {
     console.warn('[inbox-sync] tick failed:', e.message);
   }
   if (synced > 0 || errored > 0) {
-    console.log(`[inbox-sync] tick: ${synced} workspace(s) synced, ${errored} error(s)`);
+    console.log(`[inbox-sync] tick: ${synced} workspace(s) synced (${autoDiscovered} auto-discovered), ${errored} error(s)`);
   }
-  return { synced, errored };
+  return { synced, errored, autoDiscovered };
 }
 
 async function insertComment({ exec, queryOne, uuidv4 }, workspaceId, platform, comment) {
