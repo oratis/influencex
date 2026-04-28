@@ -10,6 +10,22 @@ CLOUD_SQL_INSTANCE="${PROJECT_ID}:${REGION}:influencex-db"
 echo "🎯 Deploying InfluenceX to Google Cloud Run..."
 echo "Project: ${PROJECT_ID}"
 echo "Service: ${SERVICE_NAME}"
+
+# Changelog reminder. Warn (don't block) if docs/CHANGELOG.md hasn't been
+# touched recently — skip the warning if the most recent commit modifies it.
+CHANGELOG_PATH="$(dirname "$0")/docs/CHANGELOG.md"
+if [[ -f "$CHANGELOG_PATH" ]]; then
+  LAST_TOUCH_AGE=$(( ( $(date +%s) - $(stat -f %m "$CHANGELOG_PATH" 2>/dev/null || stat -c %Y "$CHANGELOG_PATH" 2>/dev/null || echo 0) ) / 3600 ))
+  RECENT_COMMITS_TOUCHED=$(git log --since='2 hours ago' --pretty=format: --name-only 2>/dev/null | grep -c "docs/CHANGELOG.md" || true)
+  if (( LAST_TOUCH_AGE > 4 )) && (( RECENT_COMMITS_TOUCHED == 0 )); then
+    echo ""
+    echo "⚠️  Reminder: docs/CHANGELOG.md hasn't been updated in ${LAST_TOUCH_AGE}h."
+    echo "    Add an entry for this release so users see what's new at /changelog."
+    echo "    Press Enter to continue (or Ctrl-C to abort and update first)."
+    read -r
+  fi
+fi
+
 echo "Region: ${REGION}"
 echo ""
 

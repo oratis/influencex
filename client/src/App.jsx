@@ -1,4 +1,4 @@
-import React, { useState, Suspense, lazy } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { CampaignProvider, useCampaign } from './CampaignContext';
@@ -33,6 +33,7 @@ import InviteCodesPage from './pages/InviteCodesPage';
 import ApifyRunsPage from './pages/ApifyRunsPage';
 import DiscoveryPage from './pages/DiscoveryPage';
 import ReviewsPage from './pages/ReviewsPage';
+import ChangelogPage from './pages/ChangelogPage';
 import WorkspaceSettingsPage from './pages/WorkspaceSettingsPage';
 import NotFoundPage from './components/NotFoundPage';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -88,8 +89,28 @@ function AppContent() {
   const { user, loading, logout } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [hasUnreadChangelog, setHasUnreadChangelog] = useState(false);
   const { t } = useI18n();
   const navItems = useNavItems(user);
+
+  // Check changelog on mount + when route changes to /changelog so the badge
+  // updates immediately after the user views it. Compares the latest
+  // entry's date to localStorage.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    fetch('/api/changelog')
+      .then(r => r.ok ? r.json() : { entries: [] })
+      .then(d => {
+        if (cancelled) return;
+        const top = d.entries?.[0]?.date;
+        if (!top) { setHasUnreadChangelog(false); return; }
+        const seen = localStorage.getItem('influencex_changelog_last_seen_v1');
+        setHasUnreadChangelog(seen !== top);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [user, window.location.hash]);
 
   if (loading) {
     return (
@@ -218,6 +239,20 @@ function AppContent() {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
                   <span>{t('onboarding.restart_menu')}</span>
                 </div>
+                <NavLink
+                  to="/changelog"
+                  className="sidebar-user-menu-item"
+                  onClick={() => { setShowUserMenu(false); setHasUnreadChangelog(false); }}
+                  style={{ textDecoration: 'none' }}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                  <span style={{ flex: 1 }}>{t('changelog.menu_item')}</span>
+                  {hasUnreadChangelog && (
+                    <span className="badge badge-green" style={{ fontSize: 9, padding: '1px 5px' }}>
+                      {t('changelog.new_badge')}
+                    </span>
+                  )}
+                </NavLink>
                 <div className="sidebar-user-menu-item" onClick={() => { setShowUserMenu(false); logout(); }}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                   <span>{t('auth.sign_out')}</span>
@@ -248,6 +283,7 @@ function AppContent() {
               <Route path="/kol-database" element={<KolDatabase />} />
               <Route path="/discovery" element={<DiscoveryPage />} />
               <Route path="/reviews" element={<ReviewsPage />} />
+              <Route path="/changelog" element={<ChangelogPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/invite-codes" element={<InviteCodesPage />} />
               <Route path="/apify-runs" element={<ApifyRunsPage />} />

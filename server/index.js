@@ -970,6 +970,8 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   // table acts as the authenticity check.
   if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
   if (req.path === '/mailboxes/oauth/gmail/callback') return next();
+  // Public release notes — anyone can read /changelog without logging in.
+  if (req.path === '/changelog' || req.path.startsWith('/changelog/')) return next();
   authMiddleware(req, res, next);
 });
 
@@ -986,6 +988,7 @@ const WORKSPACE_SKIP_PREFIXES = [
   '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
   '/quota/', '/cache/', '/queue/', '/apify/',
   '/query/', '/scheduler/', '/stats',
+  '/changelog', // public release notes — no auth, no workspace context
   '/mailboxes/oauth/gmail/callback', // Gmail OAuth callback resolves workspace from state
 ];
 app.use(`${BASE_PATH}/api`, (req, res, next) => {
@@ -5843,6 +5846,19 @@ function detectCategoryForDiscovery(text) {
   for (const c of cats) { const s = c.kw.filter(k => lower.includes(k)).length; if (s > best.score) best = { name: c.name, score: s }; }
   return best.name;
 }
+
+// Public: changelog entries parsed from docs/CHANGELOG.md. No auth so
+// landing-page visitors can read release notes too. Cached 60s in-process
+// — see server/changelog.js.
+app.get(`${BASE_PATH}/api/changelog`, async (req, res) => {
+  try {
+    const changelog = require('./changelog');
+    const entries = await changelog.getEntries();
+    res.json({ entries });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Admin-only debug endpoint to verify Sentry wiring in prod. Throws a
 // synthetic error which the Sentry middleware below should capture.

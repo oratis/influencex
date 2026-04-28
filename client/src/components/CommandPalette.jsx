@@ -61,6 +61,7 @@ export default function CommandPalette() {
       { id: 'nav:kol-database', label: t('nav.kol_database'), kind: 'nav', path: '/kol-database' },
       { id: 'nav:discovery',   label: t('nav.discovery'),    kind: 'nav', path: '/discovery' },
       { id: 'nav:reviews',     label: t('nav.reviews'),      kind: 'nav', path: '/reviews' },
+      { id: 'nav:changelog',   label: t('nav.changelog'),    kind: 'nav', path: '/changelog' },
       { id: 'nav:users',       label: t('nav.users'),        kind: 'nav', path: '/users' },
       { id: 'nav:workspace',   label: t('nav.workspace_settings') || 'Workspace settings', kind: 'nav', path: '/workspace/settings' },
     ];
