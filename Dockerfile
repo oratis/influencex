@@ -20,6 +20,11 @@ RUN cd client && npx vite build
 # Copy server code
 COPY server/ server/
 
+# Copy docs/ — server/changelog.js reads docs/CHANGELOG.md at runtime to
+# expose release notes via /api/changelog. Without this the parsed entries
+# come back empty in prod.
+COPY docs/ docs/
+
 # Expose port
 ENV PORT=8080
 ENV BASE_PATH=""
