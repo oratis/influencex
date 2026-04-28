@@ -800,13 +800,22 @@ async function scrapeProfile(profileUrl, platform, username, opts = {}) {
 }
 
 function getApiStatus() {
+  // TikTok + Instagram are reachable via either Modash OR Apify. We report
+  // green when EITHER is configured. The optional `via` field lets the UI
+  // show a tooltip explaining which one is providing the capability.
+  const apifyOk = apify.isConfigured();
+  const tiktokVia = MODASH_API_KEY ? 'modash' : apifyOk ? 'apify' : null;
+  const instagramVia = MODASH_API_KEY ? 'modash' : apifyOk ? 'apify' : null;
   return {
     youtube: !!YOUTUBE_API_KEY,
-    tiktok: !!MODASH_API_KEY,
-    instagram: !!MODASH_API_KEY,
+    tiktok: !!tiktokVia,
+    tiktok_via: tiktokVia,
+    instagram: !!instagramVia,
+    instagram_via: instagramVia,
     twitch: !!(process.env.TWITCH_CLIENT_ID && process.env.TWITCH_CLIENT_SECRET),
     x: false, // requires expensive paid API
     modash: !!MODASH_API_KEY,
+    apify: apifyOk,
   };
 }
 

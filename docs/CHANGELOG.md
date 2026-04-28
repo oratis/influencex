@@ -14,6 +14,21 @@
 
 ---
 
+## 2026-04-28 — KOL scrape recovery
+
+### Fixed
+- **KOL scrape regression**: `scrapeAndEnrichKol` was referencing an undefined `req` after the Apify integration, throwing `ReferenceError` for every KOL added via URL. Existing rows had `scrape_status='error'` and the API status indicator at the top of the KOL Database page showed all-red even when Apify was configured. Both are fixed: scrapes succeed via Apify when MODASH_API_KEY is unset, and the status indicator now reflects Apify availability.
+
+### Added
+- **Per-row "Retry scrape" button** on every KOL row in error / partial state — uses the currently-configured API keys.
+- **"Retry all failed" bulk button** at the top of KOL Database — re-queues every error/partial row in the workspace (capped at 200, 1s spacer between kicks).
+- **`POST /api/kol-database/:id/retry-scrape`** + **`POST /api/kol-database/retry-all`** endpoints, both workspace-scoped.
+
+### Changed
+- API status indicator now considers Apify alongside Modash. Tooltip shows which provider is serving each platform (e.g. "instagram via apify" vs "instagram via modash").
+
+---
+
 ## 2026-04-28 — Changelog system
 
 ### Added

@@ -4660,7 +4660,7 @@ app.post(`${BASE_PATH}/api/kol-database`, async (req, res) => {
     );
 
     // Simulate AI scrape asynchronously
-    setTimeout(() => scrapeAndEnrichKol(id, profile_url, detectedPlatform, username), 100);
+    setTimeout(() => scrapeAndEnrichKol(id, profile_url, detectedPlatform, username, req.workspace.id), 100);
 
     res.json({ id, platform: detectedPlatform, username, profile_url, scrape_status: 'scraping' });
   } catch (e) {
@@ -4699,7 +4699,7 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
         "INSERT INTO kol_database (id, workspace_id, platform, username, display_name, profile_url, scrape_status) VALUES (?, ?, ?, ?, ?, ?, 'scraping')",
         [id, req.workspace.id, platform, username, username, trimmed]
       );
-      setTimeout(() => scrapeAndEnrichKol(id, trimmed, platform, username), 100 + results.length * 500);
+      setTimeout(() => scrapeAndEnrichKol(id, trimmed, platform, username, req.workspace.id), 100 + results.length * 500);
       results.push({ url: trimmed, status: 'queued', id, platform, username });
     }
     res.json({ queued: results.filter(r => r.status === 'queued').length, duplicates: results.filter(r => r.status === 'duplicate').length, results });
@@ -4709,6 +4709,57 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
 });
 
 // Delete KOL from database
+// Retry scrape for a single KOL row in error / partial state. Useful after
+// adding API keys (Apify, MODASH, etc.) — replays the original profile URL.
+app.post(`${BASE_PATH}/api/kol-database/:id/retry-scrape`, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const k = await s.queryOne(
+      'SELECT id, platform, username, profile_url FROM kol_database WHERE id = ? AND workspace_id = ?',
+      [req.params.id, req.workspace.id]
+    );
+    if (!k) return res.status(404).json({ error: 'KOL not found' });
+    await s.exec(
+      "UPDATE kol_database SET scrape_status='scraping', scrape_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
+      [k.id, req.workspace.id]
+    );
+    setTimeout(() => scrapeAndEnrichKol(k.id, k.profile_url, k.platform, k.username, req.workspace.id), 100);
+    res.json({ success: true, id: k.id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Bulk retry every row in error/partial state for the current workspace.
+// Rate-limited via discoveryLimiter so a button-mash doesn't fan out 1000
+// concurrent scrapes. Returns count of jobs queued.
+app.post(`${BASE_PATH}/api/kol-database/retry-all`, discoveryLimiter, async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const r = await s.query(
+      `SELECT id, platform, username, profile_url FROM kol_database
+       WHERE workspace_id = ? AND scrape_status IN ('error', 'partial')
+       ORDER BY updated_at ASC LIMIT 200`,
+      [req.workspace.id]
+    );
+    const rows = r.rows || [];
+    if (rows.length === 0) return res.json({ queued: 0 });
+
+    await s.exec(
+      `UPDATE kol_database SET scrape_status='scraping', scrape_error=NULL, updated_at=CURRENT_TIMESTAMP
+       WHERE workspace_id = ? AND scrape_status IN ('error', 'partial')`,
+      [req.workspace.id]
+    );
+    rows.forEach((k, i) => {
+      // 1s spacer between kicks so the per-host scraper APIs aren't slammed.
+      setTimeout(() => scrapeAndEnrichKol(k.id, k.profile_url, k.platform, k.username, req.workspace.id), 100 + i * 1000);
+    });
+    res.json({ queued: rows.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.delete(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
@@ -6203,10 +6254,12 @@ function extractUsernameFromUrl(url, platform) {
   }
 }
 
-async function scrapeAndEnrichKol(id, profileUrl, platform, username) {
+async function scrapeAndEnrichKol(id, profileUrl, platform, username, workspaceId) {
   try {
-    // Use real APIs to fetch profile data
-    const result = await scraper.scrapeProfile(profileUrl, platform, username, { workspaceId: req.workspace?.id });
+    // Use real APIs to fetch profile data. workspaceId is passed by the
+    // caller (route handler) since this function is invoked async via
+    // setTimeout — the original `req` reference would be a ReferenceError.
+    const result = await scraper.scrapeProfile(profileUrl, platform, username, { workspaceId });
 
     if (!result.success) {
       // API not configured or failed - mark with error, don't generate fake data

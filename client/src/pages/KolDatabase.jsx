@@ -20,6 +20,8 @@ export default function KolDatabase() {
   const [platformFilter, setPlatformFilter] = useState('');
   const [sort, setSort] = useState('');
   const [importing, setImporting] = useState(false);
+  const [retryingAll, setRetryingAll] = useState(false);
+  const [retryingId, setRetryingId] = useState(null);
   const [selectedKol, setSelectedKol] = useState(null);
   const [apiStatus, setApiStatus] = useState(null);
   const pollRef = useRef(null);
@@ -77,6 +79,26 @@ export default function KolDatabase() {
     } catch (e) { toast.error(e.message); }
   };
 
+  const handleRetryRow = async (id) => {
+    setRetryingId(id);
+    try {
+      await api.retryKolDatabaseScrape(id);
+      toast.success(t('kol_db.retry_queued'));
+      loadKols();
+    } catch (e) { toast.error(e.message); }
+    setRetryingId(null);
+  };
+
+  const handleRetryAll = async () => {
+    setRetryingAll(true);
+    try {
+      const r = await api.retryKolDatabaseAll();
+      toast.success(t('kol_db.retry_all_queued', { count: r.queued || 0 }));
+      loadKols();
+    } catch (e) { toast.error(e.message); }
+    setRetryingAll(false);
+  };
+
   const scrapingCount = kols.filter(k => k.scrape_status === 'scraping').length;
 
   return (
@@ -87,6 +109,11 @@ export default function KolDatabase() {
           <p>{t('kol_db.subtitle')}</p>
         </div>
         <div className="btn-group">
+          {kols.some(k => k.scrape_status === 'error' || k.scrape_status === 'partial') && (
+            <button className="btn btn-secondary" onClick={handleRetryAll} disabled={retryingAll} title={t('kol_db.retry_all_title')}>
+              {retryingAll ? `⏳ ${t('kol_db.retry_all_running')}` : `🔁 ${t('kol_db.retry_all')}`}
+            </button>
+          )}
           <button className="btn btn-secondary" onClick={async () => {
             try { await api.downloadCsv('/kol-database/export', 'kol-database.csv'); toast.success(t('kol_db.export_success')); }
             catch (e) { toast.error(e.message); }
@@ -250,7 +277,19 @@ export default function KolDatabase() {
                       )}
                     </td>
                     <td onClick={e => e.stopPropagation()}>
-                      <button className="btn btn-sm btn-secondary" onClick={() => handleDelete(kol.id)} title={t('kol_db.remove_title')}>🗑️</button>
+                      <div className="btn-group">
+                        {(kol.scrape_status === 'error' || kol.scrape_status === 'partial') && (
+                          <button
+                            className="btn btn-sm btn-secondary"
+                            onClick={() => handleRetryRow(kol.id)}
+                            disabled={retryingId === kol.id}
+                            title={t('kol_db.retry_row_title')}
+                          >
+                            {retryingId === kol.id ? '⏳' : '🔁'}
+                          </button>
+                        )}
+                        <button className="btn btn-sm btn-secondary" onClick={() => handleDelete(kol.id)} title={t('kol_db.remove_title')}>🗑️</button>
+                      </div>
                     </td>
                   </tr>
                 ))}

@@ -148,6 +148,8 @@ export const api = {
   addKolByUrl: (data) => request('/kol-database', { method: 'POST', body: data }),
   batchAddKolUrls: (urls) => request('/kol-database/batch', { method: 'POST', body: { urls } }),
   deleteKolDatabaseEntry: (id) => request(`/kol-database/${id}`, { method: 'DELETE' }),
+  retryKolDatabaseScrape: (id) => request(`/kol-database/${id}/retry-scrape`, { method: 'POST' }),
+  retryKolDatabaseAll: () => request('/kol-database/retry-all', { method: 'POST' }),
   importCampaignKols: (campaignId) => request(`/kol-database/import-campaign/${campaignId}`, { method: 'POST' }),
 
   // Pipeline (Task 1)
