@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../AuthContext';
 import { useI18n } from '../i18n';
 import PasswordInput from '../components/PasswordInput';
+import FormField from '../components/FormField';
 
 // Login-only page. Account creation is invite-only — admins send invitation
 // links handled by AcceptInvitePage (/accept-invite?token=...).
@@ -85,8 +86,7 @@ export default function AuthPage() {
           )}
 
           <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label className="form-label">{t('auth.email')}</label>
+            <FormField label={t('auth.email')} required>
               <input
                 className="form-input"
                 type="email"
@@ -96,18 +96,16 @@ export default function AuthPage() {
                 autoComplete="email"
                 required
               />
-            </div>
-            <div className="form-group">
-              <label className="form-label" htmlFor="auth-password">{t('auth.password')}</label>
+            </FormField>
+            <FormField label={t('auth.password')} required id="auth-password">
               <PasswordInput
-                id="auth-password"
                 placeholder={t('auth.password_placeholder')}
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
                 autoComplete="current-password"
                 required
               />
-            </div>
+            </FormField>
 
             {error && (
               <div className="auth-error">

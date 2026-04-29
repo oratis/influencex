@@ -14,6 +14,38 @@
 
 ---
 
+## 2026-04-30 — Sprint Q2 cleanup: Redis cache + Vitest + FormField + plugin spec
+
+### Added
+- **Redis-backed cache + rate-limit** (Sprint A4): `cache.js` and
+  `rate-limit.js` now transparently use Redis when `REDIS_URL` is set, with
+  fail-open behavior (any Redis error → behave as if there's no cache so
+  business logic keeps running). Companion to the BullMQ queue from A3 —
+  flip a single env to make multi-instance Cloud Run safe.
+- **`<FormField>` component** (Sprint C5): standardized form-field wrapper
+  that auto-wires label `htmlFor`, `aria-describedby`, `aria-invalid`,
+  `aria-required`. Eliminates per-page boilerplate and enforces our
+  WCAG 2.1 Level A baseline on every form. AuthPage migrated as the
+  reference implementation; other pages can adopt incrementally.
+- **Frontend test runner** (Sprint C2): Vitest + React Testing Library wired
+  in `client/`. 21 component tests cover PasswordInput visibility toggle,
+  FormField a11y wiring, OnboardingTour auto-trigger logic +
+  localStorage persistence + manual restart event, CommandPalette
+  Cmd-K/Ctrl-K hotkey + admin gating + filter behavior. Run with
+  `cd client && npm test`.
+- **Plugin API spec v0** (`docs/PLUGIN_API_v0.md`, Sprint D4): internal
+  contract for `Agent` / `ApifyActor` / `JobHandler` plugin shapes
+  to support the upcoming `agents-v2/` → `agents-v3/` refactor without
+  breaking external consumers (we have none yet, but the doc fixes the
+  shape before we touch it).
+
+### Changed
+- `cache.js` and `rate-limit.js` now log which backend they're using at
+  boot (`[cache] Using Redis-backed defaultCache` or in-process). No
+  behavior change when REDIS_URL is unset.
+
+---
+
 ## 2026-04-28 — KOL scrape recovery
 
 ### Fixed

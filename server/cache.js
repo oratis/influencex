@@ -93,7 +93,22 @@ function createCache({ defaultTtlMs = 5 * 60 * 1000, maxKeys = 1000 } = {}) {
   return { get, set, delete: del, clear, remember, getStats };
 }
 
-// Default shared cache — used by API route handlers that want "just a cache"
-const defaultCache = createCache();
+// Default shared cache — used by API route handlers that want "just a cache".
+// When REDIS_URL is set we use the Redis-backed cache so multi-replica
+// Cloud Run shares a single coherent cache. Without it we fall back to the
+// in-process cache (max-instances=1 still required).
+let defaultCache;
+if (process.env.REDIS_URL) {
+  try {
+    const { createRedisCache } = require('./redis-cache');
+    defaultCache = createRedisCache();
+    console.log('[cache] Using Redis-backed defaultCache');
+  } catch (e) {
+    console.warn('[cache] Redis init failed, falling back to in-process:', e.message);
+    defaultCache = createCache();
+  }
+} else {
+  defaultCache = createCache();
+}
 
 module.exports = { createCache, defaultCache };

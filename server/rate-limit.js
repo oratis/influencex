@@ -76,4 +76,23 @@ function status() {
   };
 }
 
-module.exports = { rateLimit, status };
+// When REDIS_URL is set, transparently swap to the Redis-backed rate
+// limiter so multi-replica Cloud Run can't oversubscribe. Without it we
+// stay on the in-process bucket (single-replica only).
+let exportedRateLimit = rateLimit;
+let exportedStatus = status;
+if (process.env.REDIS_URL) {
+  try {
+    const redis = require('./redis-rate-limit');
+    exportedRateLimit = redis.rateLimit;
+    exportedStatus = redis.status;
+    console.log('[rate-limit] Using Redis-backed limiter');
+  } catch (e) {
+    console.warn('[rate-limit] Redis init failed, falling back to in-process:', e.message);
+  }
+}
+
+module.exports = {
+  rateLimit: (...args) => exportedRateLimit(...args),
+  status: (...args) => exportedStatus(...args),
+};

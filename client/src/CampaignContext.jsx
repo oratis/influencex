@@ -2,7 +2,10 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { api } from './api/client';
 import { useAuth } from './AuthContext';
 
-const CampaignContext = createContext(null);
+// Exported so tests can mock the provider value (see CampaignContext usage
+// in OnboardingTour.test.jsx). Production code should keep importing
+// `useCampaign` instead.
+export const CampaignContext = createContext(null);
 
 export function CampaignProvider({ children }) {
   const { user } = useAuth();

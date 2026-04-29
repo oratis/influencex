@@ -2,7 +2,9 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { auth } from './api/client';
 import * as sentry from './sentry';
 
-const AuthContext = createContext(null);
+// Exported for component tests that want to render with a stubbed user.
+// Production code should keep importing `useAuth` instead.
+export const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUserState] = useState(null);
