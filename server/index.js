@@ -106,6 +106,36 @@ app.use(cors({
   credentials: true,
 }));
 
+// Security headers (audit C-1). We don't use helmet to avoid the dep; these
+// 6 headers cover the realistic threat model:
+//   - CSP: limit script origins so a stored XSS can't exfiltrate localStorage
+//   - X-Content-Type-Options: stop MIME sniffing
+//   - Referrer-Policy: don't leak invite tokens via Referer headers
+//   - X-Frame-Options + frame-ancestors: prevent clickjacking
+//   - Permissions-Policy: disable unused APIs (camera/mic/geolocation)
+//   - Strict-Transport-Security: enforce HTTPS-only on prod
+const CSP_PROD = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "img-src 'self' data: blob: https:",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "connect-src 'self' https: wss:",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+app.use((req, res, next) => {
+  // Lite CSP in dev so vite HMR works; full CSP in prod.
+  res.setHeader('Content-Security-Policy', PROD ? CSP_PROD : "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: ws: wss: https: http:");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()');
+  if (PROD) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
 // gzip/deflate response compression — significant bandwidth savings on JSON
 // and HTML. Skips small bodies (<1kb) and already-compressed content types.
 app.use(compression({
@@ -171,6 +201,35 @@ app.get(`${BASE_PATH}/api/docs`, (req, res) => {
   res.type('html').send(swaggerUiHtml(`${BASE_PATH}/api/openapi.json`));
 });
 
+// Sanitize an Error before exposing its message to a client. In production
+// we never let DB driver text (SQLITE_*, ER_*, "constraint failed", schema
+// hints) flow through to the user — it leaks internals and confuses the
+// audience. In development we keep the full text for fast debugging.
+// Sentry sees the original via captureException either way.
+const PROD = process.env.NODE_ENV === 'production';
+const LEAKY_PATTERNS = /sqlite|sqlite_|sqlstate|er_|pg_|column .* does not exist|constraint|unique violation|deadlock|relation .* does not exist|syntax error/i;
+function safeError(e, fallback = 'Internal error') {
+  try { sentry.captureException(e); } catch {}
+  if (!e) return fallback;
+  const msg = String(e.message || e);
+  if (!PROD) return msg;
+  if (LEAKY_PATTERNS.test(msg)) return fallback;
+  // Heuristic: keep short, friendly messages; replace anything that smells
+  // like a stack frame or driver dump.
+  if (msg.length > 200 || msg.includes('\n') || /at [\w$.]+\s*\(/.test(msg)) return fallback;
+  return msg;
+}
+
+// Audit L-2: tiny middleware that gates a route on the global platform-admin
+// role (`users.role === 'admin'`). Distinct from RBAC.requirePermission which
+// reads workspace-level membership; "platform admin" is the system-wide
+// owner who manages cross-workspace concerns (invite codes, Apify ops, etc).
+function requirePlatformAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only platform admins can perform this action' });
+  next();
+}
+
 // Rate limiters — applied per-endpoint below
 const authLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many auth attempts' });
 const discoveryLimiter = rateLimit({ max: 5, windowMs: 60 * 1000, message: 'Discovery rate limit reached' });
@@ -223,7 +282,7 @@ app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
 
     res.json({ ...result, workspaces, currentWorkspaceId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -238,6 +297,13 @@ app.post(`${BASE_PATH}/api/auth/login`, authLimiter, async (req, res) => {
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 function hashResetToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// Same construct, separate name for readability at invitation call sites.
+// Stored as token_hash in `invitations.token` so a DB leak cannot enumerate
+// the plaintext bearer tokens (audit S-5).
+function hashInviteToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
@@ -290,7 +356,7 @@ app.post(`${BASE_PATH}/api/auth/forgot-password`, authLimiter, async (req, res) 
 
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -310,13 +376,14 @@ app.post(`${BASE_PATH}/api/auth/reset-password`, authLimiter, async (req, res) =
     if (new Date(row.expires_at) < new Date()) return res.status(410).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
 
     const bcrypt = require('bcryptjs');
-    const newHash = bcrypt.hashSync(password, 10);
+    const rounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+    const newHash = bcrypt.hashSync(password, rounds);
     await exec('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, row.user_id]);
     await exec('UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = ?', [row.id]);
 
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -327,7 +394,7 @@ app.post(`${BASE_PATH}/api/auth/logout`, async (req, res) => {
     if (token) await destroySession(token);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -343,7 +410,7 @@ app.get(`${BASE_PATH}/api/auth/me`, async (req, res) => {
     const currentWorkspaceId = workspaces[0]?.id || null;
     res.json({ ...user, workspaces, currentWorkspaceId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -354,7 +421,7 @@ app.get(`${BASE_PATH}/api/auth/google/init`, (req, res) => {
     const { url } = authGoogle.buildAuthorizeUrl({ returnTo: req.query.returnTo });
     res.json({ url });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -395,7 +462,7 @@ app.get(`${BASE_PATH}/api/auth/workspaces`, authMiddleware, async (req, res) => 
     const workspaces = await listUserWorkspaces(req.user.id);
     res.json({ workspaces });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -420,7 +487,7 @@ app.post(`${BASE_PATH}/api/workspaces`, authMiddleware, async (req, res) => {
     );
     res.json({ id, name, slug, owner_user_id: req.user.id, role: 'admin', plan: plan || 'starter' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -443,7 +510,7 @@ app.patch(`${BASE_PATH}/api/workspaces/:id`, authMiddleware, async (req, res) =>
     await exec(`UPDATE workspaces SET ${updates.join(', ')} WHERE id = ?`, params);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -469,7 +536,7 @@ app.patch(`${BASE_PATH}/api/workspaces/:id/settings`, authMiddleware, async (req
     await exec('UPDATE workspaces SET settings = ? WHERE id = ?', [JSON.stringify(merged), req.params.id]);
     res.json({ success: true, settings: merged });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -482,7 +549,7 @@ app.delete(`${BASE_PATH}/api/workspaces/:id`, authMiddleware, async (req, res) =
     await exec('UPDATE workspaces SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -504,7 +571,7 @@ app.get(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, r
     );
     res.json({ members: result.rows || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -541,15 +608,16 @@ app.post(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, 
       return res.json({ success: true, user_id: invitee.id, role, kind: 'existing_user' });
     }
 
-    // Unregistered email: create an invitation token. Admin shares the link;
-    // invitee accepts it to create their account + join in one step.
+    // Unregistered email: create an invitation token. Admin shares the
+    // PLAINTEXT token in the link; we store only its sha256 hash. A DB leak
+    // therefore cannot enumerate active invitations (audit S-5).
     const token = crypto.randomBytes(32).toString('hex');
     const inviteId = uuidv4();
     const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
     await exec(
       `INSERT INTO invitations (id, workspace_id, email, role, token, invited_by, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [inviteId, req.params.id, email, role, token, req.user.id, expiresAt]
+      [inviteId, req.params.id, email, role, hashInviteToken(token), req.user.id, expiresAt]
     );
     const origin = req.headers.origin || `https://${req.headers.host}`;
     const link = `${origin}${BASE_PATH}/#/accept-invite?token=${token}`;
@@ -596,7 +664,7 @@ app.post(`${BASE_PATH}/api/workspaces/:id/members`, authMiddleware, async (req, 
       },
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -609,7 +677,7 @@ app.get(`${BASE_PATH}/api/invitations/:token`, async (req, res) => {
       `SELECT i.email, i.role, i.expires_at, i.accepted_at, w.name AS workspace_name
        FROM invitations i JOIN workspaces w ON i.workspace_id = w.id
        WHERE i.token = ?`,
-      [req.params.token]
+      [hashInviteToken(req.params.token)]
     );
     if (!row) return res.status(404).json({ error: 'Invitation not found', code: 'INVITE_NOT_FOUND' });
     if (row.accepted_at) return res.status(410).json({ error: 'Invitation already used', code: 'INVITE_USED' });
@@ -621,7 +689,7 @@ app.get(`${BASE_PATH}/api/invitations/:token`, async (req, res) => {
       expires_at: row.expires_at,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -635,7 +703,7 @@ app.post(`${BASE_PATH}/api/invitations/:token/accept`, authLimiter, async (req, 
 
     const invite = await queryOne(
       'SELECT id, workspace_id, email, role, expires_at, accepted_at FROM invitations WHERE token = ?',
-      [req.params.token]
+      [hashInviteToken(req.params.token)]
     );
     if (!invite) return res.status(404).json({ error: 'Invitation not found', code: 'INVITE_NOT_FOUND' });
     if (invite.accepted_at) return res.status(410).json({ error: 'Invitation already used', code: 'INVITE_USED' });
@@ -663,7 +731,7 @@ app.post(`${BASE_PATH}/api/invitations/:token/accept`, authLimiter, async (req, 
     const login = await loginUser(invite.email, password);
     res.json(login);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -687,11 +755,8 @@ function generateInviteCode() {
 
 // Admin-only: create a new invite code.
 // Body: { workspaceId, role?, maxUses?, expiresInDays?, note? }
-app.post(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
+app.post(`${BASE_PATH}/api/invite-codes`, authMiddleware, requirePlatformAdmin, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Only platform admins can create invite codes' });
-    }
     const { workspaceId, role = 'editor', maxUses = 1, expiresInDays, note } = req.body || {};
     if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required' });
     if (!['admin', 'editor', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
@@ -729,16 +794,13 @@ app.post(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
       expires_at: expiresAt, note: note || null, created_by: req.user.id, created_at: new Date().toISOString(),
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
 // Admin-only: list all invite codes (across all workspaces).
-app.get(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
+app.get(`${BASE_PATH}/api/invite-codes`, authMiddleware, requirePlatformAdmin, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Only platform admins can list invite codes' });
-    }
     const result = await query(
       `SELECT ic.*, w.name AS workspace_name, u.email AS created_by_email
        FROM invite_codes ic
@@ -748,66 +810,54 @@ app.get(`${BASE_PATH}/api/invite-codes`, authMiddleware, async (req, res) => {
     );
     res.json({ codes: result.rows || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
 // Admin-only: list recent Apify runs for ops debugging. Optional ?status=failed
 // or ?status=timeout to triage. Returns the latest 100 by default.
-app.get(`${BASE_PATH}/api/admin/apify-runs`, authMiddleware, async (req, res) => {
+app.get(`${BASE_PATH}/api/admin/apify-runs`, authMiddleware, requirePlatformAdmin, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Only platform admins can view Apify runs' });
-    }
     const status = req.query.status || null;
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const runs = await apifyWatchdog.listRecentRuns({ query }, { status, limit });
     res.json({ runs, threshold_minutes: apifyWatchdog.STUCK_THRESHOLD_MINUTES });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
 // Admin-only: trigger a watchdog sweep on demand (in addition to the cron).
-app.post(`${BASE_PATH}/api/admin/apify-runs/reap`, authMiddleware, async (req, res) => {
+app.post(`${BASE_PATH}/api/admin/apify-runs/reap`, authMiddleware, requirePlatformAdmin, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Only platform admins can reap stuck runs' });
-    }
     const r = await apifyWatchdog.reapStuckRuns({ exec, query });
     res.json(r);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
 // Admin-only: trigger an inbox auto-sync tick now (in addition to the hourly
 // cron). Useful for verifying a workspace's inbox_auto_sync_* settings.
-app.post(`${BASE_PATH}/api/admin/inbox-sync/tick`, authMiddleware, async (req, res) => {
+app.post(`${BASE_PATH}/api/admin/inbox-sync/tick`, authMiddleware, requirePlatformAdmin, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Only platform admins can trigger inbox sync' });
-    }
     const r = await inboxSync.tick({ exec, query, queryOne, uuidv4 });
     res.json(r);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
 // Admin-only: revoke (soft-delete) an invite code.
-app.delete(`${BASE_PATH}/api/invite-codes/:id`, authMiddleware, async (req, res) => {
+app.delete(`${BASE_PATH}/api/invite-codes/:id`, authMiddleware, requirePlatformAdmin, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Only platform admins can revoke invite codes' });
-    }
     const ic = await queryOne('SELECT id, revoked_at FROM invite_codes WHERE id = ?', [req.params.id]);
     if (!ic) return res.status(404).json({ error: 'Invite code not found' });
     if (ic.revoked_at) return res.json({ success: true, already_revoked: true });
     await exec('UPDATE invite_codes SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -840,7 +890,7 @@ app.get(`${BASE_PATH}/api/invite-codes/lookup/:code`, async (req, res) => {
       expires_at: ic.expires_at,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -875,17 +925,18 @@ app.post(`${BASE_PATH}/api/auth/register-with-code`, authLimiter, async (req, re
     const dup = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
     if (dup) return res.status(409).json({ error: 'An account with this email already exists — log in instead', code: 'EMAIL_EXISTS' });
 
-    // Reserve a use first (optimistic lock). If this UPDATE didn't bump the
-    // counter (because another request beat us), bail out before creating
-    // the user.
+    // Reserve a use first (optimistic lock). We trust the SQL row count: an
+    // atomic UPDATE that does NOT bump the counter is the canonical race
+    // signal. The previous SELECT-after-UPDATE check could be confused by a
+    // concurrent DELETE on the row (audit S-4).
     const before = ic.used_count;
-    await exec(
+    const updated = await exec(
       `UPDATE invite_codes SET used_count = used_count + 1
-       WHERE id = ? AND used_count = ? AND used_count < max_uses`,
+       WHERE id = ? AND used_count = ? AND used_count < max_uses
+        AND (revoked_at IS NULL) AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`,
       [ic.id, before]
     );
-    const after = await queryOne('SELECT used_count FROM invite_codes WHERE id = ?', [ic.id]);
-    if (!after || after.used_count !== before + 1) {
+    if (!updated || updated.rowCount !== 1) {
       return res.status(409).json({ error: 'Code was just used by someone else, please try again', code: 'CODE_RACE' });
     }
 
@@ -908,7 +959,7 @@ app.post(`${BASE_PATH}/api/auth/register-with-code`, authLimiter, async (req, re
     const login = await loginUser(email, password);
     res.json(login);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -932,7 +983,7 @@ app.patch(`${BASE_PATH}/api/workspaces/:id/members/:userId/role`, authMiddleware
     );
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -953,7 +1004,7 @@ app.delete(`${BASE_PATH}/api/workspaces/:id/members/:userId`, authMiddleware, as
     );
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -998,7 +1049,12 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
     return next();
   }
-  workspaceContext({ lenient: true })(req, res, next);
+  // STRICT_WORKSPACE_SCOPE=true switches off the legacy fallback to the
+  // user's default workspace. Strict mode forces every client to send
+  // X-Workspace-Id and is the long-term direction (audit S-9). Off by
+  // default to keep older clients working.
+  const lenient = process.env.STRICT_WORKSPACE_SCOPE !== 'true';
+  workspaceContext({ lenient })(req, res, next);
 });
 
 // ==================== Campaign API ====================
@@ -1017,19 +1073,34 @@ app.get(`${BASE_PATH}/api/campaigns`, async (req, res) => {
       [req.workspace.id]
     );
     const campaigns = result.rows;
+    // Single GROUP BY instead of N queries (audit S-6). One round-trip even
+    // for workspaces with hundreds of campaigns.
+    const statsResult = await s.query(
+      `SELECT campaign_id,
+              COUNT(*) AS total,
+              SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved
+       FROM kols
+       WHERE workspace_id = ?
+       GROUP BY campaign_id`,
+      [req.workspace.id]
+    );
+    const statsByCampaign = new Map();
+    for (const row of statsResult.rows || []) {
+      statsByCampaign.set(row.campaign_id, {
+        total: parseInt(row.total) || 0,
+        approved: parseInt(row.approved) || 0,
+      });
+    }
     for (const c of campaigns) {
       c.platforms = JSON.parse(c.platforms || '[]');
       c.filter_criteria = JSON.parse(c.filter_criteria || '{}');
-      const stats = await s.queryOne(
-        "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved FROM kols WHERE campaign_id = ? AND workspace_id = ?",
-        [c.id, req.workspace.id]
-      );
-      c.kol_total = parseInt(stats.total) || 0;
-      c.kol_approved = parseInt(stats.approved) || 0;
+      const s2 = statsByCampaign.get(c.id) || { total: 0, approved: 0 };
+      c.kol_total = s2.total;
+      c.kol_approved = s2.approved;
     }
     res.json(campaigns);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1045,7 +1116,7 @@ app.post(`${BASE_PATH}/api/campaigns`, async (req, res) => {
     );
     res.json({ id, name, description, platforms, daily_target, filter_criteria, budget, status: 'active' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1062,7 +1133,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
     campaign.filter_criteria = JSON.parse(campaign.filter_criteria || '{}');
     res.json(campaign);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1078,7 +1149,7 @@ app.put(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1093,7 +1164,7 @@ app.delete(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1115,7 +1186,7 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
     kols.forEach(k => k.contact_info = JSON.parse(k.contact_info || '{}'));
     res.json(kols);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1137,7 +1208,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
     );
     res.json({ id, platform, username, display_name, status: 'pending' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1217,7 +1288,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, async (req, res)
     });
     res.json({ collected: collectedKols.length, source, kols: collectedKols });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1232,7 +1303,7 @@ app.patch(`${BASE_PATH}/api/kols/batch`, async (req, res) => {
     });
     res.json({ success: true, updated: ids.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1245,7 +1316,7 @@ app.patch(`${BASE_PATH}/api/kols/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'KOL not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1258,14 +1329,14 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, async (req, res) => {
     const s = scoped(req.workspace.id);
     let sql = `SELECT c.*, k.id as kol_row_id, k.username, k.display_name, k.platform, k.avatar_url,
                  k.followers, k.email as kol_email, k.email_blocked_at, k.email_blocked_reason
-      FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.workspace_id = ? AND c.campaign_id = ?`;
+      FROM contacts c JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id WHERE c.workspace_id = ? AND c.campaign_id = ?`;
     const params = [req.workspace.id, req.params.campaignId];
     if (status) { sql += ' AND c.status = ?'; params.push(status); }
     sql += ' ORDER BY c.created_at DESC';
     const result = await s.query(sql, params);
     res.json(result.rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1286,7 +1357,7 @@ app.post(`${BASE_PATH}/api/contacts/generate`, async (req, res) => {
     );
     res.json({ id, ...email, status: 'draft' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1322,7 +1393,7 @@ app.put(`${BASE_PATH}/api/contacts/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1345,7 +1416,7 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1357,7 +1428,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, sendEmailWorksp
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
       `SELECT c.*, k.email as kol_email
-       FROM contacts c JOIN kols k ON c.kol_id = k.id
+       FROM contacts c JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        WHERE c.id = ? AND c.workspace_id = ?`,
       [req.params.id, req.workspace.id]
     );
@@ -1382,7 +1453,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, sendEmailWorksp
 
     res.json({ success: true, queued: true, jobId, status: 'pending' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1402,7 +1473,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/retry`, sendEmailLimiter, sendEmailWorks
     const jobId = jobQueue.push('email.send', { contactId: req.params.id }, { maxRetries: 3 });
     res.json({ success: true, queued: true, jobId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1432,7 +1503,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmail
       `SELECT c.id, c.email_subject, c.email_body, c.status, c.cooperation_type, c.price_quote,
               c.campaign_id,
               k.email as kol_email, k.display_name, k.username, k.platform, k.followers, k.category
-       FROM contacts c JOIN kols k ON c.kol_id = k.id
+       FROM contacts c JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        WHERE c.workspace_id = ? AND c.campaign_id = ? AND c.id IN (${placeholders})`,
       [req.workspace.id, req.params.campaignId, ...contact_ids]
     );
@@ -1523,7 +1594,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmail
     const jobId = jobQueue.push('email.batch_send', { contactIds: eligible }, { maxRetries: 0 });
     res.json({ success: true, queued: eligible.length, skipped, jobId, templateApplied: !!template_id });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1544,7 +1615,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/reply`, async (req, res) => {
     );
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1604,7 +1675,7 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
     // Search contacts by KOL email (through kols table)
     if (!contactId) {
       const contact = await queryOne(
-        "SELECT c.id FROM contacts c JOIN kols k ON c.kol_id=k.id WHERE k.email=? ORDER BY c.created_at DESC LIMIT 1",
+        "SELECT c.id FROM contacts c JOIN kols k ON c.kol_id=k.id AND k.workspace_id=c.workspace_id WHERE k.email=? ORDER BY c.created_at DESC LIMIT 1",
         [fromEmail]
       );
       if (contact) contactId = contact.id;
@@ -1639,7 +1710,7 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
     res.json({ success: true, contactId, pipelineJobId });
   } catch (e) {
     console.error('[Inbound Email] Error:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1732,7 +1803,7 @@ app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
     res.json({ success: true, recorded });
   } catch (e) {
     console.error('[Email Events] Error:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1810,7 +1881,7 @@ app.post(`${BASE_PATH}/api/webhooks/apify`, async (req, res) => {
     res.json({ ok: true, runId, status: internalStatus });
   } catch (e) {
     console.error('[apify-webhook] error:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -1821,27 +1892,34 @@ const HARD_BOUNCE_BLOCK_THRESHOLD = parseInt(process.env.HARD_BOUNCE_BLOCK_THRES
 async function maybeBlockKol(contactId, reason, opts = {}) {
   if (!contactId) return;
   try {
+    // Pull workspace_id alongside kol_id so the count query below is properly
+    // tenant-scoped. Without this, the COUNT(*) sees email_events from every
+    // workspace where the same kol_id happens to exist (rare, but a
+    // multi-tenant data-leak surface — see audit S-1).
     const row = await queryOne(
-      `SELECT c.kol_id, k.email_blocked_at FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ?`,
+      `SELECT c.workspace_id, c.kol_id, k.email_blocked_at
+       FROM contacts c
+       JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
+       WHERE c.id = ?`,
       [contactId]
     );
     if (!row || row.email_blocked_at) return; // already blocked, noop
     const threshold = opts.threshold || HARD_BOUNCE_BLOCK_THRESHOLD;
-    // Count bounce/failed events for this KOL's contacts over all time.
-    // "Over all time" is appropriate: if this address bounced twice ever,
-    // it's effectively dead — no point re-sending after a cooldown.
+    // Count bounce/failed events for this KOL's contacts over all time
+    // **within the same workspace**.
     const countRow = await queryOne(
       `SELECT COUNT(*) as n
        FROM email_events e
-       JOIN contacts c2 ON c2.id = e.contact_id
+       JOIN contacts c2 ON c2.id = e.contact_id AND c2.workspace_id = ?
        WHERE c2.kol_id = ? AND e.event_type IN ('bounced', 'complained', 'failed')`,
-      [row.kol_id]
+      [row.workspace_id, row.kol_id]
     );
     const count = parseInt(countRow?.n || 0);
     if (count >= threshold) {
       await exec(
-        `UPDATE kols SET email_blocked_at = CURRENT_TIMESTAMP, email_blocked_reason = ? WHERE id = ?`,
-        [String(reason).slice(0, 200), row.kol_id]
+        `UPDATE kols SET email_blocked_at = CURRENT_TIMESTAMP, email_blocked_reason = ?
+         WHERE id = ? AND workspace_id = ?`,
+        [String(reason).slice(0, 200), row.kol_id, row.workspace_id]
       );
       console.log(`[hard-bounce] Blocked KOL ${row.kol_id} after ${count} bounce/complaint events: ${reason}`);
     }
@@ -1861,7 +1939,7 @@ app.post(`${BASE_PATH}/api/kols/:id/unblock-email`, async (req, res) => {
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'KOL not found' });
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Get email thread + event timeline for a contact
@@ -1870,7 +1948,7 @@ app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
       `SELECT c.*, k.display_name as kol_name, k.username, k.email as kol_email, k.platform, k.avatar_url
-       FROM contacts c LEFT JOIN kols k ON c.kol_id=k.id
+       FROM contacts c LEFT JOIN kols k ON c.kol_id=k.id AND k.workspace_id=c.workspace_id
        WHERE c.id=? AND c.workspace_id=?`,
       [req.params.id, req.workspace.id]
     );
@@ -1956,7 +2034,7 @@ app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
 
     res.json({ contact, thread, timeline });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2001,7 +2079,7 @@ app.get(`${BASE_PATH}/api/pipeline/jobs/:id/thread`, async (req, res) => {
 
     res.json({ job, thread });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2041,7 +2119,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, async
     });
     res.json({ generated: results.length, contacts: results });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2053,7 +2131,7 @@ app.get(`${BASE_PATH}/api/data/content`, async (req, res) => {
     const result = await query('SELECT * FROM content_data ORDER BY publish_date DESC');
     res.json(result.rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2082,7 +2160,7 @@ app.post(`${BASE_PATH}/api/data/content`, async (req, res) => {
     }
     res.json({ success: true, count: items.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2092,7 +2170,7 @@ app.get(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
     const result = await query('SELECT * FROM registration_data ORDER BY date ASC');
     res.json(result.rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2121,7 +2199,7 @@ app.post(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
     }
     res.json({ success: true, count: items.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2131,7 +2209,7 @@ app.post(`${BASE_PATH}/api/data/seed-demo`, async (req, res) => {
     await seedDemoData();
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2186,7 +2264,7 @@ app.get(`${BASE_PATH}/api/users`, authMiddleware, rbac.requirePermission('user.m
     const result = await query('SELECT id, email, name, role, avatar_url, created_at, last_login FROM users ORDER BY created_at DESC');
     res.json(result.rows || []);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2204,7 +2282,7 @@ app.post(`${BASE_PATH}/api/users/invite`, authMiddleware, rbac.requirePermission
     }
     res.json({ success: true, user: { ...result, role: safeRole } });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2221,7 +2299,7 @@ app.patch(`${BASE_PATH}/api/users/:id/role`, authMiddleware, rbac.requirePermiss
     await exec('UPDATE users SET role=? WHERE id=?', [role, req.params.id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2235,7 +2313,7 @@ app.delete(`${BASE_PATH}/api/users/:id`, authMiddleware, rbac.requirePermission(
     await exec('DELETE FROM users WHERE id=?', [req.params.id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2264,7 +2342,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, exportLimiter, async (req,
     const safeName = (campaign.name || 'campaign').replace(/[^a-z0-9_-]/gi, '_');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kols-${safeName}.csv`);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2279,7 +2357,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     const result = await s.query(
       `SELECT c.*, k.display_name, k.username, k.platform, k.email as kol_email
-       FROM contacts c JOIN kols k ON c.kol_id = k.id
+       FROM contacts c JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        WHERE c.workspace_id = ? AND c.campaign_id = ?
        ORDER BY c.created_at DESC`,
       [req.workspace.id, req.params.id]
@@ -2287,7 +2365,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (
     const safeName = (campaign.name || 'campaign').replace(/[^a-z0-9_-]/gi, '_');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.contacts, `contacts-${safeName}.csv`);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2301,7 +2379,7 @@ app.get(`${BASE_PATH}/api/kol-database/export`, exportLimiter, async (req, res) 
     );
     sendCsv(res, result.rows || [], csvExport.COLUMNS.kols, `kol-database.csv`);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2311,7 +2389,7 @@ app.get(`${BASE_PATH}/api/data/content/export`, exportLimiter, async (req, res) 
     const result = await query('SELECT * FROM content_data ORDER BY publish_date DESC');
     sendCsv(res, result.rows || [], csvExport.COLUMNS.content, 'content-data.csv');
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2333,7 +2411,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true, scheduled_send_at: when.toISOString() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2348,7 +2426,7 @@ app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2358,7 +2436,7 @@ app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermissi
     const result = await scheduler.tick({ query, exec, queryOne, mailAgent, uuidv4, jobQueue });
     res.json(result);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2395,7 +2473,7 @@ app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
       llmStats: llm.getStats(),
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2413,7 +2491,7 @@ app.get(`${BASE_PATH}/api/agents/runs`, async (req, res) => {
     const result = await s.query(sql, params);
     res.json({ runs: result.rows || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2429,7 +2507,7 @@ app.get(`${BASE_PATH}/api/agents/runs/:runId`, async (req, res) => {
     run.traces = (traces.rows || []).map(t => ({ ...t, data: JSON.parse(t.data || '{}') }));
     res.json(run);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2501,7 +2579,7 @@ app.post(`${BASE_PATH}/api/agents/:id/run`, async (req, res) => {
 
     res.json({ runId, status: 'running', estimate });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2574,7 +2652,7 @@ app.get(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
     }));
     res.json({ pieces });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2590,7 +2668,7 @@ app.post(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
     );
     res.json({ id, type, title, body, status: status || 'draft' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2613,7 +2691,7 @@ app.patch(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2627,7 +2705,7 @@ app.delete(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2673,7 +2751,7 @@ app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, async (req, res) => {
       content_type: contentType,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2701,7 +2779,7 @@ app.get(`${BASE_PATH}/api/publish/platforms`, async (req, res) => {
       })),
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2723,7 +2801,7 @@ app.post(`${BASE_PATH}/api/publish/oauth/:provider/init`, async (req, res) => {
     );
     res.json({ authorize_url: url, state, redirect_uri: redirect });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2826,7 +2904,7 @@ app.post(`${BASE_PATH}/api/publish/connect/:platform`, async (req, res) => {
     }
     res.json({ success: true, account_name: accountName });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2840,7 +2918,7 @@ app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, async (req, res) => {
     if (r.rowCount === 0) return res.status(404).json({ error: 'Not connected' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2875,7 +2953,7 @@ app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
     }
     res.json(result);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2905,7 +2983,7 @@ app.get(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
     }));
     res.json({ items });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2938,7 +3016,7 @@ app.post(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
     );
     res.json({ id, scheduled_at: when.toISOString() });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2952,7 +3030,7 @@ app.delete(`${BASE_PATH}/api/scheduled-publishes/:id`, async (req, res) => {
     if (r.rowCount === 0) return res.status(404).json({ error: 'Not found or not cancellable' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2964,7 +3042,7 @@ app.post(`${BASE_PATH}/api/scheduled-publishes/tick`, authMiddleware, rbac.requi
     });
     res.json(result);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -2980,7 +3058,7 @@ app.get(`${BASE_PATH}/api/analytics/presets`, async (req, res) => {
     );
     res.json({ presets: presets.rows || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3010,7 +3088,7 @@ app.get(`${BASE_PATH}/api/analytics/platforms`, async (req, res) => {
     }));
     res.json({ byPlatform });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3046,7 +3124,7 @@ app.get(`${BASE_PATH}/api/analytics/agents`, async (req, res) => {
     }));
     res.json({ byAgent });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3065,7 +3143,7 @@ app.get(`${BASE_PATH}/api/analytics/content`, async (req, res) => {
     }
     res.json({ byType });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3085,7 +3163,7 @@ app.get(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
     const presets = (result.rows || []).map(p => ({ ...p, tags: p.tags ? JSON.parse(p.tags) : [] }));
     res.json({ presets });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3101,7 +3179,7 @@ app.post(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
     );
     res.json({ id, name });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3121,7 +3199,7 @@ app.patch(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
     if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3132,7 +3210,7 @@ app.delete(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
     if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3143,7 +3221,7 @@ app.post(`${BASE_PATH}/api/prompt-presets/:id/use`, async (req, res) => {
     await s.exec('UPDATE prompt_presets SET use_count = use_count + 1 WHERE id = ? AND workspace_id = ?', [req.params.id, req.workspace.id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3164,7 +3242,7 @@ app.get(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
     }));
     res.json({ voices });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3207,7 +3285,7 @@ app.post(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
 
     res.json({ id, name });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3221,7 +3299,7 @@ app.delete(`${BASE_PATH}/api/brand-voices/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3262,7 +3340,7 @@ app.get(`${BASE_PATH}/api/inbox-messages`, async (req, res) => {
     for (const row of counts.rows || []) byStatus[row.status] = parseInt(row.c) || 0;
     res.json({ messages: rows, count: rows.length, by_status: byStatus });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3289,7 +3367,7 @@ app.patch(`${BASE_PATH}/api/inbox-messages/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'inbox_message not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3347,7 +3425,7 @@ app.post(`${BASE_PATH}/api/inbox-messages/sync-apify`, async (req, res) => {
 
     res.json({ success: true, total: harvest.comments.length, inserted, skipped });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3394,7 +3472,7 @@ app.get(`${BASE_PATH}/api/search`, async (req, res) => {
 
     res.json({ kols, contacts, campaigns });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3418,7 +3496,7 @@ app.post(`${BASE_PATH}/api/reviews/harvest`, async (req, res) => {
     if (!r.success) return res.status(502).json(r);
     res.json(r);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3561,7 +3639,7 @@ app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
     const estimate = conductor.estimatePlanCost(plan);
     res.json({ planId, plan, cost, estimate });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3575,7 +3653,7 @@ app.get(`${BASE_PATH}/api/conductor/plans`, async (req, res) => {
     );
     res.json({ plans: result.rows || [] });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3591,7 +3669,7 @@ app.get(`${BASE_PATH}/api/conductor/plans/:id`, async (req, res) => {
     plan.plan = JSON.parse(plan.plan || '{}');
     res.json(plan);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3739,7 +3817,7 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
       }
     })();
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3778,7 +3856,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/roi`, async (req, res) => {
     if (result.error) return res.status(404).json(result);
     res.json(result);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3795,7 +3873,7 @@ app.post(`${BASE_PATH}/api/email-templates/:id/render`, (req, res) => {
     const rendered = emailTemplates.renderEmail(req.params.id, req.body.variables || {});
     res.json(rendered);
   } catch (e) {
-    res.status(404).json({ error: e.message });
+    res.status(404).json({ error: safeError(e, 'Not found') });
   }
 });
 
@@ -3824,7 +3902,7 @@ app.get(`${BASE_PATH}/api/email-templates/all`, async (req, res) => {
       variant_count: parseInt(t.variant_count) || 0,
     }));
     res.json({ builtin, custom });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.post(`${BASE_PATH}/api/email-templates`, async (req, res) => {
@@ -3840,7 +3918,7 @@ app.post(`${BASE_PATH}/api/email-templates`, async (req, res) => {
         JSON.stringify(Array.isArray(variables) ? variables : []), req.user?.id || null]
     );
     res.json({ id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.put(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
@@ -3862,7 +3940,7 @@ app.put(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Template not found' });
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.delete(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
@@ -3880,7 +3958,7 @@ app.delete(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Template not found' });
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // List variants for a given template (the parent + all variants).
@@ -3897,7 +3975,7 @@ app.get(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
       [req.params.id, req.workspace.id]
     );
     res.json({ parent, variants: variants.rows || [] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Create a new variant of an existing template. Body mirrors the parent
@@ -3927,7 +4005,7 @@ app.post(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
         req.user?.id || null]
     );
     res.json({ id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Pick a variant (including the parent itself) for this contact to send.
@@ -3978,7 +4056,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/pick-variant`, async (req, res) => {
         body: chosen.body,
       },
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Promote a variant (or the parent itself) as the winner. Subsequent
@@ -4000,7 +4078,7 @@ app.patch(`${BASE_PATH}/api/email-templates/:id/auto-promote`, async (req, res) 
       [enabled ? 1 : 0, req.params.id, req.workspace.id]
     );
     res.json({ success: true, auto_promote_winner: enabled });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, async (req, res) => {
@@ -4030,7 +4108,7 @@ app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, async (req, res)
       [winner_id, req.params.id, req.workspace.id]
     );
     res.json({ success: true, winner_variant_id: winner_id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // A/B stats for a parent template: sent / opened / replied per variant
@@ -4143,7 +4221,7 @@ app.get(`${BASE_PATH}/api/email-templates/:id/stats`, async (req, res) => {
       suggested_winner: suggestedWinner,
       min_sample_for_significance: MIN_SAMPLE,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Significance helpers moved to ./ab-significance for testability.
@@ -4195,7 +4273,7 @@ app.get(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
         fromEmail: process.env.RESEND_FROM_EMAIL || process.env.SMTP_USER || null,
       },
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.post(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
@@ -4230,7 +4308,7 @@ app.post(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
         signature_html || null, secrets.encrypt(creds), is_default ? 1 : 0, req.user?.id || null]
     );
     res.json({ id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.patch(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
@@ -4275,7 +4353,7 @@ app.patch(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Mailbox not found' });
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 app.delete(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
@@ -4287,7 +4365,7 @@ app.delete(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Mailbox not found' });
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Verify a mailbox connection (test-mode ping; doesn't send anything).
@@ -4319,7 +4397,7 @@ app.post(`${BASE_PATH}/api/mailboxes/:id/verify`, async (req, res) => {
     // Don't leak the refreshed creds back to the client.
     const { refreshedCreds, ...safe } = result;
     res.json(safe);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Workspace-wide outreach tasks (for Pipeline "Email Tasks" tab).
@@ -4336,7 +4414,7 @@ app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
               k.display_name, k.username, k.email as kol_email, k.platform, k.avatar_url,
               cam.name as campaign_name
        FROM contacts c
-       JOIN kols k ON c.kol_id = k.id
+       JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        LEFT JOIN campaigns cam ON c.campaign_id = cam.id
        WHERE c.workspace_id = ?
          AND c.status IN ('pending', 'failed', 'bounced')
@@ -4349,7 +4427,7 @@ app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
               k.display_name, k.username, k.email as kol_email, k.platform, k.avatar_url,
               cam.name as campaign_name
        FROM contacts c
-       JOIN kols k ON c.kol_id = k.id
+       JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        LEFT JOIN campaigns cam ON c.campaign_id = cam.id
        WHERE c.workspace_id = ?
          AND c.scheduled_send_at IS NOT NULL
@@ -4364,7 +4442,7 @@ app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
               k.display_name, k.username, k.email as kol_email, k.platform, k.avatar_url,
               cam.name as campaign_name
        FROM contacts c
-       JOIN kols k ON c.kol_id = k.id
+       JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        LEFT JOIN campaigns cam ON c.campaign_id = cam.id
        WHERE c.workspace_id = ?
          AND c.status IN ('sent', 'delivered', 'opened')
@@ -4378,7 +4456,7 @@ app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
       scheduled: scheduled.rows || [],
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4404,7 +4482,7 @@ app.post(`${BASE_PATH}/api/mailboxes/oauth/gmail/init`, (req, res) => {
       returnTo: req.body?.returnTo || '/',
     });
     res.json({ url });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Google redirects here with ?code + ?state. No auth header — state is the
@@ -4484,7 +4562,7 @@ app.post(`${BASE_PATH}/api/email-queue/sync-status`, (req, res) => {
   try {
     const id = jobQueue.push('email.sync_status', {}, { maxRetries: 0 });
     res.json({ queued: true, jobId: id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 // Sender-domain DNS checks (SPF / DKIM / DMARC). Helps users diagnose why
@@ -4533,7 +4611,7 @@ app.get(`${BASE_PATH}/api/mailboxes/:id/dns-check`, async (req, res) => {
       dmarc: { present: !!dmarc, record: dmarc },
       advice: buildDnsAdvice({ spf, dmarc, dkim, provider: mb.provider, domain }),
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
 function buildDnsAdvice({ spf, dmarc, dkim, provider, domain }) {
@@ -4559,7 +4637,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
       `SELECT c.*, k.display_name, k.username, k.platform, k.followers, k.category, k.email as kol_email
-       FROM contacts c JOIN kols k ON c.kol_id = k.id WHERE c.id = ? AND c.workspace_id = ?`,
+       FROM contacts c JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id WHERE c.id = ? AND c.workspace_id = ?`,
       [req.params.id, req.workspace.id]
     );
     if (!contact) return res.status(404).json({ error: 'Contact not found' });
@@ -4586,7 +4664,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
     const rendered = emailTemplates.renderEmail(templateId, variables);
     res.json({ ...rendered, variables });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4609,7 +4687,7 @@ app.get(`${BASE_PATH}/api/kol-database`, async (req, res) => {
     kols.forEach(k => k.tags = JSON.parse(k.tags || '[]'));
     res.json(kols);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4625,7 +4703,7 @@ app.get(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
     kol.tags = JSON.parse(kol.tags || '[]');
     res.json(kol);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4660,11 +4738,17 @@ app.post(`${BASE_PATH}/api/kol-database`, async (req, res) => {
     );
 
     // Simulate AI scrape asynchronously
-    setTimeout(() => scrapeAndEnrichKol(id, profile_url, detectedPlatform, username, req.workspace.id), 100);
+    // Detached async — log failures so they show up in Sentry/Cloud Run logs
+    // instead of becoming unhandled rejections.
+    const wsForScrape = req.workspace.id;
+    setTimeout(() => {
+      scrapeAndEnrichKol(id, profile_url, detectedPlatform, username, wsForScrape)
+        .catch(e => console.error(`[scrape] kol_database row ${id} failed:`, e.message));
+    }, 100);
 
     res.json({ id, platform: detectedPlatform, username, profile_url, scrape_status: 'scraping' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4699,12 +4783,20 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
         "INSERT INTO kol_database (id, workspace_id, platform, username, display_name, profile_url, scrape_status) VALUES (?, ?, ?, ?, ?, ?, 'scraping')",
         [id, req.workspace.id, platform, username, username, trimmed]
       );
-      setTimeout(() => scrapeAndEnrichKol(id, trimmed, platform, username, req.workspace.id), 100 + results.length * 500);
+      const wsForBatch = req.workspace.id;
+      const idForBatch = id;
+      const urlForBatch = trimmed;
+      const platForBatch = platform;
+      const userForBatch = username;
+      setTimeout(() => {
+        scrapeAndEnrichKol(idForBatch, urlForBatch, platForBatch, userForBatch, wsForBatch)
+          .catch(e => console.error(`[scrape] kol_database row ${idForBatch} failed:`, e.message));
+      }, 100 + results.length * 500);
       results.push({ url: trimmed, status: 'queued', id, platform, username });
     }
     res.json({ queued: results.filter(r => r.status === 'queued').length, duplicates: results.filter(r => r.status === 'duplicate').length, results });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4723,10 +4815,14 @@ app.post(`${BASE_PATH}/api/kol-database/:id/retry-scrape`, async (req, res) => {
       "UPDATE kol_database SET scrape_status='scraping', scrape_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
       [k.id, req.workspace.id]
     );
-    setTimeout(() => scrapeAndEnrichKol(k.id, k.profile_url, k.platform, k.username, req.workspace.id), 100);
+    const wsForRetry = req.workspace.id;
+    setTimeout(() => {
+      scrapeAndEnrichKol(k.id, k.profile_url, k.platform, k.username, wsForRetry)
+        .catch(e => console.error(`[scrape] retry kol_database row ${k.id} failed:`, e.message));
+    }, 100);
     res.json({ success: true, id: k.id });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4750,13 +4846,17 @@ app.post(`${BASE_PATH}/api/kol-database/retry-all`, discoveryLimiter, async (req
        WHERE workspace_id = ? AND scrape_status IN ('error', 'partial')`,
       [req.workspace.id]
     );
+    const wsForBulkRetry = req.workspace.id;
     rows.forEach((k, i) => {
       // 1s spacer between kicks so the per-host scraper APIs aren't slammed.
-      setTimeout(() => scrapeAndEnrichKol(k.id, k.profile_url, k.platform, k.username, req.workspace.id), 100 + i * 1000);
+      setTimeout(() => {
+        scrapeAndEnrichKol(k.id, k.profile_url, k.platform, k.username, wsForBulkRetry)
+          .catch(e => console.error(`[scrape] bulk retry kol_database row ${k.id} failed:`, e.message));
+      }, 100 + i * 1000);
     });
     res.json({ queued: rows.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4770,7 +4870,7 @@ app.delete(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
     if (result.rowCount === 0) return res.status(404).json({ error: 'KOL not found' });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4807,7 +4907,7 @@ app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, async (req
     }
     res.json({ imported, skipped, total: campaignKols.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4829,7 +4929,7 @@ app.get(`${BASE_PATH}/api/stats`, async (req, res) => {
       totalViews: parseInt(totalViews) || 0,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4884,7 +4984,7 @@ app.post(`${BASE_PATH}/api/pipeline/start`, async (req, res) => {
 
     res.json({ id, stage: 'scrape', profile_url, platform, username });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -4986,7 +5086,7 @@ app.get(`${BASE_PATH}/api/pipeline/jobs`, async (req, res) => {
     `, [req.workspace.id]);
     res.json(result.rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5004,7 +5104,7 @@ app.get(`${BASE_PATH}/api/pipeline/jobs/:id`, async (req, res) => {
     if (job.scrape_result) job.scrape_result = JSON.parse(job.scrape_result);
     res.json(job);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5033,7 +5133,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, async (req, res) => {
 
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5082,7 +5182,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, sendEmailLimiter, sendEma
 
     res.json({ success: true, queued: true, jobQueueId: jobId, contactId: job.contact_id, pipelineJobId: job.id });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5123,7 +5223,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, async (req, res) => {
 
     res.json({ success: true, email_subject: emailContent.subject, email_body: emailContent.body });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5171,7 +5271,7 @@ app.post(`${BASE_PATH}/api/data/content/scrape`, async (req, res) => {
 
     res.json(results);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5199,7 +5299,7 @@ app.put(`${BASE_PATH}/api/data/content/:id`, async (req, res) => {
 
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5212,7 +5312,7 @@ app.get(`${BASE_PATH}/api/data/content/:id/daily`, async (req, res) => {
     const stats = await query("SELECT stat_date, views, likes, comments, shares, source FROM content_daily_stats WHERE content_url=? ORDER BY stat_date", [item.content_url]);
     res.json({ content_url: item.content_url, daily: stats.rows });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5294,7 +5394,7 @@ app.get(`${BASE_PATH}/api/data/dashboard/combined`, async (req, res) => {
       },
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5460,7 +5560,7 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
 
     res.json({ id: jobId, status: 'running', keywords: searchKeywords });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5475,7 +5575,7 @@ app.get(`${BASE_PATH}/api/discovery/jobs`, async (req, res) => {
     jobs.forEach(j => { j.search_criteria = JSON.parse(j.search_criteria || '{}'); });
     res.json(jobs);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5536,7 +5636,7 @@ app.post(`${BASE_PATH}/api/discovery/jobs/:id/save-to-db`, async (req, res) => {
 
     res.json({ success: true, total: rows.length, inserted, skipped });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5556,7 +5656,7 @@ app.get(`${BASE_PATH}/api/discovery/jobs/:id/export`, exportLimiter, async (req,
     );
     sendCsv(res, r.rows || [], csvExport.COLUMNS.discoveryResults, `discovery-${req.params.id.slice(0, 8)}.csv`);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5575,7 +5675,7 @@ app.get(`${BASE_PATH}/api/discovery/jobs/:id`, async (req, res) => {
     );
     res.json({ ...job, results: resultsResult.rows });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5652,7 +5752,7 @@ app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, async (req, res) => {
 
     res.json({ processed: processed.length, jobs: processed });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5880,7 +5980,7 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
     });
 
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -5907,14 +6007,13 @@ app.get(`${BASE_PATH}/api/changelog`, async (req, res) => {
     const entries = await changelog.getEntries();
     res.json({ entries });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
 // Admin-only debug endpoint to verify Sentry wiring in prod. Throws a
 // synthetic error which the Sentry middleware below should capture.
-app.get(`${BASE_PATH}/api/admin/sentry-debug`, authMiddleware, (req, res, next) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'admin only' });
+app.get(`${BASE_PATH}/api/admin/sentry-debug`, authMiddleware, requirePlatformAdmin, (req, res, next) => {
   // The thrown error gets picked up by sentry.setupExpressErrorHandler.
   throw new Error('[sentry-debug] synthetic error from /api/admin/sentry-debug');
 });

@@ -75,13 +75,19 @@ STRIPE_SECRET_KEY=STRIPE_SECRET_KEY:latest,\
 STRIPE_WEBHOOK_SECRET=STRIPE_WEBHOOK_SECRET:latest,\
 DATABASE_URL=DATABASE_URL:latest\
 "
-# Optional: enable Sentry by uncommenting the line below AFTER running
-# setup-secrets.sh with SENTRY_DSN set in your .env. The Cloud Run deploy
-# will fail if the secret doesn't yet exist, so create it first.
-#   SENTRY_DSN=SENTRY_DSN:latest,\
-# (Append the line above into the SECRETS_CSV string — keep the trailing
-#  comma + backslash. Without SENTRY_DSN the server runs with Sentry as a
-#  no-op, no behavior change.)
+
+# Conditionally append optional secrets if they actually exist in Secret
+# Manager. Lets ops simply run `setup-secrets.sh` (which honors the .env)
+# and have the next deploy auto-mount whatever they configured — no manual
+# uncomment / re-deploy dance.
+maybe_append_secret() {
+  local name="$1"
+  if gcloud secrets describe "$name" --quiet >/dev/null 2>&1; then
+    SECRETS_CSV="${SECRETS_CSV},${name}=${name}:latest"
+    echo "  ✓ mounting optional secret: ${name}"
+  fi
+}
+maybe_append_secret "SENTRY_DSN"
 
 # Non-sensitive env vars. OAuth client IDs, CORS, LLM routing, mail sender
 # identity, public sheet IDs — none of these are secrets (they're visible to

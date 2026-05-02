@@ -860,6 +860,31 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-05-01-hash-invitation-tokens',
+    description: 'Backfill: rewrite plaintext invitation tokens as sha256 hashes so a DB leak cannot enumerate active invitations (audit S-5). Idempotent — only rewrites rows whose token length != 64 hex chars.',
+    up: async ({ exec, query }) => {
+      const crypto = require('crypto');
+      try {
+        const r = await query("SELECT id, token FROM invitations WHERE accepted_at IS NULL");
+        const rows = r.rows || [];
+        for (const row of rows) {
+          if (!row.token) continue;
+          // sha256 hex digest is exactly 64 chars. If we see anything else,
+          // assume it's plaintext and hash it. This means re-running this
+          // migration is a no-op (idempotent).
+          if (row.token.length === 64 && /^[0-9a-f]+$/i.test(row.token)) continue;
+          const hash = crypto.createHash('sha256').update(row.token).digest('hex');
+          await exec('UPDATE invitations SET token = ? WHERE id = ?', [hash, row.id]);
+        }
+      } catch (e) {
+        // Table may not exist on a brand-new database — that's fine, the
+        // base migration will create it with hashed-from-day-one tokens.
+        if (!/no such table|does not exist/i.test(e.message)) throw e;
+      }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,
@@ -893,6 +918,17 @@ async function getAppliedMigrations({ query }) {
 }
 
 async function runPendingMigrations(dbApi) {
+  // Audit D-4: flag duplicate IDs (a copy-paste / merge-conflict bug that
+  // would otherwise silently skip the second occurrence). We don't enforce
+  // strict date ordering because some migrations (e.g. multitenancy-init)
+  // are intentionally placed after later-dated peers because they backfill
+  // columns into tables those peers create.
+  const seen = new Set();
+  for (const m of MIGRATIONS) {
+    if (seen.has(m.id)) throw new Error(`[migrations] duplicate id: "${m.id}"`);
+    seen.add(m.id);
+  }
+
   await ensureMigrationsTable(dbApi);
   const applied = await getAppliedMigrations(dbApi);
 

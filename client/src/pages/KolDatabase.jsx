@@ -470,7 +470,7 @@ function KolDetailModal({ kol, onClose }) {
             <div><strong>{t('kol_db.detail_email')}</strong> {kol.email || '-'}</div>
             <div><strong>{t('kol_db.detail_videos')}</strong> {kol.total_videos || '-'}</div>
             <div><strong>{t('kol_db.detail_language')}</strong> {kol.language || '-'}</div>
-            <div><strong>{t('kol_db.detail_profile')}</strong> <a href={kol.profile_url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{t('kol_db.open_profile')}</a></div>
+            <div><strong>{t('kol_db.detail_profile')}</strong> <a href={kol.profile_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>{t('kol_db.open_profile')}</a></div>
           </div>
 
           {kol.outreach_email_subject && (
@@ -490,7 +490,7 @@ function KolDetailModal({ kol, onClose }) {
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onClose}>{t('kol_db.close')}</button>
           {kol.profile_url && (
-            <a href={kol.profile_url} target="_blank" rel="noreferrer" className="btn btn-primary">
+            <a href={kol.profile_url} target="_blank" rel="noopener noreferrer" className="btn btn-primary">
               {t('kol_db.open_profile')}
             </a>
           )}

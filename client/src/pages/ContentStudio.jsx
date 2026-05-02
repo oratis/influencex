@@ -4,6 +4,31 @@ import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
 
+// Audit D-5: only follow image-download links to provider domains we
+// actually use. Defends against a compromised LLM/agent returning a
+// phishing URL; the user gets a generic notice instead of a download.
+const IMAGE_HOST_ALLOWLIST = [
+  'replicate.delivery', 'replicate.com',
+  'fal.ai', 'fal.media',
+  'volcengine.com', 'doubao.com', 'ark.cn-beijing.volces.com',
+  'aiartdrop.com',
+  'storage.googleapis.com', // GCS — our own bucket
+  'oss-cn-beijing.aliyuncs.com', 'aliyuncs.com',
+  // data: URLs are also fine; checked separately.
+];
+function isSafeImageUrl(url) {
+  if (!url) return false;
+  if (url.startsWith('data:image/')) return true;
+  if (url.startsWith('blob:')) return true;
+  try {
+    const u = new URL(url, window.location.origin);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+    return IMAGE_HOST_ALLOWLIST.some(h => u.hostname === h || u.hostname.endsWith('.' + h));
+  } catch {
+    return false;
+  }
+}
+
 export default function ContentStudio() {
   const [format, setFormat] = useState('twitter');
   const [brief, setBrief] = useState('');
@@ -473,13 +498,21 @@ export default function ContentStudio() {
               </details>
               <div className="btn-group">
                 <button className="btn btn-primary btn-sm" onClick={handleSave}>{t('studio.save')}</button>
-                <a
-                  className="btn btn-secondary btn-sm"
-                  href={currentOutput.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  download
-                >{t('studio.open_download')}</a>
+                {isSafeImageUrl(currentOutput.url) ? (
+                  <a
+                    className="btn btn-secondary btn-sm"
+                    href={currentOutput.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download
+                  >{t('studio.open_download')}</a>
+                ) : (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    disabled
+                    title={t('studio.unsafe_url_hint')}
+                  >{t('studio.unsafe_url')}</button>
+                )}
                 <button className="btn btn-secondary btn-sm" onClick={handleGenerate}>{t('studio.regenerate')}</button>
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
@@ -591,7 +624,7 @@ export default function ContentStudio() {
                         className="btn btn-primary btn-sm"
                         href={r.intent_url}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         style={{ flex: 1, textAlign: 'center', textDecoration: 'none' }}
                       >
                         {t('studio.open_in', { platform: r.platform })}
@@ -627,7 +660,7 @@ export default function ContentStudio() {
                   <button className="btn-icon" onClick={() => handleDelete(p.id)} style={{ padding: 4 }} aria-label={t('common.delete')} title={t('common.delete')}>🗑</button>
                 </div>
                 {p.type === 'image' && p.body ? (
-                  <a href={p.body} target="_blank" rel="noreferrer">
+                  <a href={p.body} target="_blank" rel="noopener noreferrer">
                     <img
                       src={p.body}
                       alt={p.title || 'Image'}

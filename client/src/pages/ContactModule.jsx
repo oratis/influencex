@@ -356,7 +356,7 @@ export default function ContactModule() {
                 {contact.content_url && (
                   <div style={{ marginBottom: '8px', fontSize: '13px' }}>
                     <span style={{ color: 'var(--text-secondary)' }}>{t('contacts.content_url_label')}</span>
-                    <a href={contact.content_url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{contact.content_url}</a>
+                    <a href={contact.content_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>{contact.content_url}</a>
                   </div>
                 )}
 

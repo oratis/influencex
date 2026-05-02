@@ -573,6 +573,8 @@ const MESSAGES = {
       persisting_image: 'Persisting image (downloading bytes)...',
       persist_failed: 'Could not persist image bytes — saving URL (will expire): {{error}}',
       open_download: '⬇ Open / download',
+      unsafe_url: '⚠ Untrusted source',
+      unsafe_url_hint: 'The image host is not on our allowlist — refusing to follow the link to protect against phishing.',
       regenerate: '🔄 Regenerate',
       copy: '📋 Copy',
       copied: 'Copied to clipboard',
@@ -1128,6 +1130,7 @@ const MESSAGES = {
       variant_created: 'Variant created',
       create_variant_title: 'Create A/B variant',
       variant_label: 'Variant label',
+      variant_label_placeholder: 'A / B / shorter / casual...',
       variant_parent: 'control',
       no_variants_yet: 'No variants yet. Add one to compare against the parent.',
       stats_variant: 'Variant',
@@ -2177,6 +2180,8 @@ const MESSAGES = {
       persisting_image: '持久化图片（下载字节）中...',
       persist_failed: '无法持久化图片字节 — 改存 URL（将过期）：{{error}}',
       open_download: '⬇ 打开 / 下载',
+      unsafe_url: '⚠ 来源不可信',
+      unsafe_url_hint: '图片来源不在白名单中 —— 出于钓鱼防护，已禁用直接打开。',
       regenerate: '🔄 重新生成',
       copy: '📋 复制',
       copied: '已复制到剪贴板',
@@ -2732,6 +2737,7 @@ const MESSAGES = {
       variant_created: '变体已创建',
       create_variant_title: '创建 A/B 变体',
       variant_label: '变体标签',
+      variant_label_placeholder: 'A / B / 简短 / 随性…',
       variant_parent: '原版',
       no_variants_yet: '还没有变体。添加一个用于和原版对比。',
       stats_variant: '变体',
@@ -3235,6 +3241,17 @@ function interpolate(str, vars) {
   return str.replace(/\{\{(\w+)\}\}/g, (_, k) => (vars && vars[k] !== undefined ? String(vars[k]) : ''));
 }
 
+// Throttled missing-key warner. Each (lang, key) pair fires at most once
+// per session so the dev console doesn't drown in repeats from re-renders.
+const _missingWarned = new Set();
+function warnMissing(key, lang) {
+  const sig = `${lang}:${key}`;
+  if (_missingWarned.has(sig)) return;
+  _missingWarned.add(sig);
+  // eslint-disable-next-line no-console
+  console.warn(`[i18n] missing key "${key}" in lang "${lang}" — falling back`);
+}
+
 const I18nContext = createContext(null);
 
 export function I18nProvider({ children }) {
@@ -3258,8 +3275,19 @@ export function I18nProvider({ children }) {
     const messages = MESSAGES[lang] || MESSAGES.en;
     const str = resolve(messages, key);
     if (str === null) {
+      // Audit C-8: warn dev users when a key is missing from BOTH dicts so
+      // typos surface in the console rather than silently falling back to
+      // the literal key string. Throttled by key to avoid log spam.
       const enStr = resolve(MESSAGES.en, key);
+      if (enStr === null && import.meta.env.DEV) warnMissing(key, lang);
       return interpolate(enStr || key, vars);
+    }
+    if (lang !== 'en' && import.meta.env.DEV) {
+      // Lang-specific gap: en has it but current lang doesn't. Less severe
+      // (still renders something), but useful to flag during translation
+      // passes.
+      const enStr = resolve(MESSAGES.en, key);
+      if (enStr === null) warnMissing(key, lang);
     }
     return interpolate(str, vars);
   }, [lang]);

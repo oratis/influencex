@@ -46,6 +46,31 @@
 
 ---
 
+## 2026-05-01 — Audit hardening
+
+### Fixed
+- **Multi-tenant isolation tightened**: every `contacts ↔ kols` JOIN (10 sites) now also matches `kols.workspace_id = contacts.workspace_id`. The hard-bounce blocker no longer counts events across other tenants.
+- **Async crash protection**: every `setTimeout(...scrape...)` invocation now has `.catch()` so a scrape failure can never become an unhandled rejection.
+- **Invitation token leak risk eliminated**: `invitations.token` is now stored as a sha256 hash. A DB leak can no longer enumerate active invitations. Existing plaintext tokens are auto-hashed on next deploy.
+- **Invite code race condition closed**: redemption uses the UPDATE row count as the canonical signal instead of a SELECT-after-UPDATE, which couldn't distinguish a race from a concurrent DELETE.
+- **`/api/campaigns` N+1 eliminated**: a single GROUP BY replaces the per-campaign stats query.
+
+### Changed
+- **Error responses sanitized in production** (`NODE_ENV=production`): driver text (SQLITE_*, ER_*, "constraint failed", schema hints) is replaced with "Internal error". Sentry still sees the original. Defense-in-depth on the client too: `toastApiError` strips stack-frame-looking strings before showing them.
+- **Security headers**: CSP, X-Content-Type-Options, Referrer-Policy, X-Frame-Options, Permissions-Policy, HSTS. Reduces the blast radius of any future XSS.
+- **Bcrypt rounds** raised from 10 → 12 for new password hashes (existing hashes still verify; only new/reset passwords pay the cost). Override via `BCRYPT_ROUNDS`.
+- **Strict workspace mode** available behind `STRICT_WORKSPACE_SCOPE=true` env var — forces every API call to send `X-Workspace-Id` instead of falling back to the user's default workspace.
+- **Image download links in Content Studio** now require an HTTPS host on a known allowlist (Replicate, Fal, Volcengine, etc.) — phishing URLs from a compromised agent are blocked.
+- **`deploy.sh` auto-mounts SENTRY_DSN** when the secret exists in Secret Manager — no more "secret created but Cloud Run doesn't see it" gap.
+
+### Added
+- `requirePlatformAdmin` middleware extracted from 7 inline `req.user.role !== 'admin'` checks.
+- Migration runner now refuses duplicate IDs (catches merge-conflict copy-paste bugs).
+- i18n: missing-key warner that logs once per `(lang, key)` pair in dev so typos surface in the console.
+- ConfirmDialog/Prompt: focus management — first interactive element auto-focused on open, focus restored to triggering element on close, ESC closes.
+
+---
+
 ## 2026-04-28 — KOL scrape recovery
 
 ### Fixed

@@ -32,8 +32,8 @@ export default function LandingPage() {
           }}>InfluenceX</h1>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <a href="https://github.com/oratis/influencex" target="_blank" rel="noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.github')}</a>
-          <a href="/api/docs" target="_blank" rel="noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.api_docs')}</a>
+          <a href="https://github.com/oratis/influencex" target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.github')}</a>
+          <a href="/api/docs" target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.api_docs')}</a>
           <Link to="/login" className="btn btn-secondary btn-sm">{t('auth.sign_in')}</Link>
           <Link to="/login" className="btn btn-primary btn-sm">{t('auth.sign_in')}</Link>
         </div>
@@ -64,7 +64,7 @@ export default function LandingPage() {
           <Link to="/login" className="btn btn-primary" style={{ fontSize: 16, padding: '14px 28px' }}>
             {t('auth.sign_in')}
           </Link>
-          <a href="https://github.com/oratis/influencex" target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ fontSize: 16, padding: '14px 28px' }}>
+          <a href="https://github.com/oratis/influencex" target="_blank" rel="noopener noreferrer" className="btn btn-secondary" style={{ fontSize: 16, padding: '14px 28px' }}>
             {t('landing.star_on_github')}
           </a>
         </div>
@@ -129,8 +129,8 @@ export default function LandingPage() {
         textAlign: 'center', color: 'var(--text-muted)', fontSize: 13,
       }}>
         <div style={{ marginBottom: 10 }}>
-          <a href="https://github.com/oratis/influencex" target="_blank" rel="noreferrer" style={{ color: 'var(--text-secondary)', textDecoration: 'none', marginRight: 16 }}>{t('landing.github')}</a>
-          <a href="/api/docs" target="_blank" rel="noreferrer" style={{ color: 'var(--text-secondary)', textDecoration: 'none', marginRight: 16 }}>{t('landing.api_docs')}</a>
+          <a href="https://github.com/oratis/influencex" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-secondary)', textDecoration: 'none', marginRight: 16 }}>{t('landing.github')}</a>
+          <a href="/api/docs" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-secondary)', textDecoration: 'none', marginRight: 16 }}>{t('landing.api_docs')}</a>
           <a href="mailto:contact@influencexes.com" style={{ color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.contact')}</a>
         </div>
         {t('landing.mit_footer', { year: new Date().getFullYear() })}

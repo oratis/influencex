@@ -44,8 +44,13 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
+// bcrypt cost factor. Each +1 doubles hash time; 12 is the modern OWASP
+// recommendation for 2026-era hardware. Existing user hashes at cost 10
+// continue to verify (bcrypt encodes cost in the digest); only NEW or RESET
+// passwords pay the higher cost. Audit S-8.
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
 function hashPassword(password) {
-  return bcrypt.hashSync(password, 10);
+  return bcrypt.hashSync(password, BCRYPT_ROUNDS);
 }
 
 function verifyPassword(password, hash) {

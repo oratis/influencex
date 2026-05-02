@@ -329,7 +329,7 @@ export default function ConnectionsPage() {
                           <div style={{ marginTop: 6 }}>
                             {s.result.results.map(r => (
                               <div key={r.platform} style={{ marginBottom: 4 }}>
-                                <a href={r.intent_url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', fontSize: 11 }}>
+                                <a href={r.intent_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: 11 }}>
                                   {r.platform} →
                                 </a>
                               </div>

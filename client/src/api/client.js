@@ -86,9 +86,24 @@ export function toastApiError(err, toast, t) {
   if (err.message && /Workspace context required/i.test(err.message)) {
     return err.message;
   }
-  const msg = err.message || t('common.error');
+  const msg = sanitizeApiMessage(err.message) || t('common.error');
   toast?.error?.(msg);
   return msg;
+}
+
+// Defense-in-depth (audit C-2): if a message looks like a stack trace or
+// driver dump (DB error, Node frame), don't render it raw — the server
+// is supposed to sanitize, but we do a second pass here so a regression
+// can't leak internals through the toast layer.
+function sanitizeApiMessage(msg) {
+  if (!msg) return '';
+  const s = String(msg);
+  if (/at [\w$.]+\s*\(/.test(s)) return 'Something went wrong. Please try again.';
+  if (/sqlite|sqlstate|er_\d|pg_|column .* does not exist|relation .* does not exist|deadlock|constraint failed/i.test(s)) {
+    return 'Something went wrong. Please try again.';
+  }
+  if (s.length > 240) return s.slice(0, 240) + '…';
+  return s;
 }
 
 export const auth = {

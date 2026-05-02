@@ -205,7 +205,7 @@ export default function ContactThreadDrawer({ contact, campaignId, onClose, onCh
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{contact.kol_email || t('contacts.drawer_no_email')}</div>
             </div>
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>×</button>
+          <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>×</button>
         </div>
 
         <div className="tabs" style={{ padding: '0 22px', marginTop: 10 }}>

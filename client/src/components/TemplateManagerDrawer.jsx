@@ -91,7 +91,7 @@ export default function TemplateManagerDrawer({ onClose }) {
       <div style={drawerStyle} onClick={e => e.stopPropagation()}>
         <div style={headerStyle}>
           <h3 style={{ margin: 0 }}>{t('templates.title')}</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>×</button>
+          <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>×</button>
         </div>
 
         {editing ? (
@@ -397,8 +397,14 @@ function VariantEditor({ parentId, onCancel, onSave, t }) {
     <div style={{ flex: 1, overflowY: 'auto', padding: '16px 22px' }}>
       <h4 style={{ margin: '0 0 12px' }}>{t('templates.create_variant_title')}</h4>
       <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>{t('templates.variant_label')}</label>
-        <input className="form-input" placeholder="A / B / shorter / casual..." value={form.variant_label} onChange={e => setForm(f => ({ ...f, variant_label: e.target.value }))} />
+        <label style={labelStyle} htmlFor="variant-label-input">{t('templates.variant_label')}</label>
+        <input
+          id="variant-label-input"
+          className="form-input"
+          placeholder={t('templates.variant_label_placeholder')}
+          value={form.variant_label}
+          onChange={e => setForm(f => ({ ...f, variant_label: e.target.value }))}
+        />
       </div>
       <div style={{ marginBottom: 12 }}>
         <label style={labelStyle}>{t('contacts.email_subject_label')}</label>

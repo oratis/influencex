@@ -218,7 +218,7 @@ export default function CommunityInboxPage() {
                   </div>
                 </div>
                 {selected.url && (
-                  <a href={selected.url} target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ padding: '4px 10px' }}>
+                  <a href={selected.url} target="_blank" rel="noopener noreferrer" className="btn btn-secondary" style={{ padding: '4px 10px' }}>
                     {t('inbox.open_btn')}
                   </a>
                 )}

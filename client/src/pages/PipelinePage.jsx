@@ -515,7 +515,7 @@ export default function PipelinePage() {
                     {(selectedDiscovery.results || []).map(r => (
                       <tr key={r.id}>
                         <td>
-                          <a href={r.channel_url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', fontWeight: '500' }}>
+                          <a href={r.channel_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontWeight: '500' }}>
                             {r.channel_name}
                           </a>
                         </td>
