@@ -266,6 +266,8 @@ function AppContent() {
           <main className="main-content" onClick={() => { if (showUserMenu) setShowUserMenu(false); if (mobileNavOpen) setMobileNavOpen(false); }}>
             <Routes>
               <Route path="/" element={<HomeRedirect />} />
+              <Route path="/login" element={<Navigate to="/" replace />} />
+              <Route path="/auth" element={<Navigate to="/" replace />} />
               <Route path="/conductor" element={<ConductorPage />} />
               <Route path="/connections" element={<ConnectionsPage />} />
               <Route path="/calendar" element={<CalendarPage />} />
@@ -339,7 +341,7 @@ function GlobalHeader({ onToggleMobileNav }) {
             </span>
             <span className="global-stat">{t('campaigns.kols_total', { count: selectedCampaign.kol_total || 0 })}</span>
             <span className="global-stat">{t('campaigns.kols_approved', { count: selectedCampaign.kol_approved || 0 })}</span>
-            {selectedCampaign.budget > 0 && <span className="global-stat">{t('campaigns.budget', { amount: Number(selectedCampaign.budget).toLocaleString() })}</span>}
+            {selectedCampaign.budget > 0 && <span className="global-stat">{t('campaigns.budget_label', { amount: Number(selectedCampaign.budget).toLocaleString() })}</span>}
           </div>
         )}
       </div>
