@@ -35,7 +35,7 @@ export default function LandingPage() {
           <a href="https://github.com/oratis/influencex" target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.github')}</a>
           <a href="/api/docs" target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: 'var(--text-secondary)', textDecoration: 'none' }}>{t('landing.api_docs')}</a>
           <Link to="/login" className="btn btn-secondary btn-sm">{t('auth.sign_in')}</Link>
-          <Link to="/login" className="btn btn-primary btn-sm">{t('auth.sign_in')}</Link>
+          <Link to="/signup" className="btn btn-primary btn-sm">{t('landing.signup_with_code')}</Link>
         </div>
       </div>
 

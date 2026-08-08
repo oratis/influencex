@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api, toastApiError } from '../api/client';
 import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
@@ -25,6 +25,10 @@ export default function ContactModule() {
   const [availableTemplates, setAvailableTemplates] = useState({ builtin: [], custom: [] });
   const [loadError, setLoadError] = useState(null);
   const [pollDelay, setPollDelay] = useState(5000);
+  // Monotonically-increasing request sequence: a response only lands if it is
+  // still the newest request, so a slow reply for an older campaign (or an
+  // older poll tick) can never clobber fresher state.
+  const reqSeqRef = useRef(0);
 
   const CONTRACT_OPTIONS = [
     { value: 'none', label: t('contacts.contract_none') },
@@ -59,18 +63,24 @@ export default function ContactModule() {
   }, [contacts, pollDelay]);
 
   const loadContacts = async () => {
-    setLoading(true);
+    const seq = ++reqSeqRef.current;
+    // Background-refresh pattern: only show the full-page loading state when
+    // there's nothing on screen yet. The 5s poll must not blank the list
+    // (losing checkbox selection + scroll position) on every tick.
+    if (contacts.length === 0) setLoading(true);
     try {
       const data = await api.getContacts(selectedCampaignId, {});
+      if (seq !== reqSeqRef.current) return; // stale response — drop it
       setContacts(data);
       setLoadError(null);
       setPollDelay(5000);
     } catch (e) {
+      if (seq !== reqSeqRef.current) return;
       setLoadError(e);
       setPollDelay(d => Math.min(d * 2, 60000));
       toastApiError(e, toast, t);
     }
-    setLoading(false);
+    if (seq === reqSeqRef.current) setLoading(false);
   };
 
   const handleBatchGenerate = async () => {

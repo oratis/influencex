@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import { useToast } from './Toast';
 import { useI18n } from '../i18n';
+import { toLocalInputValue, localInputValueToIso } from '../utils/datetime';
 
 /**
  * Right-side drawer for managing a single contact's outreach.
@@ -156,7 +157,8 @@ export default function ContactThreadDrawer({ contact, campaignId, onClose, onCh
 
   async function handleScheduleSend() {
     if (!scheduledAt) return;
-    const iso = new Date(scheduledAt).toISOString();
+    const iso = localInputValueToIso(scheduledAt);
+    if (!iso) return;
     setScheduling(true);
     try {
       // Save the latest draft first so the scheduler picks up the current subject/body.
@@ -412,6 +414,7 @@ export function EmailStatusBadge({ status, t }) {
     replied:    { color: 'badge-purple', icon: '💬' },
     bounced:    { color: 'badge-red',    icon: '⚠️' },
     failed:     { color: 'badge-red',    icon: '❌' },
+    scheduled:  { color: 'badge-purple', icon: '🕒' },
   };
   const s = statuses[status] || { color: 'badge-gray', icon: '•' };
   return (
@@ -445,12 +448,4 @@ function formatFollowers(n) {
 
 function renderLocal(tpl, vars) {
   return String(tpl || '').replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
-}
-
-// datetime-local inputs want "YYYY-MM-DDTHH:mm" in the user's timezone.
-function toLocalInputValue(iso) {
-  const d = iso instanceof Date ? iso : new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

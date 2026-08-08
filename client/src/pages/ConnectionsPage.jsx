@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
@@ -21,9 +21,25 @@ export default function ConnectionsPage() {
   const toast = useToast();
   const { confirm: confirmDialog } = useConfirm();
   const { t } = useI18n();
+  const connectPollRef = useRef(null);
+  const gmailTimerRef = useRef(null);
+  const gmailMsgHandlerRef = useRef(null);
 
-  useEffect(() => { loadAll(); const iv = setInterval(loadAll, 15_000); return () => clearInterval(iv); }, []);
+  useEffect(() => {
+    loadAll();
+    const iv = setInterval(loadAll, 15_000);
+    return () => {
+      clearInterval(iv);
+      // OAuth connect poll + Gmail fallback timer/listener must not outlive
+      // the page — they call loadAll/setState.
+      if (connectPollRef.current) clearInterval(connectPollRef.current);
+      if (gmailTimerRef.current) clearTimeout(gmailTimerRef.current);
+      if (gmailMsgHandlerRef.current) window.removeEventListener('message', gmailMsgHandlerRef.current);
+    };
+  }, []);
 
+  // Returns the freshly fetched platforms list (or null on failure) so
+  // pollers can inspect current data instead of a stale state closure.
   async function loadAll() {
     try {
       const [p, s, m, g] = await Promise.all([
@@ -37,8 +53,12 @@ export default function ConnectionsPage() {
       setMailboxes(m.items || []);
       setEnvFallback(m.envFallback || null);
       setGmailConfigured(!!g.configured);
-    } catch (e) { /* ok */ }
-    setLoading(false);
+      setLoading(false);
+      return p.platforms || [];
+    } catch (e) {
+      setLoading(false);
+      return null;
+    }
   }
 
   async function handleConnectGmail() {
@@ -47,16 +67,25 @@ export default function ConnectionsPage() {
       window.open(r.url, 'gmail-oauth', 'width=520,height=700');
       // Listen for the callback postMessage so we can reload without the
       // user having to do anything.
+      if (gmailMsgHandlerRef.current) window.removeEventListener('message', gmailMsgHandlerRef.current);
       const onMsg = (e) => {
         if (e?.data?.type === 'gmail-oauth-complete') {
           window.removeEventListener('message', onMsg);
+          if (gmailMsgHandlerRef.current === onMsg) gmailMsgHandlerRef.current = null;
           toast.success(t('connections.mailbox_gmail_connected'));
           loadAll();
         }
       };
+      gmailMsgHandlerRef.current = onMsg;
       window.addEventListener('message', onMsg);
       // Also re-poll after 45s in case the postMessage is blocked (cross-origin).
-      setTimeout(() => { window.removeEventListener('message', onMsg); loadAll(); }, 45_000);
+      if (gmailTimerRef.current) clearTimeout(gmailTimerRef.current);
+      gmailTimerRef.current = setTimeout(() => {
+        window.removeEventListener('message', onMsg);
+        if (gmailMsgHandlerRef.current === onMsg) gmailMsgHandlerRef.current = null;
+        gmailTimerRef.current = null;
+        loadAll();
+      }, 45_000);
     } catch (e) { toast.error(e.message); }
   }
 
@@ -111,11 +140,17 @@ export default function ConnectionsPage() {
       window.open(r.authorize_url, '_blank', 'width=640,height=720');
       toast.info(t('connections.oauth_info'));
       let tries = 0;
-      const poll = setInterval(async () => {
+      if (connectPollRef.current) clearInterval(connectPollRef.current);
+      connectPollRef.current = setInterval(async () => {
         tries++;
-        await loadAll();
-        const p = platforms.find(x => x.id === platform);
-        if ((p?.connection) || tries > 60) clearInterval(poll);
+        // Read the freshly fetched list — the `platforms` state in this
+        // closure is frozen at click time and would never show `connection`.
+        const fresh = await loadAll();
+        const row = (fresh || []).find(x => x.id === platform);
+        if (row?.connection || tries > 60) {
+          clearInterval(connectPollRef.current);
+          connectPollRef.current = null;
+        }
       }, 2000);
     } catch (e) {
       toast.error(e.message);

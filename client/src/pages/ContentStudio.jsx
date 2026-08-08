@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
+import { toLocalInputValue, localInputValueToIso } from '../utils/datetime';
 
 // Audit D-5: only follow image-download links to provider domains we
 // actually use. Defends against a compromised LLM/agent returning a
@@ -121,7 +122,7 @@ export default function ContentStudio() {
     try {
       await api.schedulePublish({
         platforms: defaultPlatformsFor(format),
-        scheduled_at: scheduleAt,
+        scheduled_at: localInputValueToIso(scheduleAt),
         content,
         mode: 'intent',
       });
@@ -180,6 +181,12 @@ export default function ContentStudio() {
     try {
       const r = await api.runAgent(agentId, input);
       setActiveRunId(r.runId);
+      // Close any previous stream (e.g. Regenerate while the old one is
+      // still open) so EventSources don't pile up.
+      if (srcRef.current) {
+        srcRef.current.close();
+        srcRef.current = null;
+      }
       const src = api.streamAgentRun(r.runId);
       srcRef.current = src;
 
@@ -199,7 +206,11 @@ export default function ContentStudio() {
           } catch { /* ignore */ }
         });
       }
-      src.addEventListener('closed', () => { src.close(); setIsGenerating(false); });
+      src.addEventListener('closed', () => {
+        src.close();
+        if (srcRef.current === src) srcRef.current = null;
+        setIsGenerating(false);
+      });
     } catch (e) {
       toast.error(e.message);
       setIsGenerating(false);
@@ -558,7 +569,7 @@ export default function ContentStudio() {
                 <button className="btn btn-secondary btn-sm" onClick={() => {
                   const now = new Date();
                   now.setHours(now.getHours() + 1, 0, 0, 0);
-                  setScheduleAt(now.toISOString().slice(0, 16));
+                  setScheduleAt(toLocalInputValue(now));
                   setShowScheduleModal(true);
                 }}>{t('studio.schedule')}</button>
               </div>

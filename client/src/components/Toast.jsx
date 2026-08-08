@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
+import React, { useState, useCallback, useMemo, createContext, useContext } from 'react';
 
 const ToastContext = createContext();
 
@@ -17,12 +17,14 @@ export function ToastProvider({ children }) {
     }
   }, []);
 
-  const toast = useCallback({
+  // useMemo, not useCallback — this is a memoized object of functions, not a
+  // function itself (useCallback's first argument must be a function).
+  const toast = useMemo(() => ({
     success: (msg, dur) => addToast(msg, 'success', dur),
     error: (msg, dur) => addToast(msg, 'error', dur ?? 6000),
     info: (msg, dur) => addToast(msg, 'info', dur),
     warning: (msg, dur) => addToast(msg, 'warning', dur),
-  }, [addToast]);
+  }), [addToast]);
 
   // Make toast callable directly: toast.success(), toast.error() etc
   const value = toast;
@@ -30,10 +32,13 @@ export function ToastProvider({ children }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div style={{
-        position: 'fixed', bottom: '24px', right: '24px', zIndex: 9999,
-        display: 'flex', flexDirection: 'column-reverse', gap: '8px', maxWidth: '400px',
-      }}>
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          position: 'fixed', bottom: '24px', right: '24px', zIndex: 9999,
+          display: 'flex', flexDirection: 'column-reverse', gap: '8px', maxWidth: '400px',
+        }}>
         {toasts.map(t => (
           <ToastItem key={t.id} toast={t} onDismiss={() => setToasts(prev => prev.filter(x => x.id !== t.id))} />
         ))}

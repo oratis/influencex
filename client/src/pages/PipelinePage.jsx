@@ -215,7 +215,7 @@ export default function PipelinePage() {
 
   const handleStartDiscovery = async () => {
     if (discoveryPlatforms.length === 0) {
-      toast.error(t('pipeline.discovery_no_platform') || 'Pick at least one platform');
+      toast.error(t('pipeline.discovery_no_platform'));
       return;
     }
     setDiscovering(true);
@@ -418,7 +418,7 @@ export default function PipelinePage() {
                   return (
                     <label
                       key={p.id}
-                      title={enabled ? '' : `${t('pipeline.discovery_platform_unconfigured') || 'Requires'} ${p.requires}`}
+                      title={enabled ? '' : `${t('pipeline.discovery_platform_unconfigured')} ${p.requires}`}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 6,
                         padding: '6px 10px', borderRadius: 6,
@@ -461,7 +461,7 @@ export default function PipelinePage() {
                   style={{ width: '120px', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px' }}
                 />
               </div>
-              <button className="btn btn-secondary" onClick={saveDiscoveryDefaults} title={t('pipeline.save_defaults_hint') || 'Save as workspace default'}>
+              <button className="btn btn-secondary" onClick={saveDiscoveryDefaults} title={t('pipeline.save_defaults_hint')}>
                 💾
               </button>
               <button className="btn btn-primary" onClick={handleStartDiscovery} disabled={discovering}>
