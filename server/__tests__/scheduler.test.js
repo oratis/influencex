@@ -105,6 +105,65 @@ test('follow-up with no jobQueue records an error instead of crashing', async ()
   assert.equal(r.follow_ups_sent, 0);
 });
 
+test('follow-up already claimed / in flight is not re-enqueued (per tick and across ticks)', async () => {
+  // The scan keeps returning the contact (stale reads), so the atomic
+  // enqueue-claim on last_send_attempt_at is the only thing standing between
+  // us and a duplicate job. Emulate the conditional UPDATE.
+  const contact = { id: 'f-inflight', email_subject: 'Orig', kol_email: 'f@x.com', display_name: 'F', workspace_id: 'w', follow_up_count: 0 };
+  const enq = [];
+  let claimedAt = null; // emulates contacts.last_send_attempt_at freshness
+  const mocks = {
+    query: async (sql) => {
+      if (/scheduled_send_at IS NOT NULL/.test(sql)) return { rows: [] };
+      if (/follow_up_count/.test(sql)) return { rows: [{ ...contact }] }; // returned for every step: worst case
+      return { rows: [] };
+    },
+    exec: async (sql, params) => {
+      if (/SET last_send_attempt_at = \?/.test(sql)) {
+        if (claimedAt) return { rowCount: 0 }; // fresh claim → condition fails
+        claimedAt = params[0];
+        return { rowCount: 1 };
+      }
+      return { rowCount: 1 };
+    },
+    queryOne: async () => null,
+    uuidv4: () => 'u',
+    mailAgent: { isConfigured: () => true, sendEmail: async () => ({ success: true }) },
+    jobQueue: { push: (type, payload, opts) => { enq.push({ type, payload, opts }); return 1; } },
+  };
+
+  const r1 = await scheduler.tick(mocks);
+  // Scan returned the contact once per step (2 steps configured) — the claim
+  // must still allow only ONE enqueue in the tick.
+  assert.equal(r1.follow_ups_sent, 1, 'one due-scan tick enqueues a given follow-up at most once');
+  assert.equal(enq.filter(e => e.payload.kind === 'followup').length, 1);
+  assert.equal(enq[0].payload.followUpStep, 1, 'payload carries the claimed step');
+
+  // Next tick: previous job still in flight (follow_up_count unchanged,
+  // claim marker fresh) — nothing new may be enqueued.
+  const r2 = await scheduler.tick(mocks);
+  assert.equal(r2.follow_ups_sent, 0, 'in-flight follow-up must not be re-enqueued');
+  assert.equal(enq.filter(e => e.payload.kind === 'followup').length, 1);
+});
+
+test('async push rejection (BullMQ mode) is caught, not left as an unhandled rejection', async () => {
+  const followupRowsByStep = [[{ id: 'fr', email_subject: 'S', kol_email: 'x@x.com', workspace_id: 'w', follow_up_count: 0 }]];
+  const mocks = makeMocks({ followupRowsByStep });
+  mocks.jobQueue = { push: () => Promise.reject(new Error('redis down')) };
+  let unhandled = null;
+  const onUR = (e) => { unhandled = e; };
+  process.on('unhandledRejection', onUR);
+  try {
+    await scheduler.tick(mocks);
+    // Give the rejection a macrotask to surface if it were unhandled.
+    await new Promise(res => setImmediate(res));
+    await new Promise(res => setImmediate(res));
+  } finally {
+    process.off('unhandledRejection', onUR);
+  }
+  assert.equal(unhandled, null, 'the .catch guard must swallow the rejection');
+});
+
 test('scheduled-send query uses an ISO-string "now" parameter (cross-DB safe)', async () => {
   // This test is more of a contract check — if someone ever flips it back
   // to CURRENT_TIMESTAMP, the SQLite comparison bug would return. We snoop

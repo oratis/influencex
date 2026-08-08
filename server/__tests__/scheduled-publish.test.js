@@ -38,8 +38,12 @@ function makeFakeDb({ scheduledRows = [], connections = [] } = {}) {
   async function exec(sql, params = []) {
     updates.push({ sql, params });
     if (/UPDATE scheduled_publishes SET status='running'/.test(sql)) {
+      // Mirrors the real claim: only a still-pending row can be flipped.
       const row = state.scheduled.find(r => r.id === params[0]);
-      if (row) { row.status = 'running'; row.attempts = (row.attempts || 0) + 1; }
+      if (!row || row.status !== 'pending') return { rowCount: 0 };
+      row.status = 'running';
+      row.attempts = (row.attempts || 0) + 1;
+      return { rowCount: 1 };
     } else if (/UPDATE scheduled_publishes SET status='pending'/.test(sql)) {
       // Retry path: status=pending, next_retry_at=?, error_message=?, result=? WHERE id=?
       const row = state.scheduled.find(r => r.id === params[3]);
@@ -261,6 +265,37 @@ test('intent mode: routes through publisher agent and marks complete', async () 
   });
   assert.equal(r.ok, 1);
   assert.equal(db.state.scheduled[0].status, 'complete');
+});
+
+test('claim skips a row another replica already flipped to running', async () => {
+  const db = makeFakeDb({
+    scheduledRows: [{
+      id: 'sp-race', workspace_id: 'ws-1', mode: 'direct', status: 'pending',
+      scheduled_at: new Date(Date.now() - 1000).toISOString(),
+      platforms: JSON.stringify(['twitter']),
+      content_snapshot: JSON.stringify({ body: 'hi', type: 'text' }),
+    }],
+    connections: [{ id: 'c1', workspace_id: 'ws-1', platform: 'twitter', access_token: 'tok' }],
+  });
+  let agentRuns = 0;
+  const countingRuntime = { createRun: () => { agentRuns += 1; throw new Error('must not dispatch'); } };
+  // Stale scan: return the row as pending, then simulate the other replica
+  // winning the claim before ours lands.
+  const query = async (sql, params) => {
+    const r = await db.query(sql, params);
+    if (r.rows && r.rows.length) db.state.scheduled[0].status = 'running';
+    return r;
+  };
+  const r = await processDue({
+    query, queryOne: db.queryOne, exec: db.exec, uuidv4: () => 'x',
+    publishOauth: makePublishOauth({ publishImpl: async () => ({}) }),
+    agentRuntime: countingRuntime, notifications: dummyNotifications,
+  });
+  assert.equal(r.processed, 1);
+  assert.equal(r.ok, 0);
+  assert.equal(r.failed, 0, 'a lost claim is a silent skip, not a failure');
+  assert.equal(agentRuns, 0, 'publisher agent must not run for a lost claim');
+  assert.equal(db.state.scheduled[0].status, 'running', 'row stays owned by the other replica');
 });
 
 // --- Retry-with-backoff tests ---------------------------------------------

@@ -46,11 +46,13 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
   }
 
   // ---- email.send ----
-  // payload: { contactId, toOverride?, subjectOverride?, bodyOverride?, kind? }
+  // payload: { contactId, toOverride?, subjectOverride?, bodyOverride?, kind?, followUpStep? }
   // kind='followup' skips the "already sent" short-circuit so follow-ups
-  // can be enqueued against contacts in status='sent' / 'delivered' / 'opened'.
+  // can be enqueued against contacts in status='sent' / 'delivered' / 'opened';
+  // followUpStep (set by the scheduler) is the follow_up_count value this job
+  // claims via CAS before sending — the idempotency key for redeliveries.
   jobQueue.register('email.send', async (job) => {
-    const { contactId, toOverride, subjectOverride, bodyOverride, kind } = job.payload || {};
+    const { contactId, toOverride, subjectOverride, bodyOverride, kind, followUpStep: payloadStep } = job.payload || {};
     if (!contactId) throw new Error('email.send requires contactId');
 
     const contact = await queryOne(
@@ -75,12 +77,59 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
       return { failed: true, error: 'recipient_blocked' };
     }
     const isFollowUp = kind === 'followup';
-    if (!isFollowUp && ['sent', 'delivered', 'opened', 'replied'].includes(contact.status)) {
+    if (!isFollowUp && ['sent', 'delivered', 'opened', 'replied', 'sending'].includes(contact.status)) {
       return { skipped: `already ${contact.status}` };
+    }
+
+    // ---- Atomic claim ----
+    // A redelivered job (worker crash mid-send, retry after a post-send DB
+    // error) or a concurrent worker must not double-send. Both paths flip a
+    // DB marker with a conditional UPDATE and proceed only if they actually
+    // claimed the row (affected rows === 1). Rows stranded in 'sending' by a
+    // crash are swept to 'failed' by email.sync_status below.
+    let followUpStep = null;
+    if (isFollowUp) {
+      // Follow-up N is idempotent on follow_up_count: CAS-bump N-1 → N
+      // *before* sending. A redelivered job sees the count already at N,
+      // loses the claim, and skips. Failure paths release the claim so a
+      // transient error can still retry.
+      followUpStep = Number.isInteger(payloadStep)
+        ? payloadStep
+        : (contact.follow_up_count || 0) + 1; // legacy jobs without the field
+      const claim = await exec(
+        `UPDATE contacts SET follow_up_count = ? WHERE id = ? AND COALESCE(follow_up_count, 0) = ?`,
+        [followUpStep, contactId, followUpStep - 1]
+      );
+      if ((claim.rowCount || 0) !== 1) {
+        return { skipped: `follow-up ${followUpStep} already claimed` };
+      }
+    } else {
+      const claim = await exec(
+        `UPDATE contacts SET status='sending' WHERE id = ? AND status IN ('draft', 'scheduled', 'pending', 'failed')`,
+        [contactId]
+      );
+      if ((claim.rowCount || 0) !== 1) {
+        return { skipped: `not claimable (was ${contact.status})` };
+      }
+    }
+
+    // Release a follow-up claim on any non-success exit so the queue's retry
+    // (transient) or a later tick (terminal) can claim step N again.
+    async function releaseFollowUpClaim() {
+      if (!isFollowUp) return;
+      try {
+        await exec(
+          `UPDATE contacts SET follow_up_count = ? WHERE id = ? AND COALESCE(follow_up_count, 0) = ?`,
+          [followUpStep - 1, contactId, followUpStep]
+        );
+      } catch (e) {
+        log.warn('[email-jobs] failed to release follow-up claim:', e.message);
+      }
     }
 
     const emailTo = toOverride || contact.kol_email;
     if (!emailTo) {
+      await releaseFollowUpClaim();
       await exec(
         `UPDATE contacts SET status='failed', send_error='No recipient email', last_send_attempt_at=CURRENT_TIMESTAMP WHERE id=?`,
         [contactId]
@@ -91,6 +140,7 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
     const subject = subjectOverride || contact.email_subject;
     const body = bodyOverride || contact.email_body;
     if (!subject || !body) {
+      await releaseFollowUpClaim();
       await exec(
         `UPDATE contacts SET status='failed', send_error='Empty subject/body', last_send_attempt_at=CURRENT_TIMESTAMP WHERE id=?`,
         [contactId]
@@ -137,6 +187,9 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
       // Transient vs terminal distinction: network-ish errors -> throw to retry.
       const err = result.error || 'Send failed';
       const isTerminal = /invalid|missing|not configured|rejected|400|401|403|422/i.test(err);
+      // The send didn't happen — hand the follow-up step back so the retry
+      // (or a later tick) can claim it again.
+      await releaseFollowUpClaim();
       await exec(
         `UPDATE contacts SET status = ?, send_error = ? WHERE id = ?`,
         [isTerminal ? 'failed' : 'pending', err.slice(0, 500), contactId]
@@ -163,11 +216,13 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
     }
 
     const fromEmail = mailbox?.from_email || process.env.RESEND_FROM_EMAIL || process.env.SMTP_USER || 'noreply@localhost';
-    // For follow-ups we don't regress the status; just bump the counter.
-    // The contact stays in whatever engagement state it reached previously.
+    // For follow-ups we don't regress the status, and follow_up_count was
+    // already bumped by the pre-send claim above — a throw from here on
+    // retries the job, whose claim then loses, so the provider send can't
+    // repeat. The contact stays in whatever engagement state it reached.
     if (isFollowUp) {
       await exec(
-        `UPDATE contacts SET follow_up_count = COALESCE(follow_up_count, 0) + 1, send_error = NULL WHERE id = ?`,
+        `UPDATE contacts SET send_error = NULL WHERE id = ?`,
         [contactId]
       );
     } else {
@@ -212,7 +267,9 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
     let enqueued = 0;
     for (const cid of contactIds) {
       try {
-        jobQueue.push('email.send', { contactId: cid }, { maxRetries: 3 });
+        // await: BullMQ's push is async — a rejected push must land in this
+        // catch, not escape as an unhandled rejection.
+        await jobQueue.push('email.send', { contactId: cid }, { maxRetries: 3 });
         enqueued += 1;
       } catch (e) {
         log.warn('[email-jobs] failed to enqueue child:', e.message);
@@ -222,14 +279,15 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
   });
 
   // ---- email.sync_status ----
-  // Mark any contact stuck in "pending" for >30 minutes as failed so the UI
-  // shows a clear error instead of an endless spinner.
+  // Mark any contact stuck in "pending" (never picked up) or "sending"
+  // (claimed, then the worker died mid-send) for >30 minutes as failed so
+  // the UI shows a clear error instead of an endless spinner.
   jobQueue.register('email.sync_status', async () => {
     const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const result = await exec(
       `UPDATE contacts
        SET status = 'failed', send_error = COALESCE(send_error, 'Timed out waiting for send')
-       WHERE status = 'pending' AND (last_send_attempt_at IS NULL OR last_send_attempt_at < ?)`,
+       WHERE status IN ('pending', 'sending') AND (last_send_attempt_at IS NULL OR last_send_attempt_at < ?)`,
       [cutoff]
     );
     return { cleared: result.rowCount || 0 };

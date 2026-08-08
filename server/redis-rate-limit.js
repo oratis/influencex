@@ -74,6 +74,47 @@ function rateLimit({ max, windowMs, keyFn, message, redisUrl = process.env.REDIS
   };
 }
 
+/**
+ * Redis counterpart of rate-limit.js's consume(): reserve `n` tickets from
+ * the same sorted-set window the middleware uses. Check-then-add (same
+ * non-Lua tradeoff as the middleware); fail-open on Redis trouble so a cache
+ * blip doesn't block real users.
+ */
+async function consume({ key: rawKey, n = 1, max, windowMs, redisUrl = process.env.REDIS_URL, prefix = process.env.REDIS_RATELIMIT_PREFIX || 'influencex:rl:' } = {}) {
+  if (!redisUrl) {
+    throw new Error('Redis consume requires REDIS_URL (or pass redisUrl)');
+  }
+  const client = getClient(redisUrl);
+  const key = prefix + rawKey;
+  const now = Date.now();
+  try {
+    const m = client.multi();
+    m.zremrangebyscore(key, 0, now - windowMs);
+    m.zcard(key);
+    const r = await m.exec();
+    const count = (r && r[1] && r[1][1]) || 0;
+
+    if (count + n > max) {
+      const oldest = await client.zrange(key, 0, 0, 'WITHSCORES');
+      const retryAfterSec = oldest && oldest[1]
+        ? Math.max(1, Math.ceil((windowMs - (now - parseInt(oldest[1]))) / 1000))
+        : Math.ceil(windowMs / 1000);
+      return { allowed: false, remaining: Math.max(0, max - count), retryAfterSec };
+    }
+
+    const args = [];
+    for (let i = 0; i < n; i++) {
+      args.push(now, `${now}-${i}-${Math.random().toString(36).slice(2, 8)}`);
+    }
+    if (args.length) await client.zadd(key, ...args);
+    await client.pexpire(key, windowMs * 2);
+    return { allowed: true, remaining: Math.max(0, max - count - n) };
+  } catch (e) {
+    // Fail-open, mirroring the middleware.
+    return { allowed: true, remaining: max, failOpen: true };
+  }
+}
+
 async function status() {
   if (!_client) return { backend: 'redis', connected: false };
   try {
@@ -84,4 +125,4 @@ async function status() {
   }
 }
 
-module.exports = { rateLimit, status };
+module.exports = { rateLimit, status, consume };

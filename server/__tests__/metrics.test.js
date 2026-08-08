@@ -29,6 +29,23 @@ test('counter() increments and shows up in render via fake handler', async () =>
   assert.strictEqual(metrics._counters.get('influencex_test_counter{kind="b"}'), 5);
 });
 
+test('metricsHandler awaits an async getStats (BullMQ mode) and renders gauges', async () => {
+  process.env.METRICS_TOKEN = 'secret';
+  const jobQueue = { getStats: async () => ({ pending: 4, running: 2, completed: 9, failed: 1 }) };
+  let body = '';
+  const res = {
+    setHeader() {},
+    send(b) { body = b; },
+    status(s) { return res; },
+    json() {},
+  };
+  await metrics.metricsHandler({ jobQueue, llm: null })({ query: { token: 'secret' }, headers: {} }, res);
+  assert.match(body, /influencex_job_queue_pending 4/);
+  assert.match(body, /influencex_job_queue_running 2/);
+  assert.match(body, /influencex_job_queue_completed_total 9/);
+  assert.match(body, /influencex_job_queue_failed_total 1/);
+});
+
 test('metricsHandler returns 503 when METRICS_TOKEN unset', () => {
   delete process.env.METRICS_TOKEN;
   let status = 200;

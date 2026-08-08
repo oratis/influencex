@@ -76,10 +76,14 @@ async function processDue(deps) {
   let ok = 0, failed = 0;
   for (const row of rows) {
     try {
-      await exec(
-        "UPDATE scheduled_publishes SET status='running', last_attempt_at=CURRENT_TIMESTAMP, attempts=attempts+1 WHERE id=?",
+      // Atomic claim: only flip pending→running if the row is still pending.
+      // Another replica (or an overlapping tick) may have claimed it between
+      // our scan and this UPDATE — skip silently if we didn't win.
+      const claim = await exec(
+        "UPDATE scheduled_publishes SET status='running', last_attempt_at=CURRENT_TIMESTAMP, attempts=attempts+1 WHERE id=? AND status='pending'",
         [row.id]
       );
+      if ((claim.rowCount || 0) === 0) continue;
       const snapshot = JSON.parse(row.content_snapshot);
       const platforms = JSON.parse(row.platforms);
       const content = {

@@ -98,7 +98,9 @@ function createBullQueue({
       removeOnComplete: { age: 3600, count: 1000 },
       removeOnFail: { age: 86400 * 7 },
     });
-    return { id: job.id };
+    // Return the raw id (not an object) so awaited callers get the same
+    // shape as ./job-queue.js's sync push().
+    return job.id;
   }
 
   async function pause() {
@@ -134,10 +136,21 @@ function createBullQueue({
   async function getStats() {
     let counts = {};
     try { counts = await queue.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed'); } catch {}
+    const pending = (counts.waiting || 0) + (counts.delayed || 0);
+    const running = counts.active || 0;
     return {
       backend: 'bullmq',
       queueName,
       ...stats,
+      // Normalized to ./job-queue.js's getStats() shape so /api/queue/stats,
+      // /api/email-queue/stats, and the /metrics gauges read the same keys
+      // regardless of backend. completed/failed/retried reflect what THIS
+      // worker observed since process start (counter semantics for
+      // Prometheus); pending/running are live Redis counts.
+      total: stats.processed + pending + running,
+      completed: stats.succeeded,
+      pending,
+      running,
       registeredTypes: Array.from(handlers.keys()),
       concurrency,
       paused,

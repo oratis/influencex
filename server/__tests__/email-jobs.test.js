@@ -71,7 +71,7 @@ test('email.send: happy path marks sent + records reply + records event', async 
   assert.ok(execCalls.some(c => /INSERT INTO email_events/.test(c.sql)), 'should record sent event');
 });
 
-test('email.send with kind=followup bumps follow_up_count, does not flip status', async () => {
+test('email.send with kind=followup claims by bumping follow_up_count pre-send, does not flip status', async () => {
   const execCalls = [];
   const deps = makeDeps({
     queryOne: async (sql) => {
@@ -89,7 +89,11 @@ test('email.send with kind=followup bumps follow_up_count, does not flip status'
     bodyOverride: 'Follow up body',
     kind: 'followup',
   });
-  assert.ok(execCalls.some(c => /follow_up_count = COALESCE\(follow_up_count, 0\) \+ 1/.test(c.sql)), 'follow_up_count should bump');
+  // The bump is now the pre-send CAS claim: 0 → 1, conditional on the count
+  // still being 0.
+  const claim = execCalls.find(c => /UPDATE contacts SET follow_up_count = \?/.test(c.sql) && /COALESCE\(follow_up_count, 0\) = \?/.test(c.sql));
+  assert.ok(claim, 'follow_up_count should be claimed via conditional UPDATE');
+  assert.deepEqual(claim.params, [1, 'c2', 0]);
   assert.ok(!execCalls.some(c => /status='sent'/.test(c.sql)), 'should NOT re-flip to sent');
   // email_replies should record the override body/subject
   const reply = execCalls.find(c => /INSERT INTO email_replies/.test(c.sql));
@@ -168,5 +172,89 @@ test('email.sync_status: clears stuck-pending rows', async () => {
   emailJobs.register(deps);
   const r = await deps.jobQueue.run('email.sync_status', {});
   assert.equal(r.cleared, 2);
-  assert.ok(execCalls.some(c => /status = 'failed'/.test(c.sql) && /status = 'pending'/.test(c.sql)));
+  // Sweep covers both never-picked-up ('pending') and crashed-mid-send
+  // ('sending') rows.
+  assert.ok(execCalls.some(c => /status = 'failed'/.test(c.sql) && /status IN \('pending', 'sending'\)/.test(c.sql)));
+});
+
+// ---- Atomic claim / idempotency ------------------------------------------
+
+// Emulates the DB's atomic conditional UPDATE against a shared row object.
+// exec bodies are synchronous, so the check-and-set inside is as atomic as
+// the real single-statement UPDATE.
+function makeClaimAwareExec(row) {
+  return async (sql, params) => {
+    if (/UPDATE contacts SET status='sending'/.test(sql)) {
+      if (!['draft', 'scheduled', 'pending', 'failed'].includes(row.status)) return { rowCount: 0 };
+      row.status = 'sending';
+      return { rowCount: 1 };
+    }
+    if (/UPDATE contacts SET follow_up_count = \?/.test(sql)) {
+      const [next, , expected] = params;
+      if ((row.follow_up_count || 0) !== expected) return { rowCount: 0 };
+      row.follow_up_count = next;
+      return { rowCount: 1 };
+    }
+    if (/status='sent'/.test(sql)) row.status = 'sent';
+    return { rowCount: 1 };
+  };
+}
+
+test('email.send: two concurrent workers on the same contact — exactly one sends', async () => {
+  const row = { id: 'c10', status: 'pending', kol_email: 't@x', email_subject: 'S', email_body: 'B', workspace_id: 'w' };
+  let sends = 0;
+  const deps = makeDeps({
+    queryOne: async (sql) => (/FROM contacts c JOIN kols/.test(sql) ? { ...row } : null),
+    exec: makeClaimAwareExec(row),
+    mailAgent: {
+      isConfigured: () => true,
+      sendEmail: async () => { sends += 1; return { success: true, messageId: 'm', provider: 'resend' }; },
+    },
+  });
+  emailJobs.register(deps);
+  const [a, b] = await Promise.all([
+    deps.jobQueue.run('email.send', { contactId: 'c10' }),
+    deps.jobQueue.run('email.send', { contactId: 'c10' }),
+  ]);
+  assert.equal(sends, 1, 'exactly one worker performs the provider send');
+  const outcomes = [a, b];
+  assert.ok(outcomes.some(o => o.success === true), 'one job succeeds');
+  assert.ok(outcomes.some(o => /not claimable|already/.test(o.skipped || '')), 'the other is skipped');
+});
+
+test('email.send followup: redelivered job (count already bumped) is skipped, no double send', async () => {
+  const row = { id: 'c11', status: 'sent', kol_email: 't@x', email_subject: 'S', email_body: 'B', workspace_id: 'w', follow_up_count: 1 };
+  let sends = 0;
+  const deps = makeDeps({
+    queryOne: async (sql) => (/FROM contacts c JOIN kols/.test(sql) ? { ...row } : null),
+    exec: makeClaimAwareExec(row),
+    mailAgent: {
+      isConfigured: () => true,
+      sendEmail: async () => { sends += 1; return { success: true, messageId: 'm', provider: 'resend' }; },
+    },
+  });
+  emailJobs.register(deps);
+  // First delivery of this job already claimed step 1 and sent. The redelivery
+  // carries the same followUpStep and must lose the CAS.
+  const r = await deps.jobQueue.run('email.send', {
+    contactId: 'c11', subjectOverride: 'Re: S', bodyOverride: 'F', kind: 'followup', followUpStep: 1,
+  });
+  assert.equal(sends, 0, 'redelivered follow-up must not reach the provider');
+  assert.match(r.skipped || '', /already claimed/);
+  assert.equal(row.follow_up_count, 1, 'count unchanged');
+});
+
+test('email.send followup: transient failure releases the claim so the retry can re-claim', async () => {
+  const row = { id: 'c12', status: 'sent', kol_email: 't@x', email_subject: 'S', email_body: 'B', workspace_id: 'w', follow_up_count: 0 };
+  const deps = makeDeps({
+    queryOne: async (sql) => (/FROM contacts c JOIN kols/.test(sql) ? { ...row } : null),
+    exec: makeClaimAwareExec(row),
+    mailAgent: { isConfigured: () => true, sendEmail: async () => ({ success: false, error: 'timeout connecting to upstream' }) },
+  });
+  emailJobs.register(deps);
+  await assert.rejects(
+    () => deps.jobQueue.run('email.send', { contactId: 'c12', subjectOverride: 'Re: S', bodyOverride: 'F', kind: 'followup', followUpStep: 1 }),
+    /timeout/
+  );
+  assert.equal(row.follow_up_count, 0, 'claim released: retry must be able to CAS 0→1 again');
 });

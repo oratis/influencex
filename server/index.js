@@ -11,6 +11,30 @@ otel.init();
 const sentry = require('./sentry');
 sentry.init();
 
+const log = require('./logger');
+
+// Process-level safety nets (after sentry.init so captures reach a live SDK).
+// An unhandled promise rejection — e.g. a fire-and-forget BullMQ push failing
+// against Redis — must be logged and reported, but must NOT kill the process.
+// An uncaught exception is fatal: report it, give transports a moment to
+// flush, then exit non-zero so Cloud Run restarts a clean instance.
+// listenerCount guards double-registration (repeated require in tests, or a
+// Sentry SDK that installs its own process handlers).
+if (process.listenerCount('unhandledRejection') === 0) {
+  process.on('unhandledRejection', (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    log.error('[process] Unhandled promise rejection:', err.stack || err.message);
+    try { sentry.captureException(err); } catch {}
+  });
+}
+if (process.listenerCount('uncaughtException') === 0) {
+  process.on('uncaughtException', (err) => {
+    log.error('[process] Uncaught exception:', (err && (err.stack || err.message)) || String(err));
+    try { sentry.captureException(err); } catch {}
+    setTimeout(() => process.exit(1), 500);
+  });
+}
+
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
@@ -23,7 +47,6 @@ const authGoogle = require('./auth-google');
 const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId, findMembership } = require('./workspace-middleware');
 const scraper = require('./scraper');
 const mailAgent = require('./email');
-const log = require('./logger');
 const metrics = require('./metrics');
 const bvSearch = require('./brand-voice-search');
 const dataAgent = require('./content-metrics');
@@ -42,7 +65,7 @@ const scheduler = require('./scheduler');
 const scheduledPublish = require('./scheduled-publish');
 const apifyWatchdog = require('./apify-watchdog');
 const inboxSync = require('./inbox-sync');
-const { rateLimit } = require('./rate-limit');
+const { rateLimit, consume: consumeRateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
 const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
@@ -1457,7 +1480,10 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, sendEmailWorksp
       [req.params.id, req.workspace.id]
     );
 
-    const jobId = jobQueue.push('email.send', {
+    // BullMQ's push() is async — await so we return a real job id, not a
+    // serialized Promise. (The in-process queue's push is sync; await is a
+    // no-op there.)
+    const jobId = await jobQueue.push('email.send', {
       contactId: req.params.id,
       toOverride: req.body.email_to || null,
     }, { maxRetries: 3 });
@@ -1481,7 +1507,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/retry`, sendEmailLimiter, sendEmailWorks
       `UPDATE contacts SET status='pending', send_error=NULL WHERE id=? AND workspace_id=?`,
       [req.params.id, req.workspace.id]
     );
-    const jobId = jobQueue.push('email.send', { contactId: req.params.id }, { maxRetries: 3 });
+    const jobId = await jobQueue.push('email.send', { contactId: req.params.id }, { maxRetries: 3 });
     res.json({ success: true, queued: true, jobId });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -1493,7 +1519,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/retry`, sendEmailLimiter, sendEmailWorks
 // rendering + A/B variant pick) to every contact before enqueuing. This lets
 // users go from "selected 30 drafts" → "fire one template across all" in one
 // action, matching the plan's "批量发送" flow.
-app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmailLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const { contact_ids = [], template_id } = req.body || {};
     if (!Array.isArray(contact_ids) || contact_ids.length === 0) {
@@ -1551,7 +1577,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmail
     const skipped = [];
     for (const c of result.rows) {
       if (!c.kol_email) { skipped.push({ id: c.id, reason: 'no_email' }); continue; }
-      if (['sent', 'delivered', 'opened', 'replied'].includes(c.status)) { skipped.push({ id: c.id, reason: 'already_' + c.status }); continue; }
+      if (['sent', 'delivered', 'opened', 'replied', 'sending'].includes(c.status)) { skipped.push({ id: c.id, reason: 'already_' + c.status }); continue; }
 
       // Apply template if provided. Render variables per-contact and write
       // the resulting subject/body + A/B attribution onto the contact row.
@@ -1595,6 +1621,27 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmail
       return res.status(400).json({ error: 'No eligible contacts', skipped });
     }
 
+    // Reserve workspace-limiter capacity for every recipient we're about to
+    // enqueue. The route-level middleware above only accounts for the HTTP
+    // request itself; each recipient consumes one ticket from the same
+    // sliding window /api/contacts/:id/send draws from (`ws:<id>` key), so
+    // batch sends can't sidestep the per-workspace RPM cap. All-or-nothing:
+    // an over-cap batch is rejected before any row is marked pending.
+    const reservation = await consumeRateLimit({
+      key: `ws:${req.workspace?.id || 'anon'}`,
+      n: eligible.length,
+      max: EMAIL_SEND_WORKSPACE_RPM,
+      windowMs: 60 * 1000,
+    });
+    if (!reservation.allowed) {
+      res.set('Retry-After', String(reservation.retryAfterSec || 60));
+      return res.status(429).json({
+        error: `Workspace email send rate limit reached (${EMAIL_SEND_WORKSPACE_RPM}/min): ${eligible.length} sends requested, ${reservation.remaining} available. Try again shortly.`,
+        code: 'RATE_LIMITED',
+        retryAfter: reservation.retryAfterSec || 60,
+      });
+    }
+
     // Mark all eligible as pending in one statement.
     const markPlaceholders = eligible.map(() => '?').join(',');
     await s.exec(
@@ -1602,7 +1649,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmail
       [req.workspace.id, ...eligible]
     );
 
-    const jobId = jobQueue.push('email.batch_send', { contactIds: eligible }, { maxRetries: 0 });
+    const jobId = await jobQueue.push('email.batch_send', { contactIds: eligible }, { maxRetries: 0 });
     res.json({ success: true, queued: eligible.length, skipped, jobId, templateApplied: !!template_id });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -1765,7 +1812,7 @@ app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
       if (shortType === 'delivered') {
         await exec(
           `UPDATE contacts SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP),
-           status = CASE WHEN status IN ('pending','sent') THEN 'delivered' ELSE status END
+           status = CASE WHEN status IN ('pending','sending','sent') THEN 'delivered' ELSE status END
            WHERE id = ?`,
           [contactId]
         );
@@ -1774,7 +1821,7 @@ app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
           `UPDATE contacts SET
              first_opened_at = COALESCE(first_opened_at, CURRENT_TIMESTAMP),
              last_opened_at = CURRENT_TIMESTAMP,
-             status = CASE WHEN status IN ('pending','sent','delivered') THEN 'opened' ELSE status END
+             status = CASE WHEN status IN ('pending','sending','sent','delivered') THEN 'opened' ELSE status END
            WHERE id = ?`,
           [contactId]
         );
@@ -3818,9 +3865,15 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
   }
 });
 
-// Job queue stats
-app.get(`${BASE_PATH}/api/queue/stats`, (req, res) => {
-  res.json(jobQueue.getStats());
+// Job queue stats. getStats() is async in BullMQ mode (Redis roundtrip) and
+// sync for the in-process queue — awaiting handles both; the BullMQ stats are
+// normalized to the in-process shape (see bullmq-queue.js getStats).
+app.get(`${BASE_PATH}/api/queue/stats`, async (req, res) => {
+  try {
+    res.json(await jobQueue.getStats());
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
 });
 
 // Cache stats
@@ -4414,7 +4467,7 @@ app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
        JOIN kols k ON c.kol_id = k.id AND k.workspace_id = c.workspace_id
        LEFT JOIN campaigns cam ON c.campaign_id = cam.id
        WHERE c.workspace_id = ?
-         AND c.status IN ('pending', 'failed', 'bounced')
+         AND c.status IN ('pending', 'sending', 'failed', 'bounced')
        ORDER BY c.last_send_attempt_at DESC, c.created_at DESC
        LIMIT 100`,
       [req.workspace.id]
@@ -4544,20 +4597,25 @@ app.get(`${BASE_PATH}/api/mailboxes/oauth/gmail/callback`, async (req, res) => {
   }
 });
 
-// Email queue stats: specifically for email.* job types
-app.get(`${BASE_PATH}/api/email-queue/stats`, (req, res) => {
-  const s = jobQueue.getStats();
-  res.json({
-    ...s,
-    emailTypes: s.registeredTypes.filter(t => t.startsWith('email.')),
-  });
+// Email queue stats: specifically for email.* job types. getStats() is async
+// in BullMQ mode; both backends expose the same normalized shape.
+app.get(`${BASE_PATH}/api/email-queue/stats`, async (req, res) => {
+  try {
+    const s = await jobQueue.getStats();
+    res.json({
+      ...s,
+      emailTypes: (s.registeredTypes || []).filter(t => t.startsWith('email.')),
+    });
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
 });
 
 // Manually enqueue the safety-net sync job that fails contacts stuck in
 // 'pending' > 30min. Useful for admins debugging a stuck batch.
-app.post(`${BASE_PATH}/api/email-queue/sync-status`, (req, res) => {
+app.post(`${BASE_PATH}/api/email-queue/sync-status`, async (req, res) => {
   try {
-    const id = jobQueue.push('email.sync_status', {}, { maxRetries: 0 });
+    const id = await jobQueue.push('email.sync_status', {}, { maxRetries: 0 });
     res.json({ queued: true, jobId: id });
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
@@ -5183,7 +5241,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, sendEmailLimiter, sendEma
       [job.email_subject, job.email_body, job.contact_id, req.workspace.id]
     );
 
-    const jobId = jobQueue.push('email.send', {
+    const jobId = await jobQueue.push('email.send', {
       contactId: job.contact_id,
       toOverride: emailTo,
     }, { maxRetries: 3 });
@@ -6159,8 +6217,15 @@ async function initializeDefaultData() {
       // Register background handlers on the shared job queue.
       emailJobs.register({ jobQueue, query, queryOne, exec, mailAgent });
       // Safety-net sweep every 10 minutes: fail contacts stuck in 'pending'.
+      // In BullMQ mode push() returns a promise — attach a .catch so a Redis
+      // blip can't surface as an unhandled rejection.
       setInterval(() => {
-        try { jobQueue.push('email.sync_status', {}, { maxRetries: 0 }); } catch {}
+        try {
+          const p = jobQueue.push('email.sync_status', {}, { maxRetries: 0 });
+          if (p && typeof p.catch === 'function') {
+            p.catch(e => log.warn('[queue] sync_status enqueue failed:', e.message));
+          }
+        } catch {}
       }, 10 * 60 * 1000).unref?.();
       scheduler.start({ query, exec, queryOne, mailAgent, uuidv4, jobQueue });
       scheduledPublish.start({
