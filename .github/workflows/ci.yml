@@ -52,7 +52,8 @@ jobs:
 
       - name: Install client dependencies
         working-directory: client
-        run: npm ci
+        # Mirrors the Dockerfile; see client/.npmrc for why.
+        run: npm ci --legacy-peer-deps
 
       - name: Build client
         working-directory: client
