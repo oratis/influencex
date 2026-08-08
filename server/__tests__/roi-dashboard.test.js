@@ -119,3 +119,23 @@ test('budget utilization is computed only when budget > 0', async () => {
   }));
   assert.equal(noBudget.campaign.budget_utilization, null);
 });
+
+test('timeline SQL is dialect-neutral: no SQLite-only datetime(), cutoff passed as param', async () => {
+  // Regression: the 30-day cutoff used datetime('now','-30 days'), which is
+  // SQLite-only — prod Postgres threw "function datetime(unknown, unknown)
+  // does not exist" and the whole ROI endpoint 500'd. The cutoff must be a
+  // JS-computed parameter so both drivers run the identical statement.
+  const captured = [];
+  const deps = {
+    queryOne: async () => null,
+    query: async (sql, params) => { captured.push({ sql, params }); return { rows: [] }; },
+  };
+  await getCampaignRoi('c-dialect', deps);
+  const timeline = captured.find((c) => /WITH d AS/.test(c.sql));
+  assert.ok(timeline, 'timeline query must run');
+  assert.ok(!/datetime\s*\(/i.test(timeline.sql), 'timeline SQL must not use SQLite-only datetime()');
+  // 3 campaign ids + 3 cutoffs, cutoff in "YYYY-MM-DD HH:MM:SS" form
+  assert.equal(timeline.params.length, 6);
+  const cutoffs = timeline.params.filter((p) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(p));
+  assert.equal(cutoffs.length, 3);
+});

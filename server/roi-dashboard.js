@@ -14,24 +14,30 @@ async function getCampaignRoi(campaignId, deps) {
   // (webhook-driven) and from contacts.sent_at/reply_at for sent+replied
   // (always present). This way SMTP installs without webhooks still get a
   // usable timeline (minus open tracking).
+  // Cutoff computed in JS so the SQL stays dialect-neutral — SQLite has no
+  // NOW() - INTERVAL and Postgres has no datetime('now', ...). Formatted as
+  // "YYYY-MM-DD HH:MM:SS" to match SQLite's CURRENT_TIMESTAMP string layout
+  // (string compare) while remaining a valid Postgres timestamp literal.
+  const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString().slice(0, 19).replace('T', ' ');
   const timelineRes = await query(
     `WITH d AS (
        SELECT date(sent_at) as day, 'sent' as kind
        FROM contacts WHERE campaign_id = ? AND sent_at IS NOT NULL
-         AND sent_at >= datetime('now','-30 days')
+         AND sent_at >= ?
        UNION ALL
        SELECT date(reply_at) as day, 'replied' as kind
        FROM contacts WHERE campaign_id = ? AND reply_at IS NOT NULL
-         AND reply_at >= datetime('now','-30 days')
+         AND reply_at >= ?
        UNION ALL
        SELECT date(e.occurred_at) as day, e.event_type as kind
        FROM email_events e JOIN contacts c ON c.id = e.contact_id
        WHERE c.campaign_id = ?
-         AND e.occurred_at >= datetime('now','-30 days')
+         AND e.occurred_at >= ?
          AND e.event_type IN ('delivered','opened','bounced','failed')
      )
      SELECT day, kind, COUNT(*) as n FROM d GROUP BY day, kind ORDER BY day ASC`,
-    [campaignId, campaignId, campaignId]
+    [campaignId, cutoff30d, campaignId, cutoff30d, campaignId, cutoff30d]
   );
   const timelineMap = {};
   for (const r of (timelineRes.rows || [])) {

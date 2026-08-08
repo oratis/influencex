@@ -9,6 +9,26 @@ function loadScraper({ apifyConfigured = true, igResult, tiktokResult, modashKey
   delete require.cache[require.resolve('../scraper')];
   delete require.cache[require.resolve('../apify-client')];
   delete require.cache[require.resolve('../apify-quota')];
+  delete require.cache[require.resolve('../kol-profile-cache')];
+
+  // Stub the profile cache. Without this, a successful scrape in one test
+  // writes a row into the real shared influencex.db and every later test
+  // (and every later `npm test` run) short-circuits on the cached profile
+  // instead of exercising the mocked Apify client.
+  require.cache[require.resolve('../kol-profile-cache')] = {
+    exports: {
+      lookup: async () => null,
+      put: async () => {},
+      evict: async () => {},
+      keyOf: (p, u) => `${p}:${u}`,
+      TTL_DAYS: 7,
+    },
+    loaded: true,
+    id: require.resolve('../kol-profile-cache'),
+    filename: require.resolve('../kol-profile-cache'),
+    children: [],
+    parent: null,
+  };
 
   // Stub apify-client.
   require.cache[require.resolve('../apify-client')] = {

@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "influencex",
-      "runtimeExecutable": "/usr/local/bin/node",
+      "runtimeExecutable": "node",
       "runtimeArgs": ["server/index.js"],
       "port": 8080,
       "autoPort": true

@@ -3452,13 +3452,14 @@ app.get(`${BASE_PATH}/api/search`, async (req, res) => {
         [ws, like, like, limit]
       ).then(r => r.rows || []).catch(() => []),
       query(
-        `SELECT id, kol_id, kol_username, kol_email, status, campaign_id
-         FROM contacts
-         WHERE workspace_id = ?
-           AND (LOWER(kol_username) LIKE LOWER(?) OR LOWER(kol_email) LIKE LOWER(?))
-         ORDER BY updated_at DESC
+        `SELECT c.id, c.kol_id, k.username AS kol_username, k.email AS kol_email, c.status, c.campaign_id
+         FROM contacts c
+         JOIN kols k ON k.id = c.kol_id AND k.workspace_id = c.workspace_id
+         WHERE c.workspace_id = ?
+           AND (LOWER(k.username) LIKE LOWER(?) OR LOWER(k.email) LIKE LOWER(?) OR LOWER(k.display_name) LIKE LOWER(?))
+         ORDER BY c.created_at DESC
          LIMIT ?`,
-        [ws, like, like, limit]
+        [ws, like, like, like, limit]
       ).then(r => r.rows || []).catch(() => []),
       query(
         `SELECT id, name, status
@@ -5001,8 +5002,14 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId, wo
 
   const d = scrapeResult.data;
 
-  // Save to kol_database
-  const kolId = uuidv4();
+  // Save to kol_database. Reuse the workspace's existing row for this
+  // (platform, username) if there is one — a fresh uuid every run would
+  // never hit the id-based upsert and rows would accumulate forever.
+  const existingDbRow = await queryOne(
+    'SELECT id FROM kol_database WHERE workspace_id = ? AND platform = ? AND username = ?',
+    [workspaceId, platform, username]
+  );
+  const kolId = existingDbRow ? existingDbRow.id : uuidv4();
   const score = calculateAIScore(
     { platform, followers: d.followers, engagement_rate: d.engagement_rate, avg_views: d.avg_views, category: d.category },
     { min_followers: 10000, min_engagement: 2, categories: 'Gaming, Tech, AI' },
@@ -5011,16 +5018,16 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId, wo
 
   if (usePostgres) {
     await exec(
-      `INSERT INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, following, engagement_rate, avg_views, total_videos, category, email, bio, country, language, ai_score, ai_reason, estimated_cpm, scrape_status, source_campaign_id, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, CURRENT_TIMESTAMP)
+      `INSERT INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, following, engagement_rate, avg_views, total_videos, category, email, bio, country, language, ai_score, ai_reason, estimated_cpm, scrape_status, source_campaign_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, CURRENT_TIMESTAMP)
       ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, avatar_url=EXCLUDED.avatar_url, profile_url=EXCLUDED.profile_url, followers=EXCLUDED.followers, following=EXCLUDED.following, engagement_rate=EXCLUDED.engagement_rate, avg_views=EXCLUDED.avg_views, total_videos=EXCLUDED.total_videos, category=EXCLUDED.category, email=EXCLUDED.email, bio=EXCLUDED.bio, country=EXCLUDED.country, language=EXCLUDED.language, ai_score=EXCLUDED.ai_score, ai_reason=EXCLUDED.ai_reason, estimated_cpm=EXCLUDED.estimated_cpm, scrape_status='complete', source_campaign_id=EXCLUDED.source_campaign_id, updated_at=CURRENT_TIMESTAMP`,
-      [kolId, platform, username, d.display_name || username, d.avatar_url || '', profileUrl, d.followers || 0, d.following || 0, d.engagement_rate || 0, d.avg_views || 0, d.total_videos || 0, d.category || '', d.email || '', d.bio || '', d.country || '', d.language || '', score.score, score.reason, score.estimatedCpm, campaignId]
+      [kolId, workspaceId, platform, username, d.display_name || username, d.avatar_url || '', profileUrl, d.followers || 0, d.following || 0, d.engagement_rate || 0, d.avg_views || 0, d.total_videos || 0, d.category || '', d.email || '', d.bio || '', d.country || '', d.language || '', score.score, score.reason, score.estimatedCpm, campaignId]
     );
   } else {
     await exec(
-      `INSERT OR REPLACE INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, following, engagement_rate, avg_views, total_videos, category, email, bio, country, language, ai_score, ai_reason, estimated_cpm, scrape_status, source_campaign_id, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, CURRENT_TIMESTAMP)`,
-      [kolId, platform, username, d.display_name || username, d.avatar_url || '', profileUrl, d.followers || 0, d.following || 0, d.engagement_rate || 0, d.avg_views || 0, d.total_videos || 0, d.category || '', d.email || '', d.bio || '', d.country || '', d.language || '', score.score, score.reason, score.estimatedCpm, campaignId]
+      `INSERT OR REPLACE INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, following, engagement_rate, avg_views, total_videos, category, email, bio, country, language, ai_score, ai_reason, estimated_cpm, scrape_status, source_campaign_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, CURRENT_TIMESTAMP)`,
+      [kolId, workspaceId, platform, username, d.display_name || username, d.avatar_url || '', profileUrl, d.followers || 0, d.following || 0, d.engagement_rate || 0, d.avg_views || 0, d.total_videos || 0, d.category || '', d.email || '', d.bio || '', d.country || '', d.language || '', score.score, score.reason, score.estimatedCpm, campaignId]
     );
   }
 
@@ -5170,9 +5177,11 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, sendEmailLimiter, sendEma
       "UPDATE pipeline_jobs SET email_approved=1, email_to=?, stage='send', updated_at=CURRENT_TIMESTAMP WHERE id=? AND workspace_id=?",
       [emailTo, job.id, req.workspace.id]
     );
+    // Recipient lives on pipeline_jobs.email_to (updated above) and is passed
+    // to the worker via toOverride — contacts has no email column of its own.
     await s.exec(
-      "UPDATE contacts SET status='pending', send_error=NULL, kol_email=COALESCE(kol_email, ?), email_subject=?, email_body=? WHERE id=? AND workspace_id=?",
-      [emailTo, job.email_subject, job.email_body, job.contact_id, req.workspace.id]
+      "UPDATE contacts SET status='pending', send_error=NULL, email_subject=?, email_body=? WHERE id=? AND workspace_id=?",
+      [job.email_subject, job.email_body, job.contact_id, req.workspace.id]
     );
 
     const jobId = jobQueue.push('email.send', {
