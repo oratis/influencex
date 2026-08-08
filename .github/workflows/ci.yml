@@ -28,7 +28,11 @@ jobs:
           cache: 'npm'
 
       - name: Install server dependencies
-        run: npm ci
+        # --legacy-peer-deps mirrors the Dockerfile: the OTel
+        # auto-instrumentations suite has an ERESOLVE peer conflict.
+        # Root .npmrc covers local installs; the explicit flag keeps CI
+        # working even if that file moves.
+        run: npm ci --legacy-peer-deps
 
       - name: Run unit tests
         run: npm test
@@ -48,7 +52,8 @@ jobs:
 
       - name: Install client dependencies
         working-directory: client
-        run: npm ci
+        # Mirrors the Dockerfile; see client/.npmrc for why.
+        run: npm ci --legacy-peer-deps
 
       - name: Build client
         working-directory: client
