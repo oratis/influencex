@@ -16,6 +16,8 @@
  * draft on `contacts`.
  */
 
+const log = require('./logger');
+
 const TICK_INTERVAL_MS = parseInt(process.env.SCHEDULER_TICK_MS) || 5 * 60 * 1000;
 // Multi-step follow-up schedule. Days between original send and each
 // follow-up. Default "4,10" = first follow-up 4 days after the outreach,
@@ -28,6 +30,13 @@ const LEGACY_MAX_FOLLOW_UPS = parseInt(process.env.MAX_FOLLOW_UPS) || 1;
 const INTERVALS = FOLLOW_UP_INTERVALS_DAYS.length > 0
   ? FOLLOW_UP_INTERVALS_DAYS
   : Array.from({ length: LEGACY_MAX_FOLLOW_UPS }, () => LEGACY_AFTER_DAYS);
+
+// A follow-up enqueue "claims" the contact by touching last_send_attempt_at;
+// while that marker is fresher than this window the due-scan won't re-enqueue
+// the same step (previous job still queued / in flight). The email.send
+// handler's follow_up_count CAS is the hard at-most-once guard — this
+// debounce just keeps overlapping ticks and replicas from flooding the queue.
+const FOLLOW_UP_CLAIM_DEBOUNCE_MS = 30 * 60 * 1000;
 
 let timer = null;
 let ticking = false;
@@ -65,13 +74,24 @@ async function tick({ query, exec, queryOne, mailAgent, uuidv4, jobQueue }) {
         result.errors.push({ contactId: contact.id, error: 'No recipient email' });
         continue;
       }
-      // Clear the schedule + flip to pending, then enqueue.
-      await exec(
-        `UPDATE contacts SET scheduled_send_at = NULL, status = 'pending', send_error = NULL WHERE id = ?`,
+      // Clear the schedule + flip to pending, then enqueue. Conditional on
+      // the status we scanned so an overlapping tick or a second replica
+      // claims each due contact at most once.
+      const claimed = await exec(
+        `UPDATE contacts SET scheduled_send_at = NULL, status = 'pending', send_error = NULL
+         WHERE id = ? AND status IN ('draft', 'scheduled')`,
         [contact.id]
       );
+      if ((claimed.rowCount || 0) === 0) continue; // another tick/replica won
       if (jobQueue) {
-        try { jobQueue.push('email.send', { contactId: contact.id }, { maxRetries: 3 }); }
+        try {
+          // BullMQ's push is async — attach a .catch so a Redis failure in
+          // this fire-and-forget path can't become an unhandled rejection.
+          const p = jobQueue.push('email.send', { contactId: contact.id }, { maxRetries: 3 });
+          if (p && typeof p.catch === 'function') {
+            p.catch(e => log.warn('[scheduler] scheduled-send enqueue failed:', contact.id, e.message));
+          }
+        }
         catch (e) { result.errors.push({ contactId: contact.id, error: e.message }); }
       } else {
         result.errors.push({ contactId: contact.id, error: 'job queue unavailable' });
@@ -84,6 +104,7 @@ async function tick({ query, exec, queryOne, mailAgent, uuidv4, jobQueue }) {
     //    We compute the cutoff per eligible N and pick the tightest one each
     //    tick. Simpler: for each step i in INTERVALS, find contacts whose
     //    follow_up_count == i AND sent_at + intervals[i] <= now.
+    const inFlightCutoff = new Date(Date.now() - FOLLOW_UP_CLAIM_DEBOUNCE_MS).toISOString();
     const toFollowUp = { rows: [] };
     for (let step = 0; step < INTERVALS.length; step++) {
       const days = INTERVALS[step];
@@ -96,30 +117,48 @@ async function tick({ query, exec, queryOne, mailAgent, uuidv4, jobQueue }) {
            AND c.sent_at IS NOT NULL
            AND c.sent_at < ?
            AND COALESCE(c.follow_up_count, 0) = ?
+           AND (c.last_send_attempt_at IS NULL OR c.last_send_attempt_at < ?)
          LIMIT 20`,
-        [cutoff, step]
+        [cutoff, step, inFlightCutoff]
       );
       for (const row of (batch.rows || [])) toFollowUp.rows.push(row);
     }
 
     for (const contact of (toFollowUp.rows || [])) {
       if (!contact.kol_email) continue;
+      if (!jobQueue) continue;
 
+      const step = contact.follow_up_count || 0;
       const followUpSubject = `Re: ${contact.email_subject}`;
       const followUpBody = `Hi ${contact.display_name || 'there'},\n\nJust circling back on my earlier note — totally understand if it's not the right fit, but wanted to make sure it didn't get buried.\n\nHappy to answer any questions.\n\nBest`;
 
-      if (!jobQueue) continue;
-      // Enqueue via the same worker; kind='followup' tells the handler to
-      // bump follow_up_count instead of flipping status=sent (which would
-      // regress replied/opened contacts — though we already filter those
-      // out with reply_at IS NULL).
+      // Enqueue via the same worker; kind='followup' tells the handler not
+      // to flip status=sent (which would regress delivered/opened contacts).
+      // Before pushing, atomically claim the enqueue slot by touching
+      // last_send_attempt_at, conditional on the step we scanned: if another
+      // tick/replica already enqueued this follow-up (marker fresh) or the
+      // count moved on (job completed between scan and claim), the UPDATE
+      // hits 0 rows and we skip. The handler's follow_up_count CAS (keyed by
+      // followUpStep) remains the send-level guard, so a redelivered job
+      // can't send twice.
       try {
-        jobQueue.push('email.send', {
+        const claim = await exec(
+          `UPDATE contacts SET last_send_attempt_at = ?
+           WHERE id = ? AND COALESCE(follow_up_count, 0) = ? AND reply_at IS NULL
+             AND (last_send_attempt_at IS NULL OR last_send_attempt_at < ?)`,
+          [nowIso, contact.id, step, inFlightCutoff]
+        );
+        if ((claim.rowCount || 0) === 0) continue; // already enqueued / advanced
+        const p = jobQueue.push('email.send', {
           contactId: contact.id,
           subjectOverride: followUpSubject,
           bodyOverride: followUpBody,
           kind: 'followup',
+          followUpStep: step + 1,
         }, { maxRetries: 3 });
+        if (p && typeof p.catch === 'function') {
+          p.catch(e => log.warn('[scheduler] follow-up enqueue failed:', contact.id, e.message));
+        }
         result.follow_ups_sent += 1;
       } catch (e) {
         result.errors.push({ contactId: contact.id, error: e.message });

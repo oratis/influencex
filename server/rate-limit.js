@@ -53,6 +53,33 @@ function rateLimit({ max, windowMs, keyFn, message } = {}) {
 }
 
 /**
+ * Directly consume `n` tickets from a limiter bucket without going through
+ * the middleware. Used by batch endpoints (e.g. batch-send) that enqueue
+ * many sends in one HTTP request: each recipient reserves one ticket from
+ * the same sliding window the per-send middleware draws from (same `key`),
+ * so batches can't sidestep the cap. All-or-nothing: either all `n` fit in
+ * the window or none are taken.
+ *
+ * Returns { allowed, remaining, retryAfterSec? }.
+ */
+function consume({ key, n = 1, max, windowMs }) {
+  prune(key, windowMs);
+  const list = buckets.get(key) || [];
+  if (list.length + n > max) {
+    const oldestAgeMs = list.length ? Date.now() - list[0] : 0;
+    return {
+      allowed: false,
+      remaining: Math.max(0, max - list.length),
+      retryAfterSec: Math.max(1, Math.ceil((windowMs - oldestAgeMs) / 1000)),
+    };
+  }
+  const now = Date.now();
+  for (let i = 0; i < n; i++) list.push(now);
+  buckets.set(key, list);
+  return { allowed: true, remaining: max - list.length };
+}
+
+/**
  * Periodic cleanup of stale entries (runs every 10 min).
  * Called automatically when this module is loaded.
  */
@@ -81,11 +108,13 @@ function status() {
 // stay on the in-process bucket (single-replica only).
 let exportedRateLimit = rateLimit;
 let exportedStatus = status;
+let exportedConsume = consume;
 if (process.env.REDIS_URL) {
   try {
     const redis = require('./redis-rate-limit');
     exportedRateLimit = redis.rateLimit;
     exportedStatus = redis.status;
+    exportedConsume = redis.consume;
     console.log('[rate-limit] Using Redis-backed limiter');
   } catch (e) {
     console.warn('[rate-limit] Redis init failed, falling back to in-process:', e.message);
@@ -95,4 +124,6 @@ if (process.env.REDIS_URL) {
 module.exports = {
   rateLimit: (...args) => exportedRateLimit(...args),
   status: (...args) => exportedStatus(...args),
+  // consume() is sync in-process and async on Redis — callers should await it.
+  consume: (...args) => exportedConsume(...args),
 };

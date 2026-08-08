@@ -133,7 +133,7 @@ function render({ jobQueueStats, llmStats }) {
  * exposition. Returns 503 if METRICS_TOKEN env var is not set (dev safety).
  */
 function metricsHandler({ jobQueue, llm }) {
-  return (req, res) => {
+  return async (req, res) => {
     const expected = process.env.METRICS_TOKEN;
     if (!expected) return res.status(503).json({ error: 'Metrics not configured. Set METRICS_TOKEN env.' });
 
@@ -141,9 +141,14 @@ function metricsHandler({ jobQueue, llm }) {
       || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (provided !== expected) return res.status(401).json({ error: 'Invalid token' });
 
+    // BullMQ's getStats() is async (Redis roundtrip); the in-process queue's
+    // is sync. Awaiting handles both backends.
+    const jobQueueStats = jobQueue && typeof jobQueue.getStats === 'function'
+      ? await jobQueue.getStats()
+      : null;
     res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
     res.send(render({
-      jobQueueStats: jobQueue?.getStats?.() || null,
+      jobQueueStats,
       llmStats: llm?.getStats?.() || null,
     }));
   };
