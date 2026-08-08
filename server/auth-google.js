@@ -17,7 +17,7 @@
 
 const crypto = require('crypto');
 const fetch = require('./proxy-fetch');
-const { queryOne, exec } = require('./database');
+const { query, queryOne, exec } = require('./database');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 
@@ -90,10 +90,39 @@ async function exchangeCodeForIdentity(code) {
 }
 
 /**
+ * Error thrown when SSO login must be rejected (no invite, unverified email).
+ * `ssoCode` is a stable machine-readable code the callback handler puts into
+ * the `sso_error` redirect query param.
+ */
+function ssoError(message, code) {
+  const err = new Error(message);
+  err.ssoCode = code;
+  return err;
+}
+
+/**
+ * Find a pending (un-accepted, non-expired) invitation for an email.
+ * Expiry is compared in JS like /api/invitations/:token/accept does, so the
+ * check behaves identically on SQLite (ISO strings) and Postgres.
+ */
+async function findPendingInvitation(email) {
+  const result = await query(
+    `SELECT id, workspace_id, role, invited_by, expires_at FROM invitations
+     WHERE LOWER(email) = LOWER(?) AND accepted_at IS NULL
+     ORDER BY created_at DESC`,
+    [email]
+  );
+  const now = new Date();
+  return (result.rows || []).find(i => new Date(i.expires_at) >= now) || null;
+}
+
+/**
  * Upsert a user from a Google profile. Behavior:
  *   - existing row by google_sub → update profile fields, return id
- *   - existing row by email → link google_sub, return id
- *   - no existing row → create new user with no password, return id
+ *   - existing row by (verified) email → link google_sub, return id
+ *   - no existing row → invite-only: create the user ONLY when a pending
+ *     invitation exists for the email (and consume it); otherwise throw
+ *     ssoCode='invite_required'
  */
 async function upsertUserFromGoogle(profile) {
   // 1. Match by google_sub first (stable across email changes)
@@ -103,6 +132,15 @@ async function upsertUserFromGoogle(profile) {
       [profile.name || null, profile.picture || null, profile.picture || null, row.id]);
     return row.id;
   }
+
+  // Everything below trusts Google's email claim (matching an existing
+  // account or redeeming an invitation by address). Only proceed when Google
+  // itself attests the address is verified — otherwise a Google account with
+  // an arbitrary unverified email could take over the matching account.
+  if (!(profile.email_verified === true || profile.email_verified === 'true')) {
+    throw ssoError('Google account email is not verified', 'email_unverified');
+  }
+
   // 2. Match by email — link the account
   row = await queryOne('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [profile.email]);
   if (row) {
@@ -110,8 +148,17 @@ async function upsertUserFromGoogle(profile) {
       [profile.sub, profile.picture || null, profile.picture || null, row.id]);
     return row.id;
   }
-  // 3. Create new user. Password is unused but kept non-null where possible
-  //    by generating a random hash the user can later reset.
+
+  // 3. New user. The platform is invite-only (public /api/auth/register is
+  //    410 Gone) — SSO must not be a signup backdoor, so require a pending
+  //    invitation for this email before creating anything.
+  const invite = await findPendingInvitation(profile.email);
+  if (!invite) {
+    throw ssoError('No pending invitation for this email — ask a workspace admin for an invite', 'invite_required');
+  }
+
+  // Password is unused but kept non-null where possible by generating a
+  // random hash the user can later reset.
   const id = uuidv4();
   const randomPassword = crypto.randomBytes(24).toString('hex');
   const hash = bcrypt.hashSync(randomPassword, 10);
@@ -119,6 +166,17 @@ async function upsertUserFromGoogle(profile) {
     `INSERT INTO users (id, email, password_hash, name, avatar_url, google_sub, google_picture)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [id, profile.email, hash, profile.name || profile.email, profile.picture || null, profile.sub, profile.picture || null]
+  );
+  // Consume the invitation exactly like /api/invitations/:token/accept: add
+  // the membership and stamp accepted_at so the single-use link can't be
+  // replayed (the accept flow would otherwise 409 EMAIL_EXISTS anyway).
+  await exec(
+    'INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES (?, ?, ?, ?)',
+    [invite.workspace_id, id, invite.role, invite.invited_by || null]
+  );
+  await exec(
+    'UPDATE invitations SET accepted_at = CURRENT_TIMESTAMP, accepted_user_id = ? WHERE id = ?',
+    [id, invite.id]
   );
   return id;
 }

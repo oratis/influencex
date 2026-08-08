@@ -20,7 +20,7 @@ const { v4: uuidv4 } = require('uuid');
 const { authMiddleware, registerUser, loginUser, destroySession, getSession } = require('./auth');
 const authGoogle = require('./auth-google');
 // Stripe billing intentionally removed — all features are free for invited users.
-const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId } = require('./workspace-middleware');
+const { workspaceContext, listUserWorkspaces, getDefaultWorkspaceId, findMembership } = require('./workspace-middleware');
 const scraper = require('./scraper');
 const mailAgent = require('./email');
 const log = require('./logger');
@@ -70,6 +70,10 @@ const jobQueue = process.env.REDIS_URL
 console.log(`[queue] Using ${process.env.REDIS_URL ? 'BullMQ + Redis' : 'in-process'} backend`);
 
 const app = express();
+// Cloudflare → Cloud Run: exactly one trusted proxy hop (the load balancer)
+// sits in front of us, so req.ip resolves to the real client IP instead of
+// the LB's. Rate-limit keys (server/rate-limit.js) key on req.ip.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8080;
 // Default to root path. Set BASE_PATH=/something for sub-path hosting.
 const BASE_PATH = process.env.BASE_PATH ?? '';
@@ -445,7 +449,10 @@ app.get(`${BASE_PATH}/api/auth/google/callback`, async (req, res) => {
     res.redirect(`${BASE_PATH}${safeReturn}#sso_token=${encodeURIComponent(session.token)}`);
   } catch (e) {
     console.error('[google sso callback]', e);
-    res.redirect(`${BASE_PATH}/auth?sso_error=${encodeURIComponent(e.message.slice(0, 80))}`);
+    // Policy rejections (invite_required / email_unverified) carry a stable
+    // code; anything else falls back to the trimmed message.
+    const errParam = e.ssoCode || e.message.slice(0, 80);
+    res.redirect(`${BASE_PATH}/auth?sso_error=${encodeURIComponent(errParam)}`);
   }
 });
 
@@ -1038,7 +1045,7 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
 const WORKSPACE_SKIP_PREFIXES = [
   '/auth/', '/users', '/webhooks/', '/openapi', '/docs',
   '/quota/', '/cache/', '/queue/', '/apify/',
-  '/query/', '/scheduler/', '/stats',
+  '/query/', '/scheduler/',
   '/changelog', // public release notes — no auth, no workspace context
   '/mailboxes/oauth/gmail/callback', // Gmail OAuth callback resolves workspace from state
 ];
@@ -1046,6 +1053,10 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   // OAuth callbacks resolve workspace from the state row (no auth, no headers).
   // The /init endpoint, in contrast, IS authenticated and requires workspace context.
   if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
+  // SSE streams authenticate via query-string token; the handler resolves the
+  // workspace from the run row itself and checks membership — never from
+  // caller-supplied context.
+  if (/^\/agents\/runs\/[^/]+\/stream$/.test(req.path)) return next();
   if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
     return next();
   }
@@ -1621,29 +1632,13 @@ app.post(`${BASE_PATH}/api/contacts/:id/reply`, async (req, res) => {
 
 // ==================== Resend Inbound Webhook ====================
 // Receives KOL reply emails forwarded by Resend to market@hakko.ai
-const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET || '';
-
-function verifyResendSignature(req) {
-  if (!RESEND_WEBHOOK_SECRET) return true; // skip if not configured
-  const signature = req.headers['resend-signature'] || req.headers['svix-signature'] || '';
-  const timestamp = req.headers['svix-timestamp'] || '';
-  const msgId = req.headers['svix-id'] || '';
-  if (!signature || !timestamp) return false;
-
-  const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body));
-  const toSign = `${msgId}.${timestamp}.${rawBody}`;
-  // Resend uses Svix webhooks: secret is base64-encoded after "whsec_" prefix
-  const secretBytes = Buffer.from(RESEND_WEBHOOK_SECRET.replace('whsec_', ''), 'base64');
-  const expectedSig = crypto.createHmac('sha256', secretBytes).update(toSign).digest('base64');
-
-  // Signature header may contain multiple sigs: "v1,<base64>"
-  const sigs = signature.split(' ').map(s => s.replace('v1,', ''));
-  return sigs.some(s => s === expectedSig);
-}
+// Signature verification lives in webhook-verify.js: unset secret rejects in
+// production (fail-closed), allows in dev so local testing works.
+const { verifyResendSignature, verifyApifySignature } = require('./webhook-verify');
 
 app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
   // Verify webhook signature
-  if (RESEND_WEBHOOK_SECRET && !verifyResendSignature(req)) {
+  if (!verifyResendSignature(req)) {
     console.warn('[Inbound Email] Invalid webhook signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
@@ -1719,7 +1714,7 @@ app.post(`${BASE_PATH}/api/webhooks/resend/inbound`, async (req, res) => {
 // sends the same signed-Svix envelope as the inbound webhook; same secret
 // is expected (set RESEND_WEBHOOK_SECRET).
 app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
-  if (RESEND_WEBHOOK_SECRET && !verifyResendSignature(req)) {
+  if (!verifyResendSignature(req)) {
     console.warn('[Email Events] Invalid webhook signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
@@ -1814,24 +1809,11 @@ app.post(`${BASE_PATH}/api/webhooks/resend/events`, async (req, res) => {
 // for the matching run_id. Used by the async run mode (Roadmap §4.1) — the
 // current sync mode bypasses this entirely, but having the endpoint live now
 // means we can switch any actor to async without another deploy.
-const APIFY_WEBHOOK_SECRET = process.env.APIFY_WEBHOOK_SECRET || '';
-
-function verifyApifySignature(req) {
-  if (!APIFY_WEBHOOK_SECRET) return true; // skip if not configured
-  const provided = req.headers['x-apify-webhook-signature'] || req.headers['apify-webhook-signature'] || '';
-  if (!provided) return false;
-  const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body));
-  const expected = crypto.createHmac('sha256', APIFY_WEBHOOK_SECRET).update(rawBody).digest('hex');
-  // Constant-time compare. Apify's signature is hex.
-  try {
-    return crypto.timingSafeEqual(Buffer.from(provided, 'hex'), Buffer.from(expected, 'hex'));
-  } catch {
-    return false;
-  }
-}
+// Signature verification in webhook-verify.js — same fail-closed-in-prod
+// policy as the Resend webhooks above.
 
 app.post(`${BASE_PATH}/api/webhooks/apify`, async (req, res) => {
-  if (APIFY_WEBHOOK_SECRET && !verifyApifySignature(req)) {
+  if (!verifyApifySignature(req)) {
     console.warn('[apify-webhook] Invalid signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
@@ -2125,10 +2107,22 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, async
 
 // ==================== Data API ====================
 
+// Client-supplied upsert ids must never address another workspace's row —
+// INSERT OR REPLACE / ON CONFLICT(id) would rewrite it wholesale. Returns a
+// safe id: the caller's id when it's free or already owned by this workspace,
+// a fresh uuid otherwise (legacy NULL-workspace rows stay frozen too).
+async function safeUpsertId(tx, table, itemId, workspaceId) {
+  if (!itemId) return uuidv4();
+  const owner = await tx.queryOne(`SELECT workspace_id FROM ${table} WHERE id = ?`, [itemId]);
+  if (owner && owner.workspace_id !== workspaceId) return uuidv4();
+  return itemId;
+}
+
 // Get content performance data
 app.get(`${BASE_PATH}/api/data/content`, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM content_data ORDER BY publish_date DESC');
+    const s = scoped(req.workspace.id);
+    const result = await s.query('SELECT * FROM content_data WHERE workspace_id = ? ORDER BY publish_date DESC', [req.workspace.id]);
     res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -2139,25 +2133,24 @@ app.get(`${BASE_PATH}/api/data/content`, async (req, res) => {
 app.post(`${BASE_PATH}/api/data/content`, async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
-    if (usePostgres) {
-      await transaction(async (tx) => {
-        for (const item of items) {
+    const wsId = req.workspace.id;
+    await transaction(async (tx) => {
+      for (const item of items) {
+        const id = await safeUpsertId(tx, 'content_data', item.id, wsId);
+        const params = [id, wsId, item.kol_name, item.platform, item.content_title, item.content_url || '', item.publish_date, item.views || 0, item.likes || 0, item.comments || 0, item.shares || 0];
+        if (usePostgres) {
           await tx.exec(
-            'INSERT INTO content_data (id, kol_name, platform, content_title, content_url, publish_date, views, likes, comments, shares) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET kol_name=EXCLUDED.kol_name, platform=EXCLUDED.platform, content_title=EXCLUDED.content_title, content_url=EXCLUDED.content_url, publish_date=EXCLUDED.publish_date, views=EXCLUDED.views, likes=EXCLUDED.likes, comments=EXCLUDED.comments, shares=EXCLUDED.shares',
-            [item.id || uuidv4(), item.kol_name, item.platform, item.content_title, item.content_url || '', item.publish_date, item.views || 0, item.likes || 0, item.comments || 0, item.shares || 0]
+            'INSERT INTO content_data (id, workspace_id, kol_name, platform, content_title, content_url, publish_date, views, likes, comments, shares) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id, kol_name=EXCLUDED.kol_name, platform=EXCLUDED.platform, content_title=EXCLUDED.content_title, content_url=EXCLUDED.content_url, publish_date=EXCLUDED.publish_date, views=EXCLUDED.views, likes=EXCLUDED.likes, comments=EXCLUDED.comments, shares=EXCLUDED.shares',
+            params
+          );
+        } else {
+          await tx.exec(
+            'INSERT OR REPLACE INTO content_data (id, workspace_id, kol_name, platform, content_title, content_url, publish_date, views, likes, comments, shares) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            params
           );
         }
-      });
-    } else {
-      await transaction(async (tx) => {
-        for (const item of items) {
-          await tx.exec(
-            'INSERT OR REPLACE INTO content_data (id, kol_name, platform, content_title, content_url, publish_date, views, likes, comments, shares) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [item.id || uuidv4(), item.kol_name, item.platform, item.content_title, item.content_url || '', item.publish_date, item.views || 0, item.likes || 0, item.comments || 0, item.shares || 0]
-          );
-        }
-      });
-    }
+      }
+    });
     res.json({ success: true, count: items.length });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -2167,7 +2160,8 @@ app.post(`${BASE_PATH}/api/data/content`, async (req, res) => {
 // Get registration data
 app.get(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM registration_data ORDER BY date ASC');
+    const s = scoped(req.workspace.id);
+    const result = await s.query('SELECT * FROM registration_data WHERE workspace_id = ? ORDER BY date ASC', [req.workspace.id]);
     res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -2178,25 +2172,24 @@ app.get(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
 app.post(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
-    if (usePostgres) {
-      await transaction(async (tx) => {
-        for (const item of items) {
+    const wsId = req.workspace.id;
+    await transaction(async (tx) => {
+      for (const item of items) {
+        const id = await safeUpsertId(tx, 'registration_data', item.id, wsId);
+        const params = [id, wsId, item.date, item.registrations || 0, item.source || ''];
+        if (usePostgres) {
           await tx.exec(
-            'INSERT INTO registration_data (id, date, registrations, source) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET date=EXCLUDED.date, registrations=EXCLUDED.registrations, source=EXCLUDED.source',
-            [item.id || uuidv4(), item.date, item.registrations || 0, item.source || '']
+            'INSERT INTO registration_data (id, workspace_id, date, registrations, source) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id, date=EXCLUDED.date, registrations=EXCLUDED.registrations, source=EXCLUDED.source',
+            params
+          );
+        } else {
+          await tx.exec(
+            'INSERT OR REPLACE INTO registration_data (id, workspace_id, date, registrations, source) VALUES (?, ?, ?, ?, ?)',
+            params
           );
         }
-      });
-    } else {
-      await transaction(async (tx) => {
-        for (const item of items) {
-          await tx.exec(
-            'INSERT OR REPLACE INTO registration_data (id, date, registrations, source) VALUES (?, ?, ?, ?)',
-            [item.id || uuidv4(), item.date, item.registrations || 0, item.source || '']
-          );
-        }
-      });
-    }
+      }
+    });
     res.json({ success: true, count: items.length });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -2383,10 +2376,11 @@ app.get(`${BASE_PATH}/api/kol-database/export`, exportLimiter, async (req, res) 
   }
 });
 
-// Export all content data to CSV
+// Export all content data to CSV (current workspace only)
 app.get(`${BASE_PATH}/api/data/content/export`, exportLimiter, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM content_data ORDER BY publish_date DESC');
+    const s = scoped(req.workspace.id);
+    const result = await s.query('SELECT * FROM content_data WHERE workspace_id = ? ORDER BY publish_date DESC', [req.workspace.id]);
     sendCsv(res, result.rows || [], csvExport.COLUMNS.content, 'content-data.csv');
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -2592,11 +2586,13 @@ app.get(`${BASE_PATH}/api/agents/runs/:runId/stream`, async (req, res) => {
     const user = token ? await getSession(token) : null;
     if (!user) return res.status(401).end();
 
-    // Check the run belongs to this user's workspace
-    const wsId = req.query.workspace_id;
+    // Authorize against the run's OWN workspace, never a caller-supplied one:
+    // the user must be a member of the workspace the run belongs to. (The old
+    // `workspace_id` query param check was skippable by omitting the param.)
     const run = await queryOne('SELECT workspace_id, agent_id, status FROM agent_runs WHERE id = ?', [req.params.runId]);
     if (!run) return res.status(404).end();
-    if (wsId && run.workspace_id !== wsId) return res.status(403).end();
+    const membership = await findMembership(run.workspace_id, user.id);
+    if (!membership) return res.status(404).end(); // 404, not 403 — don't leak run existence
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -4913,14 +4909,17 @@ app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, async (req
 });
 
 // ==================== Dashboard Stats ====================
+// Workspace-scoped: counts only reflect the caller's current workspace.
 app.get(`${BASE_PATH}/api/stats`, async (req, res) => {
   try {
-    const campaigns = (await queryOne('SELECT COUNT(*) as count FROM campaigns')).count;
-    const totalKols = (await queryOne('SELECT COUNT(*) as count FROM kols')).count;
-    const approvedKols = (await queryOne("SELECT COUNT(*) as count FROM kols WHERE status = 'approved'")).count;
-    const sentEmails = (await queryOne("SELECT COUNT(*) as count FROM contacts WHERE status = 'sent' OR status = 'replied'")).count;
-    const replies = (await queryOne("SELECT COUNT(*) as count FROM contacts WHERE status = 'replied'")).count;
-    const totalViews = (await queryOne('SELECT COALESCE(SUM(views), 0) as total FROM content_data')).total;
+    const wsId = req.workspace.id;
+    const s = scoped(wsId);
+    const campaigns = (await s.queryOne('SELECT COUNT(*) as count FROM campaigns WHERE workspace_id = ?', [wsId])).count;
+    const totalKols = (await s.queryOne('SELECT COUNT(*) as count FROM kols WHERE workspace_id = ?', [wsId])).count;
+    const approvedKols = (await s.queryOne("SELECT COUNT(*) as count FROM kols WHERE workspace_id = ? AND status = 'approved'", [wsId])).count;
+    const sentEmails = (await s.queryOne("SELECT COUNT(*) as count FROM contacts WHERE workspace_id = ? AND (status = 'sent' OR status = 'replied')", [wsId])).count;
+    const replies = (await s.queryOne("SELECT COUNT(*) as count FROM contacts WHERE workspace_id = ? AND status = 'replied'", [wsId])).count;
+    const totalViews = (await s.queryOne('SELECT COALESCE(SUM(views), 0) as total FROM content_data WHERE workspace_id = ?', [wsId])).total;
     res.json({
       campaigns: parseInt(campaigns) || 0,
       totalKols: parseInt(totalKols) || 0,
@@ -5244,11 +5243,39 @@ app.get(`${BASE_PATH}/api/smtp/status`, async (req, res) => {
 
 // ==================== Content Scraping API (Task 2) ====================
 
+// Upsert one daily snapshot row. content_daily_stats has a GLOBAL
+// UNIQUE(content_url, stat_date) that predates multitenancy, so a row for the
+// same URL+date may belong to another workspace — refuse to touch it
+// (fail-closed) instead of letting REPLACE / ON CONFLICT rewrite it. Legacy
+// rows with NULL workspace_id are adopted by the first workspace that writes.
+async function upsertContentDailyStat(workspaceId, contentUrl, statDate, { views, likes, comments, shares }, source) {
+  const existing = await queryOne(
+    'SELECT workspace_id FROM content_daily_stats WHERE content_url = ? AND stat_date = ?',
+    [contentUrl, statDate]
+  );
+  if (existing && existing.workspace_id && existing.workspace_id !== workspaceId) return false;
+  const params = [uuidv4(), workspaceId, contentUrl, statDate, views, likes, comments, shares, source];
+  if (usePostgres) {
+    await exec(
+      `INSERT INTO content_daily_stats (id, workspace_id, content_url, stat_date, views, likes, comments, shares, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (content_url, stat_date) DO UPDATE SET workspace_id=EXCLUDED.workspace_id, views=EXCLUDED.views, likes=EXCLUDED.likes, comments=EXCLUDED.comments, shares=EXCLUDED.shares, source=EXCLUDED.source`,
+      params
+    );
+  } else {
+    await exec(
+      'INSERT OR REPLACE INTO content_daily_stats (id, workspace_id, content_url, stat_date, views, likes, comments, shares, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      params
+    );
+  }
+  return true;
+}
+
 // Scrape view counts for content URLs
 app.post(`${BASE_PATH}/api/data/content/scrape`, async (req, res) => {
   try {
-    // Scrape ALL content (not just views=0), to get daily snapshots
-    const contentResult = await query("SELECT id, content_url, platform FROM content_data WHERE content_url IS NOT NULL AND content_url != ''");
+    const s = scoped(req.workspace.id);
+    // Scrape ALL content in this workspace (not just views=0), to get daily snapshots
+    const contentResult = await s.query("SELECT id, content_url, platform FROM content_data WHERE workspace_id = ? AND content_url IS NOT NULL AND content_url != ''", [req.workspace.id]);
     const content = contentResult.rows;
 
     if (content.length === 0) return res.json({ scraped: 0, message: 'No content URLs to scrape' });
@@ -5260,17 +5287,11 @@ app.post(`${BASE_PATH}/api/data/content/scrape`, async (req, res) => {
       const data = await dataAgent.scrapeContentUrl(item.content_url);
       if (data && (data.views > 0 || data.likes > 0)) {
         // Update current totals in content_data
-        await exec("UPDATE content_data SET views=?, likes=?, comments=?, shares=?, publish_date=COALESCE(NULLIF(?, ''), publish_date) WHERE id=?",
-          [data.views, data.likes, data.comments, data.shares, data.publish_date, item.id]);
+        await s.exec("UPDATE content_data SET views=?, likes=?, comments=?, shares=?, publish_date=COALESCE(NULLIF(?, ''), publish_date) WHERE id=? AND workspace_id=?",
+          [data.views, data.likes, data.comments, data.shares, data.publish_date, item.id, req.workspace.id]);
 
         // Save daily snapshot
-        if (usePostgres) {
-          await exec("INSERT INTO content_daily_stats (id, content_url, stat_date, views, likes, comments, shares, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'scrape') ON CONFLICT (content_url, stat_date) DO UPDATE SET views=EXCLUDED.views, likes=EXCLUDED.likes, comments=EXCLUDED.comments, shares=EXCLUDED.shares",
-            [uuidv4(), item.content_url, today, data.views, data.likes, data.comments, data.shares]);
-        } else {
-          await exec("INSERT OR REPLACE INTO content_daily_stats (id, content_url, stat_date, views, likes, comments, shares, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'scrape')",
-            [uuidv4(), item.content_url, today, data.views, data.likes, data.comments, data.shares]);
-        }
+        await upsertContentDailyStat(req.workspace.id, item.content_url, today, data, 'scrape');
 
         results.scraped++;
       } else {
@@ -5289,22 +5310,22 @@ app.put(`${BASE_PATH}/api/data/content/:id`, async (req, res) => {
   try {
     const { views, likes, comments, shares } = req.body;
     const { id } = req.params;
+    const s = scoped(req.workspace.id);
 
-    const item = await queryOne("SELECT * FROM content_data WHERE id=?", [id]);
+    const item = await s.queryOne("SELECT * FROM content_data WHERE id=? AND workspace_id=?", [id, req.workspace.id]);
     if (!item) return res.status(404).json({ error: 'Content not found' });
 
-    await exec("UPDATE content_data SET views=?, likes=?, comments=?, shares=? WHERE id=?",
-      [parseInt(views) || 0, parseInt(likes) || 0, parseInt(comments) || 0, parseInt(shares) || 0, id]);
+    await s.exec("UPDATE content_data SET views=?, likes=?, comments=?, shares=? WHERE id=? AND workspace_id=?",
+      [parseInt(views) || 0, parseInt(likes) || 0, parseInt(comments) || 0, parseInt(shares) || 0, id, req.workspace.id]);
 
     // Save daily snapshot with manual source
     const today = new Date().toISOString().split('T')[0];
-    if (usePostgres) {
-      await exec("INSERT INTO content_daily_stats (id, content_url, stat_date, views, likes, comments, shares, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual') ON CONFLICT (content_url, stat_date) DO UPDATE SET views=EXCLUDED.views, likes=EXCLUDED.likes, comments=EXCLUDED.comments, shares=EXCLUDED.shares, source='manual'",
-        [uuidv4(), item.content_url, today, parseInt(views) || 0, parseInt(likes) || 0, parseInt(comments) || 0, parseInt(shares) || 0]);
-    } else {
-      await exec("INSERT OR REPLACE INTO content_daily_stats (id, content_url, stat_date, views, likes, comments, shares, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')",
-        [uuidv4(), item.content_url, today, parseInt(views) || 0, parseInt(likes) || 0, parseInt(comments) || 0, parseInt(shares) || 0]);
-    }
+    await upsertContentDailyStat(req.workspace.id, item.content_url, today, {
+      views: parseInt(views) || 0,
+      likes: parseInt(likes) || 0,
+      comments: parseInt(comments) || 0,
+      shares: parseInt(shares) || 0,
+    }, 'manual');
 
     res.json({ success: true });
   } catch (e) {
@@ -5315,56 +5336,61 @@ app.put(`${BASE_PATH}/api/data/content/:id`, async (req, res) => {
 // Get daily stats for a content URL
 app.get(`${BASE_PATH}/api/data/content/:id/daily`, async (req, res) => {
   try {
-    const item = await queryOne("SELECT content_url FROM content_data WHERE id=?", [req.params.id]);
+    const s = scoped(req.workspace.id);
+    const item = await s.queryOne("SELECT content_url FROM content_data WHERE id=? AND workspace_id=?", [req.params.id, req.workspace.id]);
     if (!item) return res.status(404).json({ error: 'Content not found' });
 
-    const stats = await query("SELECT stat_date, views, likes, comments, shares, source FROM content_daily_stats WHERE content_url=? ORDER BY stat_date", [item.content_url]);
+    const stats = await s.query("SELECT stat_date, views, likes, comments, shares, source FROM content_daily_stats WHERE content_url=? AND workspace_id=? ORDER BY stat_date", [item.content_url, req.workspace.id]);
     res.json({ content_url: item.content_url, daily: stats.rows });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
   }
 });
 
-// Combined dashboard data
+// Combined dashboard data (current workspace only)
 app.get(`${BASE_PATH}/api/data/dashboard/combined`, async (req, res) => {
   try {
+    const s = scoped(req.workspace.id);
+    const wsId = req.workspace.id;
+
     // 1. Content data by date
-    const contentByDateResult = await query(`
+    const contentByDateResult = await s.query(`
       SELECT publish_date as date, SUM(views) as views, SUM(likes) as likes, SUM(comments) as comments, COUNT(*) as content_count
-      FROM content_data WHERE publish_date IS NOT NULL AND publish_date != ''
+      FROM content_data WHERE workspace_id = ? AND publish_date IS NOT NULL AND publish_date != ''
       GROUP BY publish_date ORDER BY publish_date
-    `);
+    `, [wsId]);
     const contentByDate = contentByDateResult.rows;
 
     // 2. Registration data by date
-    const regByDateResult = await query(`
+    const regByDateResult = await s.query(`
       SELECT date, SUM(registrations) as registrations FROM registration_data
+      WHERE workspace_id = ?
       GROUP BY date ORDER BY date
-    `);
+    `, [wsId]);
     const regByDate = regByDateResult.rows;
 
     const gaData = [];
 
     // 4. Key events (content publish dates)
-    const eventsResult = await query("SELECT * FROM dashboard_events ORDER BY date");
+    const eventsResult = await s.query('SELECT * FROM dashboard_events WHERE workspace_id = ? ORDER BY date', [wsId]);
     const events = eventsResult.rows;
 
     // Also add content publish dates as events
     // Note: GROUP_CONCAT is SQLite-specific, use STRING_AGG for PostgreSQL
     let contentDates;
     if (usePostgres) {
-      const cdResult = await query(`
+      const cdResult = await s.query(`
         SELECT publish_date as date, COUNT(*) as count, STRING_AGG(kol_name, ',') as kols
-        FROM content_data WHERE publish_date IS NOT NULL AND publish_date != ''
+        FROM content_data WHERE workspace_id = ? AND publish_date IS NOT NULL AND publish_date != ''
         GROUP BY publish_date
-      `);
+      `, [wsId]);
       contentDates = cdResult.rows;
     } else {
-      const cdResult = await query(`
+      const cdResult = await s.query(`
         SELECT publish_date as date, COUNT(*) as count, GROUP_CONCAT(kol_name) as kols
-        FROM content_data WHERE publish_date IS NOT NULL AND publish_date != ''
+        FROM content_data WHERE workspace_id = ? AND publish_date IS NOT NULL AND publish_date != ''
         GROUP BY publish_date
-      `);
+      `, [wsId]);
       contentDates = cdResult.rows;
     }
 
@@ -5778,9 +5804,12 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
       'game recommendation', 'roleplay game', 'AI tools gaming',
     ];
     const minSubscribers = req.body.min_subscribers || 5000;
+    // Capture the workspace before the response is sent — the background
+    // closure below must only ever read/write this tenant's rows.
+    const workspaceId = req.workspace.id;
 
-    await exec("INSERT INTO discovery_jobs (id, campaign_id, search_criteria, status) VALUES (?, 'batch-email', ?, 'running')",
-      [jobId, JSON.stringify({ keywords, platforms, minSubscribers, mode: 'email-only' })]);
+    await exec("INSERT INTO discovery_jobs (id, workspace_id, campaign_id, search_criteria, status) VALUES (?, ?, 'batch-email', ?, 'running')",
+      [jobId, workspaceId, JSON.stringify({ keywords, platforms, minSubscribers, mode: 'email-only' })]);
 
     res.json({ id: jobId, status: 'running', message: 'Batch discovery started. Only KOLs with emails will be saved.' });
 
@@ -5839,9 +5868,10 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
 
               totalFound++;
 
-              // Check if already in kol_database
-              const existing = await queryOne("SELECT id, email FROM kol_database WHERE profile_url=? OR (platform='youtube' AND username=?)",
-                [`https://www.youtube.com/channel/${ch.id}`, ch.snippet.customUrl?.replace('@', '') || ch.id]);
+              // Check if already in THIS workspace's kol_database. Never match
+              // (and never reuse the id of) another workspace's row.
+              const existing = await queryOne("SELECT id, email FROM kol_database WHERE workspace_id=? AND (profile_url=? OR (platform='youtube' AND username=?))",
+                [workspaceId, `https://www.youtube.com/channel/${ch.id}`, ch.snippet.customUrl?.replace('@', '') || ch.id]);
               if (existing?.email) { totalSaved++; continue; } // Already have with email
 
               // Enhanced email discovery
@@ -5860,20 +5890,24 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
               const category = scraper.extractEmailFromText ? discoveryAgent.calculateRelevance ? 'Gaming' : '' : '';
               const cat = detectCategoryForDiscovery(ch.snippet.title + ' ' + description);
 
+              // existing.id is workspace-scoped (lookup above), so the upsert
+              // can only ever rewrite a row inside this workspace. workspace_id
+              // is in the column list so INSERT OR REPLACE keeps it set.
               const kolId = existing?.id || uuidv4();
               if (usePostgres) {
                 await exec(
-                  `INSERT INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, country, language, scrape_status, source_campaign_id, updated_at)
-                  VALUES (?, 'youtube', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)
-                  ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, followers=EXCLUDED.followers, avg_views=EXCLUDED.avg_views, total_videos=EXCLUDED.total_videos, display_name=EXCLUDED.display_name, avatar_url=EXCLUDED.avatar_url, bio=EXCLUDED.bio, updated_at=CURRENT_TIMESTAMP`,
-                  [kolId, username, ch.snippet.title, ch.snippet.thumbnails?.high?.url || '', profileUrl,
+                  `INSERT INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, country, language, scrape_status, source_campaign_id, updated_at)
+                  VALUES (?, ?, 'youtube', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)
+                  ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, followers=EXCLUDED.followers, avg_views=EXCLUDED.avg_views, total_videos=EXCLUDED.total_videos, display_name=EXCLUDED.display_name, avatar_url=EXCLUDED.avatar_url, bio=EXCLUDED.bio, updated_at=CURRENT_TIMESTAMP
+                  WHERE kol_database.workspace_id = EXCLUDED.workspace_id`,
+                  [kolId, workspaceId, username, ch.snippet.title, ch.snippet.thumbnails?.high?.url || '', profileUrl,
                    subs, avgViews, videoCount, cat, email, description.slice(0, 500),
                    ch.snippet.country || '', ch.snippet.defaultLanguage || '']);
               } else {
                 await exec(
-                  `INSERT OR REPLACE INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, country, language, scrape_status, source_campaign_id, updated_at)
-                  VALUES (?, 'youtube', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)`,
-                  [kolId, username, ch.snippet.title, ch.snippet.thumbnails?.high?.url || '', profileUrl,
+                  `INSERT OR REPLACE INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, country, language, scrape_status, source_campaign_id, updated_at)
+                  VALUES (?, ?, 'youtube', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)`,
+                  [kolId, workspaceId, username, ch.snippet.title, ch.snippet.thumbnails?.high?.url || '', profileUrl,
                    subs, avgViews, videoCount, cat, email, description.slice(0, 500),
                    ch.snippet.country || '', ch.snippet.defaultLanguage || '']);
               }
@@ -5930,14 +5964,14 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
                 if (!ttUsername || seenIds.has('tt-' + ttUsername)) continue;
                 seenIds.add('tt-' + ttUsername);
 
-                // Check if already in DB
-                const existing = await queryOne("SELECT id, email FROM kol_database WHERE platform='tiktok' AND username=?", [ttUsername]);
+                // Check if already in THIS workspace's DB (see YouTube note above)
+                const existing = await queryOne("SELECT id, email FROM kol_database WHERE workspace_id=? AND platform='tiktok' AND username=?", [workspaceId, ttUsername]);
                 if (existing?.email) { continue; }
 
                 // Scrape TikTok profile
                 try {
                   const profileUrl = `https://www.tiktok.com/@${ttUsername}`;
-                  const result = await scraper.scrapeTikTok(profileUrl, ttUsername, { workspaceId: req.workspace?.id });
+                  const result = await scraper.scrapeTikTok(profileUrl, ttUsername, { workspaceId });
                   if (!result.success || !result.data) continue;
                   if (result.data.followers < minSubscribers) continue;
 
@@ -5950,17 +5984,18 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
                   const cat = detectCategoryForDiscovery(result.data.bio || '');
                   if (usePostgres) {
                     await exec(
-                      `INSERT INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, scrape_status, source_campaign_id, updated_at)
-                      VALUES (?, 'tiktok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)
-                      ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, followers=EXCLUDED.followers, display_name=EXCLUDED.display_name, avatar_url=EXCLUDED.avatar_url, bio=EXCLUDED.bio, updated_at=CURRENT_TIMESTAMP`,
-                      [kolId, ttUsername, result.data.display_name, result.data.avatar_url || '', profileUrl,
+                      `INSERT INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, scrape_status, source_campaign_id, updated_at)
+                      VALUES (?, ?, 'tiktok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)
+                      ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, followers=EXCLUDED.followers, display_name=EXCLUDED.display_name, avatar_url=EXCLUDED.avatar_url, bio=EXCLUDED.bio, updated_at=CURRENT_TIMESTAMP
+                      WHERE kol_database.workspace_id = EXCLUDED.workspace_id`,
+                      [kolId, workspaceId, ttUsername, result.data.display_name, result.data.avatar_url || '', profileUrl,
                        result.data.followers, result.data.engagement_rate, result.data.avg_views, result.data.total_videos,
                        cat, email, (result.data.bio || '').slice(0, 500)]);
                   } else {
                     await exec(
-                      `INSERT OR REPLACE INTO kol_database (id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, scrape_status, source_campaign_id, updated_at)
-                      VALUES (?, 'tiktok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)`,
-                      [kolId, ttUsername, result.data.display_name, result.data.avatar_url || '', profileUrl,
+                      `INSERT OR REPLACE INTO kol_database (id, workspace_id, platform, username, display_name, avatar_url, profile_url, followers, engagement_rate, avg_views, total_videos, category, email, bio, scrape_status, source_campaign_id, updated_at)
+                      VALUES (?, ?, 'tiktok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', 'batch-email', CURRENT_TIMESTAMP)`,
+                      [kolId, workspaceId, ttUsername, result.data.display_name, result.data.avatar_url || '', profileUrl,
                        result.data.followers, result.data.engagement_rate, result.data.avg_views, result.data.total_videos,
                        cat, email, (result.data.bio || '').slice(0, 500)]);
                   }
