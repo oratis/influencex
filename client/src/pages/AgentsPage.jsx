@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 import { useI18n } from '../i18n';
@@ -13,9 +13,19 @@ export default function AgentsPage() {
   const [runInput, setRunInput] = useState('{}');
   const [activeRun, setActiveRun] = useState(null);
   const [events, setEvents] = useState([]);
+  const srcRef = useRef(null);
   const toast = useToast();
 
   useEffect(() => { loadAll(); }, []);
+
+  // Close any live SSE stream on unmount so it doesn't keep the connection
+  // (and its setState callbacks) alive after navigating away.
+  useEffect(() => () => {
+    if (srcRef.current) {
+      srcRef.current.close();
+      srcRef.current = null;
+    }
+  }, []);
 
   // Deep-link: /#/agents?run=<id>&input=<json> opens the run modal pre-filled.
   // Other pages use this to hand off to a specific agent (e.g. ReviewsPage →
@@ -62,14 +72,25 @@ export default function AgentsPage() {
       setEvents([{ type: 'started', data: { agent: agentId }, timestamp: new Date().toISOString() }]);
       const r = await api.runAgent(agentId, inputObj);
       setActiveRun(r.runId);
+      // Close the previous stream (re-running while one is live) before
+      // opening a new one.
+      if (srcRef.current) {
+        srcRef.current.close();
+        srcRef.current = null;
+      }
       const src = api.streamAgentRun(r.runId);
+      srcRef.current = src;
       src.addEventListener('started', onEvt);
       src.addEventListener('progress', onEvt);
       src.addEventListener('partial', onEvt);
       src.addEventListener('thinking', onEvt);
       src.addEventListener('complete', onEvt);
       src.addEventListener('error', onEvt);
-      src.addEventListener('closed', (e) => { src.close(); loadAll(); });
+      src.addEventListener('closed', (e) => {
+        src.close();
+        if (srcRef.current === src) srcRef.current = null;
+        loadAll();
+      });
 
       function onEvt(e) {
         try {

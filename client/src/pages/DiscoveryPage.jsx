@@ -124,11 +124,14 @@ export default function DiscoveryPage() {
         const j = await api.getDiscoveryJob(jobId);
         setJob(j);
         if (Array.isArray(j.results)) setResults(j.results);
-        if (j.status === 'complete' || j.status === 'failed' || j.status === 'success') {
+        // Server terminal states are 'complete' / 'error'; keep the legacy
+        // 'failed' / 'success' spellings too so the button can't get stuck
+        // in "Starting..." on an errored job.
+        if (['complete', 'success', 'error', 'failed'].includes(j.status)) {
           clearInterval(pollRef.current);
           pollRef.current = null;
           setRunning(false);
-          if (j.status === 'failed') toast.error(t('discovery.job_failed', { error: j.error_message || 'unknown' }));
+          if (j.status === 'failed' || j.status === 'error') toast.error(t('discovery.job_failed', { error: j.error_message || 'unknown' }));
           else toast.success(t('discovery.job_succeeded'));
         }
       } catch (e) {
@@ -224,7 +227,7 @@ export default function DiscoveryPage() {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <h3 style={{ fontSize: 15, margin: 0 }}>
               {t('discovery.job_title')}
-              <span className={`badge ${job.status === 'complete' || job.status === 'success' ? 'badge-green' : job.status === 'failed' ? 'badge-red' : 'badge-blue'}`} style={{ marginLeft: 8 }}>
+              <span className={`badge ${job.status === 'complete' || job.status === 'success' ? 'badge-green' : job.status === 'failed' || job.status === 'error' ? 'badge-red' : 'badge-blue'}`} style={{ marginLeft: 8 }}>
                 {job.status}
               </span>
             </h3>

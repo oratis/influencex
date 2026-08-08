@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useI18n } from '../i18n';
+import { ymdLocal } from '../utils/datetime';
 
 const BASE = import.meta.env.VITE_API_BASE || '/api';
 
@@ -14,7 +15,9 @@ function authHeaders() {
 
 function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
-function ymd(d) { return d.toISOString().slice(0, 10); }
+// Bucket by LOCAL date parts — toISOString() is UTC and shifts events before
+// 08:00 local (for UTC+8) onto the previous day, and breaks isToday.
+const ymd = ymdLocal;
 
 const STATUS_COLORS = {
   pending: '#f59e0b',

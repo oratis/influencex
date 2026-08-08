@@ -57,13 +57,12 @@ export default function CommandPalette() {
       { id: 'nav:campaigns',   label: t('nav.campaigns'),    kind: 'nav', path: '/campaigns' },
       { id: 'nav:roi',         label: t('nav.roi'),          kind: 'nav', path: '/roi' },
       { id: 'nav:contacts',    label: t('nav.contacts'),     kind: 'nav', path: '/contacts' },
-      { id: 'nav:data',        label: t('nav.data'),         kind: 'nav', path: '/data' },
       { id: 'nav:kol-database', label: t('nav.kol_database'), kind: 'nav', path: '/kol-database' },
       { id: 'nav:discovery',   label: t('nav.discovery'),    kind: 'nav', path: '/discovery' },
       { id: 'nav:reviews',     label: t('nav.reviews'),      kind: 'nav', path: '/reviews' },
       { id: 'nav:changelog',   label: t('nav.changelog'),    kind: 'nav', path: '/changelog' },
       { id: 'nav:users',       label: t('nav.users'),        kind: 'nav', path: '/users' },
-      { id: 'nav:workspace',   label: t('nav.workspace_settings') || 'Workspace settings', kind: 'nav', path: '/workspace/settings' },
+      { id: 'nav:workspace',   label: t('nav.workspace_settings'), kind: 'nav', path: '/workspace/settings' },
     ];
     if (isAdmin) {
       base.push(

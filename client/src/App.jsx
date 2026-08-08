@@ -1,5 +1,5 @@
 import React, { useState, useEffect, Suspense, lazy } from 'react';
-import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { Routes, Route, NavLink, Navigate, Link } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { CampaignProvider, useCampaign } from './CampaignContext';
 import { ToastProvider } from './components/Toast';
@@ -268,6 +268,10 @@ function AppContent() {
               <Route path="/" element={<HomeRedirect />} />
               <Route path="/login" element={<Navigate to="/" replace />} />
               <Route path="/auth" element={<Navigate to="/" replace />} />
+              {/* Signup / invite links opened while already signed in used to
+                  fall through to the 404. Show a friendly notice instead. */}
+              <Route path="/signup" element={<AlreadySignedIn />} />
+              <Route path="/accept-invite" element={<AlreadySignedIn showInviteHint />} />
               <Route path="/conductor" element={<ConductorPage />} />
               <Route path="/connections" element={<ConnectionsPage />} />
               <Route path="/calendar" element={<CalendarPage />} />
@@ -296,6 +300,32 @@ function AppContent() {
         </div>
       </div>
     </CampaignProvider>
+  );
+}
+
+// Shown when a logged-in user opens /signup or /accept-invite (e.g. an admin
+// clicking the invite link they just generated). Those flows are meant for
+// logged-out visitors; instead of a 404, explain and point home.
+function AlreadySignedIn({ showInviteHint = false }) {
+  const { user } = useAuth();
+  const { t } = useI18n();
+  return (
+    <div className="page-container fade-in">
+      <div className="card" style={{ maxWidth: 520, margin: '48px auto', textAlign: 'center' }}>
+        <h3 style={{ marginBottom: 10 }}>{t('already_signed_in.title')}</h3>
+        <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: showInviteHint ? 8 : 20 }}>
+          {t('already_signed_in.body', { email: user?.email || '' })}
+        </p>
+        {showInviteHint && (
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.5 }}>
+            {t('already_signed_in.accept_invite_hint')}
+          </p>
+        )}
+        <Link to="/" className="btn btn-primary" style={{ textDecoration: 'none' }}>
+          {t('already_signed_in.go_home')}
+        </Link>
+      </div>
+    </div>
   );
 }
 

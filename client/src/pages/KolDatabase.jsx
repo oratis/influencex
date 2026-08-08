@@ -50,7 +50,15 @@ export default function KolDatabase() {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    // Null the ref in cleanup — the cleanup runs before every re-run of this
+    // effect, and a stale truthy ref would stop the next run from ever
+    // restarting the poll (rows stuck at "scraping" forever).
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
   }, [kols]);
 
   const handleSearch = (e) => {

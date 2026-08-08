@@ -16,7 +16,9 @@ export default function ConductorPage() {
   const [recentPlans, setRecentPlans] = useState([]);
   const [inspectedPlan, setInspectedPlan] = useState(null);
   const [planElapsed, setPlanElapsed] = useState(0);
+  const [planError, setPlanError] = useState('');
   const planAbortRef = useRef(null);
+  const approvePollRef = useRef(null);
   const toast = useToast();
   const { t } = useI18n();
   const { selectedCampaignId, campaigns } = useCampaign();
@@ -47,6 +49,12 @@ export default function ConductorPage() {
 
   useEffect(() => { loadRecent(); }, []);
 
+  // Clear the approve-poll interval on unmount so it can't keep hitting the
+  // API (or calling setState) after the user navigates away.
+  useEffect(() => () => {
+    if (approvePollRef.current) clearInterval(approvePollRef.current);
+  }, []);
+
   async function loadRecent() {
     try {
       const r = await api.listConductorPlans();
@@ -59,6 +67,7 @@ export default function ConductorPage() {
     setIsPlanning(true);
     setCurrentPlan(null);
     setPlanElapsed(0);
+    setPlanError('');
     const controller = new AbortController();
     planAbortRef.current = controller;
     try {
@@ -66,7 +75,11 @@ export default function ConductorPage() {
       setCurrentPlan(r);
     } catch (e) {
       // AbortError surfaces when the user cancels; don't toast.
-      if (e.name !== 'AbortError') toastApiError(e, toast, t);
+      if (e.name !== 'AbortError') {
+        // Toast + keep the message for the inline error card next to the
+        // button so a failed POST is never silent.
+        setPlanError(toastApiError(e, toast, t) || t('common.error'));
+      }
     } finally {
       setIsPlanning(false);
       planAbortRef.current = null;
@@ -95,18 +108,35 @@ export default function ConductorPage() {
       await api.conductorRun(currentPlan.planId);
       toast.success(t('conductor.executing_bg'));
       let tries = 0;
-      const poll = setInterval(async () => {
+      let failures = 0;
+      if (approvePollRef.current) clearInterval(approvePollRef.current);
+      approvePollRef.current = setInterval(async () => {
         tries++;
-        const p = await api.getConductorPlan(currentPlan.planId);
-        if (p.status === 'complete' || p.status === 'error' || tries > 60) {
-          clearInterval(poll);
-          setIsRunning(false);
-          setInspectedPlan(p);
-          loadRecent();
+        try {
+          const p = await api.getConductorPlan(currentPlan.planId);
+          failures = 0;
+          if (p.status === 'complete' || p.status === 'error' || tries > 60) {
+            clearInterval(approvePollRef.current);
+            approvePollRef.current = null;
+            setIsRunning(false);
+            setInspectedPlan(p);
+            loadRecent();
+          }
+        } catch (e) {
+          // Transient blips are fine; stop + surface after persistent failure
+          // so the button doesn't stay in "Running…" forever.
+          failures++;
+          if (failures >= 3 || tries > 60) {
+            clearInterval(approvePollRef.current);
+            approvePollRef.current = null;
+            setIsRunning(false);
+            toastApiError(e, toast, t);
+            loadRecent();
+          }
         }
       }, 3000);
     } catch (e) {
-      toast.error(e.message);
+      toastApiError(e, toast, t);
       setIsRunning(false);
     }
   }
@@ -168,6 +198,15 @@ export default function ConductorPage() {
             </button>
           )}
         </div>
+        {planError && (
+          <div role="alert" style={{
+            marginTop: 10, padding: '8px 12px', borderRadius: 6, fontSize: 13,
+            background: 'var(--danger-bg, rgba(255,107,107,0.12))', color: 'var(--danger)',
+            border: '1px solid var(--danger)',
+          }}>
+            {planError}
+          </div>
+        )}
       </div>
 
       {currentPlan && (
