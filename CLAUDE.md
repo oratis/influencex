@@ -4,6 +4,8 @@
 @docs/memory.md — 项目记忆库：架构决策、历史包袱、生产环境关键事实、常见陷阱。新会话开工前**先扫一遍**避免重新踩坑。
 - `docs/ROADMAP.md` — 长期愿景（8 阶段 A→H）。仅在做战略决策时按需读
 - `docs/ROADMAP_2026-Q2.md` — 当前 Sprint 切片（6 周计划，4 大支柱）。日常按这份执行
+- `docs/E2E_REVIEW_2026-08.md` — 2026-08 全局 E2E review（当前缺陷清单权威来源）
+- `docs/MASTER_PLAN_2026-08.md` — 当前推进计划（PR 批次 + roadmap 完成度盘点）。日常按这份执行
 - `docs/STATUS_AND_GAPS.md` — 历史状态盘点（2026-04-22 后已冻结，仅供回看）
 - `docs/PLATFORM_AUDIT_2026-04.md` — 用户视角 UX 审计（修复进度见 ROADMAP_2026-Q2 §1）
 - `docs/KOL_FLOW_TEST_2026-04.md` — KOL 链路 E2E 测试报告（11/12 已修，剩 Hunter 扩展）
@@ -26,7 +28,7 @@ InfluenceX (https://influencexes.com) is an **invite-only AI marketing platform*
 - `server/agents-v2/` — 18 LLM agents (strategy, research, content-text/visual/voice/video, kol-outreach, publisher, ads, community, etc.)
 - `server/agent-runtime/` — agent registry + Conductor (goal → plan → run)
 - `server/llm/` — Anthropic + OpenAI + Gemini + 火山方舟 routing layer with cache + cost stats
-- `server/__tests__/` — 234 Node test runner unit tests (no frontend tests yet)
+- `server/__tests__/` — 377 Node test runner unit tests (frontend has 4 Vitest component tests in `client/src/components/*.test.jsx`)
 - `client/` — Vite + React 18 SPA (HashRouter); `client/src/pages/*.jsx` is one page per route
 - `docs/` — see file links above
 - `deploy.sh` / `migrate-env-to-secret.sh` / `setup-secrets.sh` — Cloud Run + Secret Manager helpers
@@ -127,7 +129,7 @@ node -e "const {Client}=require('pg');..."   # one-off queries
 
 | What | Where |
 |---|---|
-| Express app entry | `server/index.js` (~5100 lines, monolithic) |
+| Express app entry | `server/index.js` (~6500 lines, monolithic) |
 | Database driver dispatch | `server/database.js` (`usePostgres = DATABASE_URL.startsWith('postgresql://')`) |
 | Migrations | `server/migrations.js` (forward-only, tracked in `schema_migrations` table) |
 | Auth (session + JWT) | `server/auth.js` |
@@ -142,7 +144,7 @@ node -e "const {Client}=require('pg');..."   # one-off queries
 | Agent registry | `server/agent-runtime/index.js` |
 | Agents | `server/agents-v2/*.js` (one file per agent) |
 | Resend webhook | `POST /api/webhooks/resend/events` |
-| Invite acceptance flow | `POST /api/invitations`, `GET /api/invitations/:token`, `POST /api/invitations/:token/accept` |
+| Invite acceptance flow | `POST /api/workspaces/:id/members` (creates invitation for unregistered emails), `GET /api/invitations/:token`, `POST /api/invitations/:token/accept` |
 | Client routes | `client/src/App.jsx` (`<Routes>` for both auth'd + public) |
 | Pages | `client/src/pages/*.jsx` (21 pages) |
 | Reusable components | `client/src/components/*.jsx` (ErrorBoundary, ErrorCard, ContactThreadDrawer, TemplateManagerDrawer, etc.) |
@@ -185,8 +187,8 @@ Each prod deploy increments the Cloud Run revision number (`influencex-NNNNN-xxx
 
 - **Cloud Run logs:** `gcloud run services logs read influencex --region=us-central1 --limit=50`
 - **Postgres queries:** start `cloud-sql-proxy --port 5434 gameclaw-492005:us-central1:influencex-db` then connect with any pg client. Password is in `.env` DATABASE_URL
-- **No Sentry yet** — Sprint 1 task A1. Until then, ErrorBoundary just `console.error`s
-- **No OpenTelemetry yet** — Sprint 1 task A2
+- **Sentry** — wired server-side (`server/sentry.js`) + client-side since `891f209` (needs `SENTRY_DSN`)
+- **OpenTelemetry** — wired via `server/otel.js` since `8f00ad1` (needs OTLP endpoint env)
 
 ## Known Issues / Gotchas
 
