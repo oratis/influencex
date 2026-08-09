@@ -12,6 +12,7 @@
 
 const fetch = require('./proxy-fetch');
 const { safeFetchRaw } = require('./web/web-fetch');
+const { youtubeApiUrl } = require('./youtube-api');
 const apify = require('./apify-client');
 const apifyQuota = require('./apify-quota');
 const profileCache = require('./kol-profile-cache');
@@ -68,7 +69,7 @@ async function scrapeYouTube(profileUrl, username) {
       if (handle) {
         // Try forHandle first (cheaper, 1 unit)
         const handleRes = await fetch(
-          `https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=${encodeURIComponent(handle)}&key=${YOUTUBE_API_KEY}`
+          youtubeApiUrl('channels', { part: 'id', forHandle: handle, key: YOUTUBE_API_KEY })
         );
         const handleData = await handleRes.json();
         if (handleData.items?.length > 0) {
@@ -76,7 +77,7 @@ async function scrapeYouTube(profileUrl, username) {
         } else {
           // Fallback to search (100 units)
           const searchRes = await fetch(
-            `https://www.googleapis.com/youtube/v3/search?part=id&q=${encodeURIComponent(handle)}&type=channel&maxResults=1&key=${YOUTUBE_API_KEY}`
+            youtubeApiUrl('search', { part: 'id', q: handle, type: 'channel', maxResults: 1, key: YOUTUBE_API_KEY })
           );
           const searchData = await searchRes.json();
           channelId = searchData.items?.[0]?.id?.channelId;
@@ -87,7 +88,7 @@ async function scrapeYouTube(profileUrl, username) {
       const customName = profileUrl.match(/\/c\/([^/?&]+)/)?.[1];
       if (customName) {
         const searchRes = await fetch(
-          `https://www.googleapis.com/youtube/v3/search?part=id&q=${encodeURIComponent(customName)}&type=channel&maxResults=1&key=${YOUTUBE_API_KEY}`
+          youtubeApiUrl('search', { part: 'id', q: customName, type: 'channel', maxResults: 1, key: YOUTUBE_API_KEY })
         );
         const searchData = await searchRes.json();
         channelId = searchData.items?.[0]?.id?.channelId;
@@ -100,7 +101,11 @@ async function scrapeYouTube(profileUrl, username) {
 
     // Step 2: Get channel details (1-3 quota units)
     const channelRes = await fetch(
-      `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,brandingSettings&id=${encodeURIComponent(channelId)}&key=${YOUTUBE_API_KEY}`
+      youtubeApiUrl('channels', {
+        part: ['snippet', 'statistics', 'brandingSettings'],
+        id: channelId,
+        key: YOUTUBE_API_KEY,
+      })
     );
     const channelData = await channelRes.json();
 
@@ -124,14 +129,16 @@ async function scrapeYouTube(profileUrl, username) {
     let recentAvgViews = avgViews;
     try {
       const videosRes = await fetch(
-        `https://www.googleapis.com/youtube/v3/search?part=id&channelId=${encodeURIComponent(channelId)}&type=video&order=date&maxResults=10&key=${YOUTUBE_API_KEY}`
+        youtubeApiUrl('search', {
+          part: 'id', channelId, type: 'video', order: 'date', maxResults: 10, key: YOUTUBE_API_KEY,
+        })
       );
       const videosData = await videosRes.json();
       const videoIds = (videosData.items || []).map(v => v.id.videoId).filter(Boolean);
 
       if (videoIds.length > 0) {
         const statsRes = await fetch(
-          `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${videoIds.join(',')}&key=${YOUTUBE_API_KEY}`
+          youtubeApiUrl('videos', { part: 'statistics', id: videoIds, key: YOUTUBE_API_KEY })
         );
         const statsData = await statsRes.json();
         const videos = statsData.items || [];

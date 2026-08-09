@@ -57,6 +57,7 @@ const xDiscovery = require('./x-discovery');
 const redditDiscovery = require('./reddit-discovery');
 const apifyQuota = require('./apify-quota');
 const youtubeQuota = require('./youtube-quota');
+const { youtubeApiUrl } = require('./youtube-api');
 const { runPendingMigrations, MULTITENANT_TABLES: ORPHAN_AUDIT_TABLES } = require('./migrations');
 const emailTemplates = require('./email-templates');
 const csvExport = require('./csv-export');
@@ -6298,7 +6299,9 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email
           try {
             // Search channels
             const searchRes = await fetch(
-              `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(kw)}&maxResults=50&key=${YOUTUBE_API_KEY}`
+              youtubeApiUrl('search', {
+                part: 'snippet', type: 'channel', q: kw, maxResults: 50, key: YOUTUBE_API_KEY,
+              })
             );
             const searchData = await searchRes.json();
             if (searchData.error) { console.warn(`[BatchDiscovery] YouTube search error for "${kw}":`, searchData.error.message); continue; }
@@ -6308,7 +6311,11 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email
 
             // Get channel details in batch
             const statsRes = await fetch(
-              `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,contentDetails&id=${channelIds.map(encodeURIComponent).join(',')}&key=${YOUTUBE_API_KEY}`
+              youtubeApiUrl('channels', {
+                part: ['snippet', 'statistics', 'contentDetails'],
+                id: channelIds,
+                key: YOUTUBE_API_KEY,
+              })
             );
             const statsData = await statsRes.json();
 
@@ -6324,7 +6331,9 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email
               if (uploadsPlaylistId) {
                 try {
                   const plRes = await fetch(
-                    `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=1&key=${YOUTUBE_API_KEY}`
+                    youtubeApiUrl('playlistItems', {
+                      part: 'snippet', playlistId: uploadsPlaylistId, maxResults: 1, key: YOUTUBE_API_KEY,
+                    })
                   );
                   const plData = await plRes.json();
                   const latestDate = plData.items?.[0]?.snippet?.publishedAt;
@@ -6413,7 +6422,14 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email
             // For now, search YouTube for "tiktok" + keyword to find cross-platform creators
             if (!YOUTUBE_API_KEY) continue;
             const searchRes = await fetch(
-              `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q=${encodeURIComponent(kw)}&maxResults=20&key=${YOUTUBE_API_KEY}&publishedAfter=${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString()}`
+              youtubeApiUrl('search', {
+                part: 'snippet',
+                type: 'video',
+                q: kw,
+                maxResults: 20,
+                key: YOUTUBE_API_KEY,
+                publishedAfter: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString(),
+              })
             );
             const searchData = await searchRes.json();
             if (searchData.error) continue;
@@ -6423,7 +6439,7 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email
             if (videoIds.length === 0) continue;
 
             const vidRes = await fetch(
-              `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoIds.join(',')}&key=${YOUTUBE_API_KEY}`
+              youtubeApiUrl('videos', { part: 'snippet', id: videoIds, key: YOUTUBE_API_KEY })
             );
             const vidData = await vidRes.json();
 
