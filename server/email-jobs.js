@@ -157,6 +157,16 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
     // pipeline_jobs.stage stayed at 'send' forever, and the Pipeline page
     // showed it stuck mid-flight with no thread row and no event.
     const dryRun = !mailAgent.isConfigured() && !mailbox;
+    if (dryRun) {
+      // Everything below records a fully successful send, so this line is the
+      // only operator-facing signal that nothing actually went out. Nothing
+      // fails fast at boot without a mail provider (email.js isConfigured() is
+      // just a boolean), so this path is reachable in production — where it
+      // means outreach is silently going nowhere. Warn, don't swallow.
+      log.warn(
+        `[email-jobs] dry-run: no mail provider configured (RESEND_API_KEY / SMTP_* / mailbox account all absent) — contact ${contactId} will be marked sent without sending`
+      );
+    }
 
     await exec(
       `UPDATE contacts SET send_attempts = COALESCE(send_attempts, 0) + 1, last_send_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`,
