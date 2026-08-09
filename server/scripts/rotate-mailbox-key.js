@@ -42,10 +42,14 @@ if (!NEW_KEY) {
 }
 
 // Wire up the decryption module with the OLD key while we decrypt,
-// then swap in the NEW key to re-encrypt. Since the secrets module caches
-// the key on first use, we load it fresh per phase via module.cache deletion.
+// then swap in the NEW key to re-encrypt. The key is memoized on first use,
+// and it now lives in ../encryption (secrets.js is a facade over it), so both
+// modules get dropped from the require cache and the memo is cleared
+// explicitly — dropping only ../secrets would leave the old key in place.
 function freshSecretsWithKey(key) {
+  try { require('../encryption').resetKeyCache(); } catch { /* not loaded yet */ }
   delete require.cache[require.resolve('../secrets')];
+  delete require.cache[require.resolve('../encryption')];
   if (key === null) delete process.env.MAILBOX_ENCRYPTION_KEY;
   else process.env.MAILBOX_ENCRYPTION_KEY = key;
   return require('../secrets');

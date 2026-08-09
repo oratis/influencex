@@ -167,29 +167,109 @@ async function sendViaGmail({ to, subject, body, from, html, creds, onRefresh })
   return { success: true, messageId: data.id, provider: 'gmail_oauth' };
 }
 
+/**
+ * Strip anything that could terminate a header line.
+ *
+ * The subject and recipient reach here from user-editable fields (outreach
+ * template, contact record). Concatenating them into the raw RFC822 message
+ * means a subject of `Hi\r\nBcc: everyone@rival.example` injects a real Bcc
+ * header — the classic email header injection. CR and LF (plus the NULs and
+ * lone Unicode line separators some clients fold on) are removed outright
+ * rather than rejected, so a stray newline in a template doesn't hard-fail a
+ * send. Also caps length: RFC 5322 limits a header line to 998 octets.
+ */
+function sanitizeHeaderValue(value) {
+  return String(value ?? '')
+    .replace(/[\r\n\u2028\u2029\0]+/g, ' ')
+    .trim()
+    .slice(0, 900);
+}
+
+/**
+ * RFC 2047 encoded-word for header values containing non-ASCII. Without this
+ * a Chinese subject line goes onto the wire as raw UTF-8 in a header, which
+ * receivers are free to mangle. Base64 rather than Q-encoding because our
+ * non-ASCII case is CJK, where B is both shorter and simpler. Encoded words
+ * are capped at 75 chars including the delimiters, so long subjects are split
+ * across several folded words.
+ */
+function encodeHeaderValue(value) {
+  const clean = sanitizeHeaderValue(value);
+  if (!clean) return '';
+  if (/^[\x20-\x7E]*$/.test(clean)) return clean; // pure ASCII — leave as-is
+  const prefix = '=?UTF-8?B?';
+  const suffix = '?=';
+  // 36 input bytes → 48 base64 chars → 58 chars per encoded word. That keeps
+  // even `Subject: ` + one word inside the 78-char line budget of RFC 5322,
+  // and 36 divides evenly by 3 so CJK (3 bytes/char) never straddles a word.
+  const maxBytesPerWord = 36;
+  const buf = Buffer.from(clean, 'utf8');
+  const words = [];
+  let offset = 0;
+  while (offset < buf.length) {
+    let end = Math.min(offset + maxBytesPerWord, buf.length);
+    // Don't split a multi-byte character across words.
+    while (end < buf.length && (buf[end] & 0xC0) === 0x80) end--;
+    words.push(prefix + buf.subarray(offset, end).toString('base64') + suffix);
+    offset = end;
+  }
+  // Folding whitespace between encoded words: CRLF + space is the continuation.
+  return words.join('\r\n ');
+}
+
+/**
+ * Address headers (From / To) need the display name encoded but the
+ * addr-spec left alone — `=?UTF-8?B?...?=` around `<a@b.com>` would produce
+ * an unroutable address. Handles the `Name <addr>` form and bare addresses,
+ * and preserves comma-separated lists.
+ */
+function encodeAddressHeader(value) {
+  const clean = sanitizeHeaderValue(value);
+  if (!clean) return '';
+  return clean.split(',').map(part => {
+    const m = part.trim().match(/^(.*?)\s*<([^<>]*)>$/);
+    if (!m) return part.trim();
+    const [, name, addr] = m;
+    // An addr-spec is ASCII by definition; drop anything else rather than
+    // letting it through unencoded.
+    const safeAddr = addr.replace(/[^\x21-\x7E]/g, '');
+    if (!name) return `<${safeAddr}>`;
+    // Strip quotes the caller may have added; we re-quote or encode ourselves.
+    const bareName = name.replace(/^"|"$/g, '');
+    const encodedName = /^[\x20-\x7E]*$/.test(bareName)
+      ? `"${bareName.replace(/["\\]/g, '')}"`
+      : encodeHeaderValue(bareName);
+    return `${encodedName} <${safeAddr}>`;
+  }).join(', ');
+}
+
 function buildRFC822({ to, from, subject, text, html }) {
   // Minimal multipart/alternative so recipients with HTML-only clients still
-  // see a formatted body. Boundary is hard-coded because we fully own both
-  // parts — no user-supplied content can collide.
+  // see a formatted body. Boundary is random per message; the body parts are
+  // base64-encoded so user content can never collide with it, and so a
+  // non-ASCII body is not shipped as 8-bit under a `7bit` declaration.
   const boundary = 'influx_' + Math.random().toString(36).slice(2);
+  const plain = text || '';
+  const rich = html || plain.replace(/\n/g, '<br>');
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
   const lines = [
-    `From: ${from}`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `From: ${encodeAddressHeader(from)}`,
+    `To: ${encodeAddressHeader(to)}`,
+    `Subject: ${encodeHeaderValue(subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     '',
     `--${boundary}`,
     `Content-Type: text/plain; charset="UTF-8"`,
-    `Content-Transfer-Encoding: 7bit`,
+    `Content-Transfer-Encoding: base64`,
     '',
-    text || '',
+    b64(plain),
     '',
     `--${boundary}`,
     `Content-Type: text/html; charset="UTF-8"`,
-    `Content-Transfer-Encoding: 7bit`,
+    `Content-Transfer-Encoding: base64`,
     '',
-    html || (text || '').replace(/\n/g, '<br>'),
+    b64(rich),
     '',
     `--${boundary}--`,
     '',
@@ -205,4 +285,9 @@ module.exports = {
   fetchProfile,
   refreshAccessToken,
   sendViaGmail,
+  // Exported for tests / reuse by other raw-message builders.
+  buildRFC822,
+  sanitizeHeaderValue,
+  encodeHeaderValue,
+  encodeAddressHeader,
 };

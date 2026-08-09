@@ -6,7 +6,17 @@
  */
 
 const fetch = require('./proxy-fetch');
+const { safeFetchRaw } = require('./web/web-fetch');
+const log = require('./logger');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+
+// `content_url` is user-supplied, so `hostname.includes('tiktok.com')` was
+// never a platform check — `tiktok.com.attacker.example` passes it. Match the
+// registrable domain exactly, or as a subdomain suffix.
+function hostIs(hostname, ...domains) {
+  const h = String(hostname || '').toLowerCase();
+  return domains.some(d => h === d || h.endsWith('.' + d));
+}
 
 async function scrapeContentUrl(url) {
   if (!url) return null;
@@ -15,17 +25,17 @@ async function scrapeContentUrl(url) {
     const u = new URL(url);
 
     // YouTube video (including Shorts)
-    if (u.hostname.includes('youtube.com') || u.hostname.includes('youtu.be')) {
+    if (hostIs(u.hostname, 'youtube.com', 'youtu.be')) {
       return scrapeYouTubeVideo(url);
     }
 
     // TikTok video
-    if (u.hostname.includes('tiktok.com')) {
+    if (hostIs(u.hostname, 'tiktok.com')) {
       return scrapeTikTokVideo(url);
     }
 
     // Instagram Reel/Post
-    if (u.hostname.includes('instagram.com')) {
+    if (hostIs(u.hostname, 'instagram.com')) {
       return scrapeInstagramContent(url);
     }
 
@@ -58,7 +68,7 @@ async function scrapeYouTubeVideo(url) {
 
   try {
     const res = await fetch(
-      `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${videoId}&key=${YOUTUBE_API_KEY}`
+      `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${encodeURIComponent(videoId)}&key=${YOUTUBE_API_KEY}`
     );
     const data = await res.json();
     const video = data.items?.[0];
@@ -74,7 +84,7 @@ async function scrapeYouTubeVideo(url) {
       publish_date: video.snippet?.publishedAt?.split('T')[0] || '',
     };
   } catch (e) {
-    console.warn('YouTube video scrape error:', e.message);
+    log.warn('YouTube video scrape error:', e.message);
     return null;
   }
 }
@@ -86,19 +96,17 @@ async function scrapeTikTokVideo(url) {
     if (!res.ok) return null;
     const data = await res.json();
 
-    // oEmbed doesn't give view counts directly, try fetching the page
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    // oEmbed doesn't give view counts directly, try fetching the page.
+    // `url` is user-supplied → safeFetchRaw (HTTPS-only, private ranges
+    // blocked, every redirect hop re-validated).
     try {
-      const pageRes = await fetch(url, {
+      const { response: pageRes } = await safeFetchRaw(url, {
+        timeoutMs: 10000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
           'Accept': 'text/html',
         },
-        redirect: 'follow',
-        signal: controller.signal,
       });
-      clearTimeout(timeout);
       const html = await pageRes.text();
 
       // Try to extract from __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON
@@ -121,7 +129,7 @@ async function scrapeTikTokVideo(url) {
           }
         } catch { /* parse error */ }
       }
-    } catch { clearTimeout(timeout); }
+    } catch { /* page fetch blocked, timed out, or unparseable */ }
 
     // Fallback - return oEmbed data with zeros
     return {
@@ -134,7 +142,7 @@ async function scrapeTikTokVideo(url) {
       publish_date: '',
     };
   } catch (e) {
-    console.warn('TikTok video scrape error:', e.message);
+    log.warn('TikTok video scrape error:', e.message);
     return null;
   }
 }
@@ -142,20 +150,15 @@ async function scrapeTikTokVideo(url) {
 async function scrapeInstagramContent(url) {
   try {
     // Instagram oEmbed API (requires App Token for full access, but basic works)
-    // Try fetching the page directly first
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-
-    const pageRes = await fetch(url, {
+    // Try fetching the page directly first. `url` is user-supplied → safeFetchRaw.
+    const { response: pageRes } = await safeFetchRaw(url, {
+      timeoutMs: 10000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      redirect: 'follow',
-      signal: controller.signal,
     });
-    clearTimeout(timeout);
     const html = await pageRes.text();
 
     // Try extracting from meta tags
@@ -185,7 +188,7 @@ async function scrapeInstagramContent(url) {
     // If page scraping didn't work, return null (Instagram blocks most scraping)
     return null;
   } catch (e) {
-    console.warn('Instagram scrape error:', e.message);
+    log.warn('Instagram scrape error:', e.message);
     return null;
   }
 }

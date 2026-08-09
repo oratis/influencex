@@ -167,7 +167,9 @@ module.exports = {
       }
       try {
         const rows = await fetchXMentions({
-          accessToken: conn.access_token,
+          // Encrypted at rest (audit S-9); legacy plaintext rows decrypt to
+          // themselves.
+          accessToken: require('../publish/oauth').decryptToken(conn.access_token),
           handle: (conn.account_name || '').replace(/^@/, ''),
           sinceId: null,
         });

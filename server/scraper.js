@@ -11,6 +11,7 @@
  */
 
 const fetch = require('./proxy-fetch');
+const { safeFetchRaw } = require('./web/web-fetch');
 const apify = require('./apify-client');
 const apifyQuota = require('./apify-quota');
 const profileCache = require('./kol-profile-cache');
@@ -223,19 +224,18 @@ async function scrapeTikTok(profileUrl, username, opts = {}) {
   }
 
   try {
-    // Fetch TikTok profile page - extract Open Graph meta tags
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(profileUrl, {
+    // Fetch TikTok profile page - extract Open Graph meta tags.
+    // `profileUrl` comes straight from user input (KOL Database add /
+    // pipeline start), so it goes through safeFetchRaw: HTTPS-only, private
+    // and metadata ranges blocked, and every redirect hop re-validated.
+    const { response: res } = await safeFetchRaw(profileUrl, {
+      timeoutMs: 10000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      redirect: 'follow',
-      signal: controller.signal,
     });
-    clearTimeout(timeout);
 
     const html = await res.text();
 
@@ -532,17 +532,16 @@ function isPersonalWebsite(url) {
 // Scrape a Linktree/bio link page for email addresses
 async function scrapeLinktreeForEmail(url) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(url, {
+    // The link comes off a scraped creator profile — i.e. it is controlled by
+    // whoever owns that profile. safeFetchRaw keeps it off our metadata
+    // endpoint and re-checks each redirect hop.
+    const { response: res } = await safeFetchRaw(url, {
+      timeoutMs: 8000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Accept': 'text/html',
       },
-      redirect: 'follow',
-      signal: controller.signal,
     });
-    clearTimeout(timeout);
     const html = await res.text();
 
     // 1. Check for mailto: links
@@ -580,17 +579,14 @@ async function scrapeLinktreeForEmail(url) {
 // Scrape a personal website for contact email
 async function scrapeWebsiteForEmail(url) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(url, {
+    // Same as scrapeLinktreeForEmail: a creator-controlled outbound link.
+    const { response: res } = await safeFetchRaw(url, {
+      timeoutMs: 8000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Accept': 'text/html',
       },
-      redirect: 'follow',
-      signal: controller.signal,
     });
-    clearTimeout(timeout);
     const html = await res.text();
 
     // Check for mailto: first (most reliable)

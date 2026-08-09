@@ -9,6 +9,18 @@
  *
  * Actions are strings like "campaign.create", "kol.delete", "email.send".
  * When in doubt, prefer the least-privilege requirement.
+ *
+ * The shape of the model, stated once so route wiring stays consistent:
+ *   - viewer  — GET only. Every read route in a workspace, nothing that
+ *               writes, sends, spends money, or reveals a credential.
+ *               Note: exports are NOT read-only in this model — `data.export`
+ *               is editor+, because a CSV of every creator's contact email is
+ *               the whole database walking out of the building.
+ *   - editor  — everything viewer can do, plus create/edit of campaigns,
+ *               KOLs, contacts and content, sending outreach, running agents.
+ *               No deletes: destructive operations are admin-only.
+ *   - admin   — everything, plus member management, workspace settings,
+ *               mailbox + platform credentials, and every delete.
  */
 
 const PERMISSIONS = {
@@ -26,6 +38,15 @@ const PERMISSIONS = {
     'discovery.start', 'discovery.read',
     // Data
     'data.sync', 'data.export', 'data.read',
+    // Content assets: content pieces, prompt presets, brand voices,
+    // email templates, scheduled publishes, direct publishing
+    'content.create', 'content.update', 'content.delete', 'content.read',
+    // Running LLM agents / conductor plans (spends tokens and money)
+    'agent.run',
+    // Sending identities — API keys, SMTP passwords, OAuth refresh tokens
+    'mailbox.manage',
+    // Publishing platform connections — same class of secret as mailboxes
+    'connection.manage',
     // System
     'system.manage',
   ]),
@@ -36,6 +57,8 @@ const PERMISSIONS = {
     'email.send', 'email.approve',
     'discovery.start', 'discovery.read',
     'data.sync', 'data.export', 'data.read',
+    'content.create', 'content.update', 'content.read',
+    'agent.run',
   ]),
   viewer: new Set([
     'campaign.read',
@@ -43,6 +66,7 @@ const PERMISSIONS = {
     'contact.read',
     'discovery.read',
     'data.read',
+    'content.read',
   ]),
 };
 

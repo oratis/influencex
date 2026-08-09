@@ -194,10 +194,13 @@ async function runDirect(input, ctx) {
       results.push({ platform, success: false, error: `${platform} not connected for this workspace` });
       continue;
     }
-    const provider = publishOauth.getProvider(platform);
-    const credentials = provider?.kind === 'api_key'
-      ? (() => { try { return JSON.parse(conn.metadata || '{}'); } catch { return {}; } })()
-      : conn.access_token;
+    // Tokens / API-key metadata are encrypted at rest (audit S-9); the helper
+    // decrypts and passes legacy plaintext rows through unchanged.
+    const credentials = publishOauth.credentialsFromConnection(conn);
+    if (!credentials) {
+      results.push({ platform, success: false, error: `${platform} credentials could not be read — reconnect the account` });
+      continue;
+    }
 
     try {
       const r = await publishOauth.publishDirect(platform, credentials, {

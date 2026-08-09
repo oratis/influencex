@@ -81,6 +81,9 @@ const secrets = require('./secrets');
 const abSig = require('./ab-significance');
 const { defaultCache } = require('./cache');
 const apify = require('./apify-client');
+// Single guarded egress path for user-supplied URLs (SSRF: HTTPS-only,
+// private/metadata ranges blocked, every redirect hop re-validated).
+const { safeFetchRaw } = require('./web/web-fetch');
 
 // Shared job queue for background work (scraping, enrichment, etc)
 // Pick the queue backend at boot. With REDIS_URL set, BullMQ takes over —
@@ -894,10 +897,30 @@ app.delete(`${BASE_PATH}/api/invite-codes/:id`, authMiddleware, requirePlatformA
 // Public: look up an invite code (no auth needed). Returns workspace name +
 // remaining uses so the signup page can show context. Does NOT reveal the
 // creator email or full audit trail.
-app.get(`${BASE_PATH}/api/invite-codes/lookup/:code`, async (req, res) => {
+//
+// Rate-limited: the endpoint is unauthenticated and confirms whether a code
+// exists, and 8 base32 chars is only ~40 bits — cheap to sweep at a few
+// thousand RPS. 20/min per IP puts a full sweep out of reach while leaving
+// plenty of headroom for someone re-typing a code off a chat message.
+//
+// Its own key prefix (not the bare IP) keeps it out of the shared bucket
+// authLimiter/exportLimiter draw from, so a signup attempt can't burn a
+// login attempt and vice versa.
+const inviteLookupLimiter = rateLimit({
+  max: 20,
+  windowMs: 60 * 1000,
+  keyFn: (req) => `invite-lookup:${req.ip || req.headers['x-forwarded-for'] || 'anonymous'}`,
+  message: 'Too many invite code lookups, please slow down',
+});
+app.get(`${BASE_PATH}/api/invite-codes/lookup/:code`, inviteLookupLimiter, async (req, res) => {
   try {
     const code = String(req.params.code || '').trim().toUpperCase();
     if (!code) return res.status(400).json({ error: 'Code is required', code: 'CODE_REQUIRED' });
+    // Reject anything that isn't shaped like a code before touching the DB,
+    // so a scanner can't use query latency as an oracle and gets no row read.
+    if (!/^INFLX-[A-Z0-9]{8}$/.test(code)) {
+      return res.status(404).json({ error: 'Invite code not found', code: 'CODE_NOT_FOUND' });
+    }
     const ic = await queryOne(
       `SELECT ic.id, ic.code, ic.role, ic.max_uses, ic.used_count, ic.expires_at, ic.revoked_at, w.name AS workspace_name
        FROM invite_codes ic LEFT JOIN workspaces w ON ic.workspace_id = w.id
@@ -1099,7 +1122,7 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
 // workspace_id presence in every query.
 
 // List campaigns in the current workspace
-app.get(`${BASE_PATH}/api/campaigns`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns`, rbac.requirePermission('campaign.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -1139,7 +1162,7 @@ app.get(`${BASE_PATH}/api/campaigns`, async (req, res) => {
 });
 
 // Create campaign in the current workspace
-app.post(`${BASE_PATH}/api/campaigns`, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns`, rbac.requirePermission('campaign.create'), async (req, res) => {
   try {
     const { name, description, platforms, daily_target, filter_criteria, budget } = req.body;
     const id = uuidv4();
@@ -1155,7 +1178,7 @@ app.post(`${BASE_PATH}/api/campaigns`, async (req, res) => {
 });
 
 // Get single campaign — scoped so users can only see campaigns in their workspace
-app.get(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id`, rbac.requirePermission('campaign.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const campaign = await s.queryOne(
@@ -1172,7 +1195,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
 });
 
 // Update campaign
-app.put(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
+app.put(`${BASE_PATH}/api/campaigns/:id`, rbac.requirePermission('campaign.update'), async (req, res) => {
   try {
     const { name, description, platforms, daily_target, filter_criteria, status } = req.body;
     const s = scoped(req.workspace.id);
@@ -1188,7 +1211,7 @@ app.put(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
 });
 
 // Delete campaign
-app.delete(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/campaigns/:id`, rbac.requirePermission('campaign.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -1205,7 +1228,7 @@ app.delete(`${BASE_PATH}/api/campaigns/:id`, async (req, res) => {
 // ==================== KOL API ====================
 
 // List KOLs for a campaign
-app.get(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:campaignId/kols`, rbac.requirePermission('kol.read'), async (req, res) => {
   try {
     const { status, platform, search } = req.query;
     const s = scoped(req.workspace.id);
@@ -1225,7 +1248,7 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
 });
 
 // Add KOL (manual or from collection)
-app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const { platform, username, display_name, avatar_url, followers, engagement_rate, avg_views, category, email, contact_info, profile_url, bio } = req.body;
     const s = scoped(req.workspace.id);
@@ -1248,7 +1271,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols`, async (req, res) => {
 
 // Collect KOLs for a campaign — uses real YouTube Discovery API if configured,
 // falls back to demo sample generator if no API keys are set
-app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const campaign = await s.queryOne(
@@ -1327,7 +1350,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/kols/collect`, async (req, res)
 });
 
 // Batch update KOL status (must be before :id route)
-app.patch(`${BASE_PATH}/api/kols/batch`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/kols/batch`, rbac.requirePermission('kol.update'), async (req, res) => {
   try {
     const { ids, status } = req.body;
     await transaction(async (tx) => {
@@ -1342,7 +1365,7 @@ app.patch(`${BASE_PATH}/api/kols/batch`, async (req, res) => {
 });
 
 // Update KOL status (approve/reject)
-app.patch(`${BASE_PATH}/api/kols/:id`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/kols/:id`, rbac.requirePermission('kol.update'), async (req, res) => {
   try {
     const { status } = req.body;
     const s = scoped(req.workspace.id);
@@ -1357,7 +1380,7 @@ app.patch(`${BASE_PATH}/api/kols/:id`, async (req, res) => {
 // ==================== Contact API ====================
 
 // List contacts for a campaign
-app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const { status } = req.query;
     const s = scoped(req.workspace.id);
@@ -1375,7 +1398,7 @@ app.get(`${BASE_PATH}/api/campaigns/:campaignId/contacts`, async (req, res) => {
 });
 
 // Generate email for a KOL contact
-app.post(`${BASE_PATH}/api/contacts/generate`, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/generate`, rbac.requirePermission('contact.create'), async (req, res) => {
   try {
     const { kol_id, campaign_id, cooperation_type, price_quote } = req.body;
     const s = scoped(req.workspace.id);
@@ -1396,7 +1419,7 @@ app.post(`${BASE_PATH}/api/contacts/generate`, async (req, res) => {
 });
 
 // Update contact (edit email before sending)
-app.put(`${BASE_PATH}/api/contacts/:id`, async (req, res) => {
+app.put(`${BASE_PATH}/api/contacts/:id`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const { email_subject, email_body, cooperation_type, price_quote, notes,
             contract_status, contract_url, content_status, content_url, content_due_date,
@@ -1432,7 +1455,7 @@ app.put(`${BASE_PATH}/api/contacts/:id`, async (req, res) => {
 });
 
 // Update contact workflow status (contract, content, payment)
-app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const updates = [];
     const params = [];
@@ -1457,7 +1480,7 @@ app.patch(`${BASE_PATH}/api/contacts/:id/workflow`, async (req, res) => {
 // Enqueue an email send. Returns immediately with status='pending'; the
 // background job performs the actual provider call, records events, and
 // handles retries. Polling the contact's status shows progress.
-app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/send`, rbac.requirePermission('email.send'), sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
@@ -1495,7 +1518,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/send`, sendEmailLimiter, sendEmailWorksp
 });
 
 // Force-retry a failed send. Clears the error and re-enqueues.
-app.post(`${BASE_PATH}/api/contacts/:id/retry`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/retry`, rbac.requirePermission('email.send'), sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
@@ -1519,7 +1542,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/retry`, sendEmailLimiter, sendEmailWorks
 // rendering + A/B variant pick) to every contact before enqueuing. This lets
 // users go from "selected 30 drafts" → "fire one template across all" in one
 // action, matching the plan's "批量发送" flow.
-app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, rbac.requirePermission('email.send'), sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const { contact_ids = [], template_id } = req.body || {};
     if (!Array.isArray(contact_ids) || contact_ids.length === 0) {
@@ -1657,7 +1680,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, sendEmail
 });
 
 // Record reply (manual)
-app.post(`${BASE_PATH}/api/contacts/:id/reply`, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/reply`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const { reply_content } = req.body;
     const s = scoped(req.workspace.id);
@@ -1959,7 +1982,7 @@ async function maybeBlockKol(contactId, reason, opts = {}) {
 
 // Manually clear the block on a KOL's email (e.g., after confirming with
 // the creator that the bounce was transient).
-app.post(`${BASE_PATH}/api/kols/:id/unblock-email`, async (req, res) => {
+app.post(`${BASE_PATH}/api/kols/:id/unblock-email`, rbac.requirePermission('kol.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -1972,7 +1995,7 @@ app.post(`${BASE_PATH}/api/kols/:id/unblock-email`, async (req, res) => {
 });
 
 // Get email thread + event timeline for a contact
-app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
+app.get(`${BASE_PATH}/api/contacts/:id/thread`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const contact = await s.queryOne(
@@ -2068,7 +2091,7 @@ app.get(`${BASE_PATH}/api/contacts/:id/thread`, async (req, res) => {
 });
 
 // Get email thread for a pipeline job
-app.get(`${BASE_PATH}/api/pipeline/jobs/:id/thread`, async (req, res) => {
+app.get(`${BASE_PATH}/api/pipeline/jobs/:id/thread`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const job = await s.queryOne(
@@ -2113,7 +2136,7 @@ app.get(`${BASE_PATH}/api/pipeline/jobs/:id/thread`, async (req, res) => {
 });
 
 // Batch generate emails for all approved KOLs in a campaign
-app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, async (req, res) => {
+app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-generate`, rbac.requirePermission('contact.create'), async (req, res) => {
   try {
     const { cooperation_type, price_quote } = req.body;
     const workspaceId = req.workspace.id;
@@ -2166,7 +2189,7 @@ async function safeUpsertId(tx, table, itemId, workspaceId) {
 }
 
 // Get content performance data
-app.get(`${BASE_PATH}/api/data/content`, async (req, res) => {
+app.get(`${BASE_PATH}/api/data/content`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query('SELECT * FROM content_data WHERE workspace_id = ? ORDER BY publish_date DESC', [req.workspace.id]);
@@ -2177,7 +2200,7 @@ app.get(`${BASE_PATH}/api/data/content`, async (req, res) => {
 });
 
 // Add/update content data (manual or from Feishu sync)
-app.post(`${BASE_PATH}/api/data/content`, async (req, res) => {
+app.post(`${BASE_PATH}/api/data/content`, rbac.requirePermission('data.sync'), async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
     const wsId = req.workspace.id;
@@ -2205,7 +2228,7 @@ app.post(`${BASE_PATH}/api/data/content`, async (req, res) => {
 });
 
 // Get registration data
-app.get(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
+app.get(`${BASE_PATH}/api/data/registrations`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query('SELECT * FROM registration_data WHERE workspace_id = ? ORDER BY date ASC', [req.workspace.id]);
@@ -2216,7 +2239,7 @@ app.get(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
 });
 
 // Add/update registration data
-app.post(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
+app.post(`${BASE_PATH}/api/data/registrations`, rbac.requirePermission('data.sync'), async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
     const wsId = req.workspace.id;
@@ -2258,7 +2281,7 @@ app.post(`${BASE_PATH}/api/data/seed-demo`, requirePlatformAdmin, async (req, re
 // ==================== KOL Database API ====================
 
 // KOL scraper API status (must be before /:id route)
-app.get(`${BASE_PATH}/api/kol-database/api-status`, (req, res) => {
+app.get(`${BASE_PATH}/api/kol-database/api-status`, rbac.requirePermission('data.read'), (req, res) => {
   res.json(scraper.getApiStatus());
 });
 
@@ -2275,7 +2298,7 @@ app.get(`${BASE_PATH}/api/quota/apify`, (req, res) => {
 // Discovery platform availability — tells the UI which platform checkboxes
 // are usable so it can disable + label the rest. Computed from the same
 // env-var checks the discovery worker uses, so this is the source of truth.
-app.get(`${BASE_PATH}/api/discovery/platforms`, (req, res) => {
+app.get(`${BASE_PATH}/api/discovery/platforms`, rbac.requirePermission('data.read'), (req, res) => {
   res.json({
     platforms: [
       { id: 'youtube', configured: !!process.env.YOUTUBE_API_KEY, requires: 'YOUTUBE_API_KEY' },
@@ -2369,7 +2392,7 @@ function sendCsv(res, rows, columns, filename) {
 }
 
 // Export campaign KOLs to CSV
-app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, exportLimiter, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, rbac.requirePermission('data.export'), exportLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const campaign = await s.queryOne(
@@ -2389,7 +2412,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/kols/export`, exportLimiter, async (req,
 });
 
 // Export campaign contacts to CSV
-app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, rbac.requirePermission('data.export'), exportLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const campaign = await s.queryOne(
@@ -2412,7 +2435,7 @@ app.get(`${BASE_PATH}/api/campaigns/:id/contacts/export`, exportLimiter, async (
 });
 
 // Export the global KOL database to CSV
-app.get(`${BASE_PATH}/api/kol-database/export`, exportLimiter, async (req, res) => {
+app.get(`${BASE_PATH}/api/kol-database/export`, rbac.requirePermission('data.export'), exportLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -2426,7 +2449,7 @@ app.get(`${BASE_PATH}/api/kol-database/export`, exportLimiter, async (req, res) 
 });
 
 // Export all content data to CSV (current workspace only)
-app.get(`${BASE_PATH}/api/data/content/export`, exportLimiter, async (req, res) => {
+app.get(`${BASE_PATH}/api/data/content/export`, rbac.requirePermission('data.export'), exportLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query('SELECT * FROM content_data WHERE workspace_id = ? ORDER BY publish_date DESC', [req.workspace.id]);
@@ -2439,7 +2462,7 @@ app.get(`${BASE_PATH}/api/data/content/export`, exportLimiter, async (req, res) 
 // ==================== Scheduler ====================
 
 // Schedule a contact email for future send
-app.post(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/schedule`, rbac.requirePermission('email.send'), async (req, res) => {
   try {
     const { scheduled_send_at } = req.body;
     if (!scheduled_send_at) return res.status(400).json({ error: 'scheduled_send_at required (ISO 8601)' });
@@ -2459,7 +2482,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
 });
 
 // Cancel a scheduled send
-app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/contacts/:id/schedule`, rbac.requirePermission('email.send'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -2486,7 +2509,7 @@ app.post(`${BASE_PATH}/api/scheduler/tick`, authMiddleware, rbac.requirePermissi
 // ==================== Agent Runtime API (Phase A Week 2) ====================
 
 // List all registered agents
-app.get(`${BASE_PATH}/api/agents`, (req, res) => {
+app.get(`${BASE_PATH}/api/agents`, rbac.requirePermission('data.read'), (req, res) => {
   res.json({ agents: agentRuntime.listAgents() });
 });
 
@@ -2495,7 +2518,7 @@ app.get(`${BASE_PATH}/api/agents`, (req, res) => {
 // agent IDs.
 
 // Cost summary for the current workspace
-app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
+app.get(`${BASE_PATH}/api/agents/cost`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     // Portable "today" window: compare as ISO strings. Works on both
@@ -2521,7 +2544,7 @@ app.get(`${BASE_PATH}/api/agents/cost`, async (req, res) => {
 });
 
 // List agent runs (fixed path before /:id)
-app.get(`${BASE_PATH}/api/agents/runs`, async (req, res) => {
+app.get(`${BASE_PATH}/api/agents/runs`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const { agent_id, status, limit } = req.query;
     const s = scoped(req.workspace.id);
@@ -2539,7 +2562,7 @@ app.get(`${BASE_PATH}/api/agents/runs`, async (req, res) => {
 });
 
 // Get a single run with its traces
-app.get(`${BASE_PATH}/api/agents/runs/:runId`, async (req, res) => {
+app.get(`${BASE_PATH}/api/agents/runs/:runId`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const run = await s.queryOne('SELECT * FROM agent_runs WHERE id = ? AND workspace_id = ?', [req.params.runId, req.workspace.id]);
@@ -2555,14 +2578,14 @@ app.get(`${BASE_PATH}/api/agents/runs/:runId`, async (req, res) => {
 });
 
 // Get a single agent's metadata — generic /:id MUST come last
-app.get(`${BASE_PATH}/api/agents/:id`, (req, res) => {
+app.get(`${BASE_PATH}/api/agents/:id`, rbac.requirePermission('data.read'), (req, res) => {
   const agent = agentRuntime.getAgent(req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   res.json(agent);
 });
 
 // Run an agent. Returns { runId } immediately; use streamAgentRun for events.
-app.post(`${BASE_PATH}/api/agents/:id/run`, async (req, res) => {
+app.post(`${BASE_PATH}/api/agents/:id/run`, rbac.requirePermission('agent.run'), async (req, res) => {
   try {
     const agent = agentRuntime.getAgent(req.params.id);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -2680,7 +2703,7 @@ app.get(`${BASE_PATH}/api/agents/runs/:runId/stream`, async (req, res) => {
 
 // ==================== Content Pieces (saved agent outputs) ====================
 
-app.get(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
+app.get(`${BASE_PATH}/api/content/pieces`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const { type, status, limit } = req.query;
     const s = scoped(req.workspace.id);
@@ -2701,7 +2724,7 @@ app.get(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
   }
 });
 
-app.post(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
+app.post(`${BASE_PATH}/api/content/pieces`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { type, title, body, metadata, status, created_by_agent_run_id } = req.body;
     if (!title && !body) return res.status(400).json({ error: 'title or body required' });
@@ -2717,7 +2740,7 @@ app.post(`${BASE_PATH}/api/content/pieces`, async (req, res) => {
   }
 });
 
-app.patch(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/content/pieces/:id`, rbac.requirePermission('content.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const updates = [];
@@ -2740,7 +2763,7 @@ app.patch(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
   }
 });
 
-app.delete(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/content/pieces/:id`, rbac.requirePermission('content.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -2757,27 +2780,20 @@ app.delete(`${BASE_PATH}/api/content/pieces/:id`, async (req, res) => {
 // Proxy-fetch a remote URL and return its bytes as a data URL. Used by
 // Content Studio to persist generated images before their source URLs
 // expire. Basic SSRF guards: HTTPS only, no private IPs, 10MB cap.
-app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, async (req, res) => {
+app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { url } = req.body || {};
     if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url is required' });
-    if (!/^https:\/\//i.test(url)) return res.status(400).json({ error: 'Only HTTPS URLs accepted' });
-    // Block anything that looks like a private / metadata host
-    try {
-      const host = new URL(url).hostname;
-      if (/^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host === 'localhost' || host.endsWith('.internal')) {
-        return res.status(400).json({ error: 'URL points to a blocked host range' });
-      }
-    } catch { return res.status(400).json({ error: 'Invalid URL' }); }
 
-    const fetch = require('./proxy-fetch');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    // The old inline host check only ever saw the URL the caller passed, so a
+    // 302 from an attacker-controlled host to http://169.254.169.254/ walked
+    // straight past it. safeFetchRaw follows redirects manually and re-runs
+    // the host check on every hop.
     let r;
     try {
-      r = await fetch(url, { signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
+      ({ response: r } = await safeFetchRaw(url, { timeoutMs: 30000 }));
+    } catch (e) {
+      return res.status(400).json({ error: e.message || 'Refused to fetch that URL' });
     }
     if (!r.ok) return res.status(502).json({ error: `Upstream ${r.status}` });
 
@@ -2803,19 +2819,53 @@ app.post(`${BASE_PATH}/api/util/fetch-as-data-url`, async (req, res) => {
 // ==================== Platform OAuth Connections ====================
 
 const publishOauth = require('./publish/oauth');
-const { encrypt: encryptSecret } = require('./encryption');
+
+// oauth_states rows were only ever deleted on a *successful* callback, so
+// every abandoned or failed authorize flow left a row behind forever — an
+// unbounded table of replayable CSRF tokens. States now carry a hard TTL:
+// the callback won't accept one older than this, and a periodic sweep
+// (wired in the app.listen block) reaps the leftovers.
+//
+// 10 minutes matches the in-memory TTL the Gmail OAuth flow already uses
+// (server/mailbox-oauth-gmail.js) and is well beyond a real consent round-trip.
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+function oauthStateCutoffIso() {
+  return new Date(Date.now() - OAUTH_STATE_TTL_MS).toISOString();
+}
+// created_at is written as a JS ISO string (not the column default) so this
+// comparison behaves the same on Postgres (string cast to timestamp) and
+// SQLite (lexicographic on ISO-8601). Rows predating this change carry the
+// old "YYYY-MM-DD HH:MM:SS" default, which sorts below any ISO string and is
+// therefore always treated as expired — correct, they are abandoned flows.
+async function sweepExpiredOauthStates() {
+  try {
+    const r = await exec('DELETE FROM oauth_states WHERE created_at < ?', [oauthStateCutoffIso()]);
+    if (r.rowCount) log.debug(`[oauth] swept ${r.rowCount} expired oauth_states row(s)`);
+    return r.rowCount || 0;
+  } catch (e) {
+    log.warn('[oauth] state sweep failed:', e.message);
+    return 0;
+  }
+}
 
 // List available platforms + their configured/connected state for this workspace
-app.get(`${BASE_PATH}/api/publish/platforms`, async (req, res) => {
+app.get(`${BASE_PATH}/api/publish/platforms`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const providers = publishOauth.listProviders();
     const s = scoped(req.workspace.id);
     const existing = await s.query(
-      'SELECT platform, account_name, account_id, connected_at, expires_at FROM platform_connections WHERE workspace_id = ?',
+      'SELECT * FROM platform_connections WHERE workspace_id = ?',
       [req.workspace.id]
     );
+    // sanitizeConnection is the platform-connection twin of sanitizeMailbox:
+    // it drops access_token / refresh_token / metadata and returns booleans
+    // plus non-secret hints. Going through it (rather than hand-picking
+    // columns in the SELECT) means a future `SELECT *` or added column can't
+    // silently start leaking a token.
     const connectedMap = {};
-    for (const row of existing.rows || []) connectedMap[row.platform] = row;
+    for (const row of existing.rows || []) {
+      connectedMap[row.platform] = publishOauth.sanitizeConnection(row);
+    }
 
     res.json({
       platforms: providers.map(p => ({
@@ -2829,7 +2879,7 @@ app.get(`${BASE_PATH}/api/publish/platforms`, async (req, res) => {
 });
 
 // Begin OAuth flow — returns the authorize URL; caller opens it in a new tab
-app.post(`${BASE_PATH}/api/publish/oauth/:provider/init`, async (req, res) => {
+app.post(`${BASE_PATH}/api/publish/oauth/:provider/init`, rbac.requirePermission('connection.manage'), async (req, res) => {
   try {
     const provider = req.params.provider;
     if (!publishOauth.getProvider(provider)) return res.status(404).json({ error: 'Unknown provider' });
@@ -2841,8 +2891,8 @@ app.post(`${BASE_PATH}/api/publish/oauth/:provider/init`, async (req, res) => {
       userId: req.user.id,
     });
     await exec(
-      'INSERT INTO oauth_states (state, workspace_id, user_id, platform, code_verifier) VALUES (?, ?, ?, ?, ?)',
-      [state, req.workspace.id, req.user.id, provider, codeVerifier || null]
+      'INSERT INTO oauth_states (state, workspace_id, user_id, platform, code_verifier, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [state, req.workspace.id, req.user.id, provider, codeVerifier || null, new Date().toISOString()]
     );
     res.json({ authorize_url: url, state, redirect_uri: redirect });
   } catch (e) {
@@ -2861,7 +2911,13 @@ app.get(`${BASE_PATH}/api/publish/oauth/:provider/callback`, async (req, res) =>
     }
     if (!code || !state) return res.status(400).send('missing code/state');
 
-    const row = await queryOne('SELECT * FROM oauth_states WHERE state = ?', [state]);
+    // TTL enforced in the lookup itself: an expired state is indistinguishable
+    // from an unknown one, so the response can't be used to probe which states
+    // exist.
+    const row = await queryOne(
+      'SELECT * FROM oauth_states WHERE state = ? AND created_at >= ?',
+      [state, oauthStateCutoffIso()]
+    );
     if (!row) return res.status(400).send('state mismatch or expired');
     if (row.platform !== provider) return res.status(400).send('platform mismatch');
 
@@ -2879,13 +2935,12 @@ app.get(`${BASE_PATH}/api/publish/oauth/:provider/callback`, async (req, res) =>
     );
     const expiresAt = tokenInfo.expires_in ? new Date(Date.now() + tokenInfo.expires_in * 1000).toISOString() : null;
 
-    // Providers that carry a `encryptTokens: true` flag (currently gmail) get
-    // their access_token + refresh_token encrypted at rest. Other providers
-    // continue to store plaintext — intentional: migrating every existing row
-    // is a separate change, and mixing encrypted/plaintext is safe because
-    // decrypt() passes plaintext through via the enc: prefix check.
-    const providerMeta = publishOauth.getProvider(provider);
-    const maybeEncrypt = providerMeta?.encryptTokens ? encryptSecret : (v => v);
+    // Audit S-9: every provider's tokens are encrypted at rest now, not just
+    // the ones flagged `encryptTokens`. Reads go through
+    // publishOauth.credentialsFromConnection(), whose decrypt passes legacy
+    // plaintext rows through untouched — so old rows keep working and are
+    // re-encrypted by this very statement on the next reconnect/refresh.
+    const maybeEncrypt = publishOauth.encryptToken;
 
     if (existingConn) {
       await exec(
@@ -2910,7 +2965,7 @@ app.get(`${BASE_PATH}/api/publish/oauth/:provider/callback`, async (req, res) =>
 
 // API-key connect — for Medium / Ghost / WordPress (non-OAuth platforms).
 // Body: { fields: { <field_name>: value, ... } } matching provider.fields
-app.post(`${BASE_PATH}/api/publish/connect/:platform`, async (req, res) => {
+app.post(`${BASE_PATH}/api/publish/connect/:platform`, rbac.requirePermission('connection.manage'), async (req, res) => {
   try {
     const platform = req.params.platform;
     const provider = publishOauth.getProvider(platform);
@@ -2935,7 +2990,10 @@ app.post(`${BASE_PATH}/api/publish/connect/:platform`, async (req, res) => {
       'SELECT id FROM platform_connections WHERE workspace_id = ? AND platform = ?',
       [req.workspace.id, platform]
     );
-    const metadata = JSON.stringify(fields);
+    // The `fields` object IS the credential for these platforms (API tokens,
+    // admin keys). Encrypted with the same envelope as OAuth tokens rather
+    // than dropped into the column as readable JSON (audit S-9).
+    const metadata = publishOauth.encryptToken(JSON.stringify(fields));
     if (existing) {
       await exec(
         'UPDATE platform_connections SET account_name=?, metadata=?, connected_at=CURRENT_TIMESTAMP, connected_by=? WHERE id=?',
@@ -2953,7 +3011,7 @@ app.post(`${BASE_PATH}/api/publish/connect/:platform`, async (req, res) => {
   }
 });
 
-app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, rbac.requirePermission('connection.manage'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const r = await s.exec(
@@ -2968,7 +3026,7 @@ app.delete(`${BASE_PATH}/api/publish/platforms/:platform`, async (req, res) => {
 });
 
 // Direct publish: uses stored platform connection to post for real
-app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
+app.post(`${BASE_PATH}/api/publish/direct/:platform`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const platform = req.params.platform;
     const { text, image_url, title, tags } = req.body;
@@ -2981,11 +3039,11 @@ app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
     );
     if (!conn) return res.status(400).json({ error: `${platform} not connected for this workspace` });
 
-    const provider = publishOauth.getProvider(platform);
-    // API-key platforms store their creds JSON in metadata; OAuth platforms use access_token.
-    const credentials = provider?.kind === 'api_key'
-      ? (() => { try { return JSON.parse(conn.metadata || '{}'); } catch { return {}; } })()
-      : conn.access_token;
+    // API-key platforms store their creds JSON in metadata; OAuth platforms
+    // use access_token. Both are encrypted at rest — the helper decrypts and
+    // passes legacy plaintext rows through unchanged.
+    const credentials = publishOauth.credentialsFromConnection(conn);
+    if (!credentials) return res.status(400).json({ error: `${platform} credentials could not be read — reconnect the account` });
     const result = await publishOauth.publishDirect(platform, credentials, { text, title, tags, imageUrl: image_url });
 
     await exec(
@@ -3010,7 +3068,7 @@ app.post(`${BASE_PATH}/api/publish/direct/:platform`, async (req, res) => {
 
 // ==================== Scheduled Publishes ====================
 
-app.get(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
+app.get(`${BASE_PATH}/api/scheduled-publishes`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const { status, limit } = req.query;
     const s = scoped(req.workspace.id);
@@ -3032,7 +3090,7 @@ app.get(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
   }
 });
 
-app.post(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
+app.post(`${BASE_PATH}/api/scheduled-publishes`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { content_piece_id, platforms, scheduled_at, mode, content } = req.body;
     if (!Array.isArray(platforms) || platforms.length === 0) return res.status(400).json({ error: 'platforms[] is required' });
@@ -3065,7 +3123,7 @@ app.post(`${BASE_PATH}/api/scheduled-publishes`, async (req, res) => {
   }
 });
 
-app.delete(`${BASE_PATH}/api/scheduled-publishes/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/scheduled-publishes/:id`, rbac.requirePermission('content.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const r = await s.exec(
@@ -3094,7 +3152,7 @@ app.post(`${BASE_PATH}/api/scheduled-publishes/tick`, authMiddleware, rbac.requi
 // ==================== Analytics ====================
 
 // Preset effectiveness — usage + derived pieces + cost per-preset
-app.get(`${BASE_PATH}/api/analytics/presets`, async (req, res) => {
+app.get(`${BASE_PATH}/api/analytics/presets`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const presets = await s.query(
@@ -3108,7 +3166,7 @@ app.get(`${BASE_PATH}/api/analytics/presets`, async (req, res) => {
 });
 
 // Platform performance from scheduled_publishes — count per status per platform
-app.get(`${BASE_PATH}/api/analytics/platforms`, async (req, res) => {
+app.get(`${BASE_PATH}/api/analytics/platforms`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -3138,7 +3196,7 @@ app.get(`${BASE_PATH}/api/analytics/platforms`, async (req, res) => {
 });
 
 // Agent performance — breakdown of runs, cost, avg duration, error rate
-app.get(`${BASE_PATH}/api/analytics/agents`, async (req, res) => {
+app.get(`${BASE_PATH}/api/analytics/agents`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -3174,7 +3232,7 @@ app.get(`${BASE_PATH}/api/analytics/agents`, async (req, res) => {
 });
 
 // Content library breakdown — pieces per type, per status
-app.get(`${BASE_PATH}/api/analytics/content`, async (req, res) => {
+app.get(`${BASE_PATH}/api/analytics/content`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -3194,7 +3252,7 @@ app.get(`${BASE_PATH}/api/analytics/content`, async (req, res) => {
 
 // ==================== Prompt Presets ====================
 
-app.get(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
+app.get(`${BASE_PATH}/api/prompt-presets`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const { type, agent_id, limit } = req.query;
     const s = scoped(req.workspace.id);
@@ -3212,7 +3270,7 @@ app.get(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
   }
 });
 
-app.post(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
+app.post(`${BASE_PATH}/api/prompt-presets`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { name, description, prompt, type, agent_id, tags } = req.body;
     if (!name || !prompt || !type) return res.status(400).json({ error: 'name, prompt, and type are required' });
@@ -3228,7 +3286,7 @@ app.post(`${BASE_PATH}/api/prompt-presets`, async (req, res) => {
   }
 });
 
-app.patch(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/prompt-presets/:id`, rbac.requirePermission('content.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const updates = [];
@@ -3248,7 +3306,7 @@ app.patch(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
   }
 });
 
-app.delete(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/prompt-presets/:id`, rbac.requirePermission('content.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const r = await s.exec('DELETE FROM prompt_presets WHERE id = ? AND workspace_id = ?', [req.params.id, req.workspace.id]);
@@ -3260,7 +3318,7 @@ app.delete(`${BASE_PATH}/api/prompt-presets/:id`, async (req, res) => {
 });
 
 // Track preset usage (called by Studio when a preset is applied)
-app.post(`${BASE_PATH}/api/prompt-presets/:id/use`, async (req, res) => {
+app.post(`${BASE_PATH}/api/prompt-presets/:id/use`, rbac.requirePermission('content.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     await s.exec('UPDATE prompt_presets SET use_count = use_count + 1 WHERE id = ? AND workspace_id = ?', [req.params.id, req.workspace.id]);
@@ -3272,7 +3330,7 @@ app.post(`${BASE_PATH}/api/prompt-presets/:id/use`, async (req, res) => {
 
 // ==================== Brand Voices ====================
 
-app.get(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
+app.get(`${BASE_PATH}/api/brand-voices`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -3291,7 +3349,7 @@ app.get(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
   }
 });
 
-app.post(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
+app.post(`${BASE_PATH}/api/brand-voices`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { name, description, tone_words, do_examples, dont_examples, style_guide, is_default } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
@@ -3334,7 +3392,7 @@ app.post(`${BASE_PATH}/api/brand-voices`, async (req, res) => {
   }
 });
 
-app.delete(`${BASE_PATH}/api/brand-voices/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/brand-voices/:id`, rbac.requirePermission('content.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -3353,7 +3411,7 @@ app.delete(`${BASE_PATH}/api/brand-voices/:id`, async (req, res) => {
 // List inbox rows for the current workspace. Supports filters:
 //   status=open|resolved|snoozed, platform=twitter, priority=urgent|normal|low,
 //   sentiment=negative|..., limit=50, offset=0.
-app.get(`${BASE_PATH}/api/inbox-messages`, async (req, res) => {
+app.get(`${BASE_PATH}/api/inbox-messages`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const clauses = ['workspace_id = ?'];
@@ -3391,7 +3449,7 @@ app.get(`${BASE_PATH}/api/inbox-messages`, async (req, res) => {
 
 // Update a single inbox row — typically flipping status (open → resolved),
 // assigning to a user, or editing the draft_reply before send.
-app.patch(`${BASE_PATH}/api/inbox-messages/:id`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/inbox-messages/:id`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const allowed = ['status', 'priority', 'assignee_user_id', 'draft_reply', 'sentiment'];
@@ -3420,7 +3478,7 @@ app.patch(`${BASE_PATH}/api/inbox-messages/:id`, async (req, res) => {
 // Body: { platform: 'instagram' | 'tiktok', urls: ['...', ...], limit_per?: 50 }
 // Idempotent — the (workspace_id, platform, external_id) unique index prevents
 // dups on re-sync. Returns counts of inserted vs skipped.
-app.post(`${BASE_PATH}/api/inbox-messages/sync-apify`, async (req, res) => {
+app.post(`${BASE_PATH}/api/inbox-messages/sync-apify`, rbac.requirePermission('data.sync'), async (req, res) => {
   try {
     const commentHarvest = require('./comment-harvest');
     const { platform, urls, limit_per = 50 } = req.body || {};
@@ -3478,7 +3536,7 @@ app.post(`${BASE_PATH}/api/inbox-messages/sync-apify`, async (req, res) => {
 // kind so the palette stays snappy even with large workspaces. Uses LIKE
 // with a single param so SQLite + Postgres run the same path. Workspace
 // scoping is mandatory — no cross-tenant leakage.
-app.get(`${BASE_PATH}/api/search`, async (req, res) => {
+app.get(`${BASE_PATH}/api/search`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
     if (!q) return res.json({ kols: [], contacts: [], campaigns: [] });
@@ -3525,7 +3583,7 @@ app.get(`${BASE_PATH}/api/search`, async (req, res) => {
 // Standalone review harvest (no LLM analysis, returns reviews + rule-based
 // sentiment summary). Cheaper than running review-miner if you just want the
 // raw data. Body: { source: 'steam'|'app-store'|'play-store', app_id, country?, limit? }
-app.post(`${BASE_PATH}/api/reviews/harvest`, async (req, res) => {
+app.post(`${BASE_PATH}/api/reviews/harvest`, rbac.requirePermission('agent.run'), async (req, res) => {
   try {
     const reviewHarvest = require('./review-harvest');
     const { source, app_id, country = 'us', limit = 200 } = req.body || {};
@@ -3550,7 +3608,7 @@ app.post(`${BASE_PATH}/api/reviews/harvest`, async (req, res) => {
 // Returns { plan, cost, runId } once the agent finishes, or 400 on validation /
 // 504 on timeout. The underlying run is still persisted to agent_runs /
 // agent_traces for audit parity with the generic /api/agents/:id/run path.
-app.post(`${BASE_PATH}/api/ads/plan`, async (req, res) => {
+app.post(`${BASE_PATH}/api/ads/plan`, rbac.requirePermission('agent.run'), async (req, res) => {
   const AGENT_ID = 'ads';
   const TIMEOUT_MS = 120_000;
   try {
@@ -3610,7 +3668,7 @@ app.post(`${BASE_PATH}/api/ads/plan`, async (req, res) => {
 // Mirrors /api/ads/plan: persists run + traces, resolves on 'complete',
 // rejects on 'error' or timeout. Returns { translations, source_language,
 // cost, runId }.
-app.post(`${BASE_PATH}/api/translate`, async (req, res) => {
+app.post(`${BASE_PATH}/api/translate`, rbac.requirePermission('agent.run'), async (req, res) => {
   const AGENT_ID = 'translate';
   const TIMEOUT_MS = 120_000;
   try {
@@ -3667,7 +3725,7 @@ app.post(`${BASE_PATH}/api/translate`, async (req, res) => {
 });
 
 // Conductor — build a plan from a goal
-app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
+app.post(`${BASE_PATH}/api/conductor/plan`, rbac.requirePermission('agent.run'), async (req, res) => {
   try {
     const { goal } = req.body;
     if (!goal) return res.status(400).json({ error: 'goal is required' });
@@ -3690,7 +3748,7 @@ app.post(`${BASE_PATH}/api/conductor/plan`, async (req, res) => {
 });
 
 // Conductor — list plans in the current workspace
-app.get(`${BASE_PATH}/api/conductor/plans`, async (req, res) => {
+app.get(`${BASE_PATH}/api/conductor/plans`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -3704,7 +3762,7 @@ app.get(`${BASE_PATH}/api/conductor/plans`, async (req, res) => {
 });
 
 // Conductor — get a single plan with step status
-app.get(`${BASE_PATH}/api/conductor/plans/:id`, async (req, res) => {
+app.get(`${BASE_PATH}/api/conductor/plans/:id`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const plan = await s.queryOne(
@@ -3722,7 +3780,7 @@ app.get(`${BASE_PATH}/api/conductor/plans/:id`, async (req, res) => {
 // Conductor — approve + kick off execution
 // Runs each step sequentially (DAG support can come later). Each step
 // is dispatched as an agent run; the step stores the resulting runId.
-app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, async (req, res) => {
+app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('agent.run'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const plan = await s.queryOne(
@@ -3920,7 +3978,7 @@ app.get(`${BASE_PATH}/api/apify/status`, (req, res) => {
 // ==================== ROI Dashboard ====================
 
 // Aggregated ROI metrics for a campaign
-app.get(`${BASE_PATH}/api/campaigns/:id/roi`, async (req, res) => {
+app.get(`${BASE_PATH}/api/campaigns/:id/roi`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     // Verify campaign is in this workspace before running aggregation
     const parent = await queryOne(
@@ -3939,12 +3997,12 @@ app.get(`${BASE_PATH}/api/campaigns/:id/roi`, async (req, res) => {
 // ==================== Email Templates ====================
 
 // List available templates
-app.get(`${BASE_PATH}/api/email-templates`, (req, res) => {
+app.get(`${BASE_PATH}/api/email-templates`, rbac.requirePermission('content.read'), (req, res) => {
   res.json(emailTemplates.listTemplates());
 });
 
 // Render a template with variables (preview)
-app.post(`${BASE_PATH}/api/email-templates/:id/render`, (req, res) => {
+app.post(`${BASE_PATH}/api/email-templates/:id/render`, rbac.requirePermission('content.read'), (req, res) => {
   try {
     const rendered = emailTemplates.renderEmail(req.params.id, req.body.variables || {});
     res.json(rendered);
@@ -3958,7 +4016,7 @@ app.post(`${BASE_PATH}/api/email-templates/:id/render`, (req, res) => {
 // List templates: built-in + workspace's custom ones.
 // Only parent templates are returned here (variant_of IS NULL). Variant
 // children are fetched separately via /email-templates/:id/variants.
-app.get(`${BASE_PATH}/api/email-templates/all`, async (req, res) => {
+app.get(`${BASE_PATH}/api/email-templates/all`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const builtin = emailTemplates.listTemplates().map(t => ({ ...t, source: 'builtin' }));
     if (!req.workspace?.id) return res.json({ builtin, custom: [] });
@@ -3981,7 +4039,7 @@ app.get(`${BASE_PATH}/api/email-templates/all`, async (req, res) => {
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.post(`${BASE_PATH}/api/email-templates`, async (req, res) => {
+app.post(`${BASE_PATH}/api/email-templates`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { name, language, cooperation_type, subject, body, variables } = req.body || {};
     if (!name || !subject || !body) return res.status(400).json({ error: 'name, subject, body required' });
@@ -3997,7 +4055,7 @@ app.post(`${BASE_PATH}/api/email-templates`, async (req, res) => {
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.put(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
+app.put(`${BASE_PATH}/api/email-templates/:id`, rbac.requirePermission('content.update'), async (req, res) => {
   try {
     const { name, language, cooperation_type, subject, body, variables } = req.body || {};
     const s = scoped(req.workspace.id);
@@ -4019,7 +4077,7 @@ app.put(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.delete(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/email-templates/:id`, rbac.requirePermission('content.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     // Deleting a parent cascades to its variants (kept tidy — variants alone
@@ -4038,7 +4096,7 @@ app.delete(`${BASE_PATH}/api/email-templates/:id`, async (req, res) => {
 });
 
 // List variants for a given template (the parent + all variants).
-app.get(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
+app.get(`${BASE_PATH}/api/email-templates/:id/variants`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const parent = await s.queryOne(
@@ -4056,7 +4114,7 @@ app.get(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
 
 // Create a new variant of an existing template. Body mirrors the parent
 // CRUD but inherits language / cooperation_type from the parent if absent.
-app.post(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
+app.post(`${BASE_PATH}/api/email-templates/:id/variants`, rbac.requirePermission('content.create'), async (req, res) => {
   try {
     const { variant_label, subject, body, variables } = req.body || {};
     if (!subject || !body) return res.status(400).json({ error: 'subject, body required' });
@@ -4089,7 +4147,7 @@ app.post(`${BASE_PATH}/api/email-templates/:id/variants`, async (req, res) => {
 // one (auto-winner mode). Otherwise we do uniform random pick across
 // parent + variants. In both cases we record template_id/variant_id on the
 // contact so the thread + stats can attribute outcomes back.
-app.post(`${BASE_PATH}/api/contacts/:id/pick-variant`, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/pick-variant`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const { template_id } = req.body || {};
     if (!template_id) return res.status(400).json({ error: 'template_id required' });
@@ -4140,7 +4198,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/pick-variant`, async (req, res) => {
 // Toggle the auto-promote flag on a parent template. When ON, the stats
 // endpoint will set winner_variant_id automatically once the suggested
 // winner is statistically significant. Admin controls this per-template.
-app.patch(`${BASE_PATH}/api/email-templates/:id/auto-promote`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/email-templates/:id/auto-promote`, rbac.requirePermission('content.update'), async (req, res) => {
   try {
     const enabled = !!req.body?.enabled;
     const s = scoped(req.workspace.id);
@@ -4157,7 +4215,7 @@ app.patch(`${BASE_PATH}/api/email-templates/:id/auto-promote`, async (req, res) 
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, async (req, res) => {
+app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, rbac.requirePermission('content.update'), async (req, res) => {
   try {
     const { winner_id } = req.body || {};
     const s = scoped(req.workspace.id);
@@ -4189,7 +4247,7 @@ app.post(`${BASE_PATH}/api/email-templates/:id/promote-winner`, async (req, res)
 
 // A/B stats for a parent template: sent / opened / replied per variant
 // (parent counts as the "control" / null variant_id).
-app.get(`${BASE_PATH}/api/email-templates/:id/stats`, async (req, res) => {
+app.get(`${BASE_PATH}/api/email-templates/:id/stats`, rbac.requirePermission('content.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const parent = await s.queryOne(
@@ -4334,7 +4392,7 @@ function readCredsRaw(stored) {
   try { return secrets.decrypt(stored) || {}; } catch { return {}; }
 }
 
-app.get(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
+app.get(`${BASE_PATH}/api/mailboxes`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(
@@ -4352,7 +4410,7 @@ app.get(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.post(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
+app.post(`${BASE_PATH}/api/mailboxes`, rbac.requirePermission('mailbox.manage'), async (req, res) => {
   try {
     const { provider, from_email, from_name, reply_to, signature_html, credentials, is_default } = req.body || {};
     if (!provider || !from_email) return res.status(400).json({ error: 'provider and from_email required' });
@@ -4387,7 +4445,7 @@ app.post(`${BASE_PATH}/api/mailboxes`, async (req, res) => {
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.patch(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
+app.patch(`${BASE_PATH}/api/mailboxes/:id`, rbac.requirePermission('mailbox.manage'), async (req, res) => {
   try {
     const { from_email, from_name, reply_to, signature_html, credentials, is_default, status } = req.body || {};
     const s = scoped(req.workspace.id);
@@ -4432,7 +4490,7 @@ app.patch(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
   } catch (e) { res.status(500).json({ error: safeError(e) }); }
 });
 
-app.delete(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/mailboxes/:id`, rbac.requirePermission('mailbox.manage'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -4445,7 +4503,7 @@ app.delete(`${BASE_PATH}/api/mailboxes/:id`, async (req, res) => {
 });
 
 // Verify a mailbox connection (test-mode ping; doesn't send anything).
-app.post(`${BASE_PATH}/api/mailboxes/:id/verify`, async (req, res) => {
+app.post(`${BASE_PATH}/api/mailboxes/:id/verify`, rbac.requirePermission('mailbox.manage'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const mb = await s.queryOne(
@@ -4480,7 +4538,7 @@ app.post(`${BASE_PATH}/api/mailboxes/:id/verify`, async (req, res) => {
 // Returns the recent pending / failed / bounced contacts, annotated with
 // KOL display info, so the UI can surface retry-worthy work across all
 // campaigns.
-app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
+app.get(`${BASE_PATH}/api/outreach/tasks`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const pending = await s.query(
@@ -4540,14 +4598,14 @@ app.get(`${BASE_PATH}/api/outreach/tasks`, async (req, res) => {
 
 // Check whether Gmail OAuth is configured on this deployment (client-side
 // hides the button when not).
-app.get(`${BASE_PATH}/api/mailboxes/oauth/gmail/status`, (req, res) => {
+app.get(`${BASE_PATH}/api/mailboxes/oauth/gmail/status`, rbac.requirePermission('data.read'), (req, res) => {
   res.json({ configured: gmailOAuth.isConfigured() });
 });
 
 // Start Gmail OAuth. We stash the workspace_id in `state` so the callback
 // (which Google calls without our auth header) knows where to attach the
 // resulting mailbox_accounts row.
-app.post(`${BASE_PATH}/api/mailboxes/oauth/gmail/init`, (req, res) => {
+app.post(`${BASE_PATH}/api/mailboxes/oauth/gmail/init`, rbac.requirePermission('mailbox.manage'), (req, res) => {
   try {
     if (!gmailOAuth.isConfigured()) {
       return res.status(501).json({ error: 'Gmail OAuth not configured. Set GMAIL_OAUTH_CLIENT_ID + GMAIL_OAUTH_CLIENT_SECRET.' });
@@ -4625,7 +4683,7 @@ app.get(`${BASE_PATH}/api/mailboxes/oauth/gmail/callback`, async (req, res) => {
 
 // Email queue stats: specifically for email.* job types. getStats() is async
 // in BullMQ mode; both backends expose the same normalized shape.
-app.get(`${BASE_PATH}/api/email-queue/stats`, async (req, res) => {
+app.get(`${BASE_PATH}/api/email-queue/stats`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = await jobQueue.getStats();
     res.json({
@@ -4639,7 +4697,7 @@ app.get(`${BASE_PATH}/api/email-queue/stats`, async (req, res) => {
 
 // Manually enqueue the safety-net sync job that fails contacts stuck in
 // 'pending' > 30min. Useful for admins debugging a stuck batch.
-app.post(`${BASE_PATH}/api/email-queue/sync-status`, async (req, res) => {
+app.post(`${BASE_PATH}/api/email-queue/sync-status`, rbac.requirePermission('data.sync'), async (req, res) => {
   try {
     const id = await jobQueue.push('email.sync_status', {}, { maxRetries: 0 });
     res.json({ queued: true, jobId: id });
@@ -4649,7 +4707,7 @@ app.post(`${BASE_PATH}/api/email-queue/sync-status`, async (req, res) => {
 // Sender-domain DNS checks (SPF / DKIM / DMARC). Helps users diagnose why
 // outbound mail lands in spam. We do live DNS lookups — cheap but not
 // cached. For larger deployments, a 5-minute memoize would be appropriate.
-app.get(`${BASE_PATH}/api/mailboxes/:id/dns-check`, async (req, res) => {
+app.get(`${BASE_PATH}/api/mailboxes/:id/dns-check`, rbac.requirePermission('mailbox.manage'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const mb = await s.queryOne(
@@ -4710,7 +4768,7 @@ function buildDnsAdvice({ spf, dmarc, dkim, provider, domain }) {
 }
 
 // Render a template for a specific KOL contact
-app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
+app.post(`${BASE_PATH}/api/contacts/:id/render-template`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const templateId = req.body.template_id;
     if (!templateId) return res.status(400).json({ error: 'template_id required' });
@@ -4750,7 +4808,7 @@ app.post(`${BASE_PATH}/api/contacts/:id/render-template`, async (req, res) => {
 });
 
 // List all KOLs in the workspace's global database
-app.get(`${BASE_PATH}/api/kol-database`, async (req, res) => {
+app.get(`${BASE_PATH}/api/kol-database`, rbac.requirePermission('kol.read'), async (req, res) => {
   try {
     const { platform, search, status, sort } = req.query;
     const s = scoped(req.workspace.id);
@@ -4773,7 +4831,7 @@ app.get(`${BASE_PATH}/api/kol-database`, async (req, res) => {
 });
 
 // Get single KOL from database
-app.get(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
+app.get(`${BASE_PATH}/api/kol-database/:id`, rbac.requirePermission('kol.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const kol = await s.queryOne(
@@ -4789,18 +4847,13 @@ app.get(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
 });
 
 // Add KOL by profile URL - triggers AI scrape
-app.post(`${BASE_PATH}/api/kol-database`, async (req, res) => {
+app.post(`${BASE_PATH}/api/kol-database`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const { profile_url, platform } = req.body;
     if (!profile_url) return res.status(400).json({ error: 'Profile URL is required' });
 
     // Detect platform from URL
-    let detectedPlatform = platform || 'unknown';
-    if (profile_url.includes('tiktok.com')) detectedPlatform = 'tiktok';
-    else if (profile_url.includes('youtube.com') || profile_url.includes('youtu.be')) detectedPlatform = 'youtube';
-    else if (profile_url.includes('instagram.com')) detectedPlatform = 'instagram';
-    else if (profile_url.includes('twitch.tv')) detectedPlatform = 'twitch';
-    else if (profile_url.includes('twitter.com') || profile_url.includes('x.com')) detectedPlatform = 'x';
+    const detectedPlatform = detectPlatformFromUrl(profile_url, platform || 'unknown');
 
     const username = extractUsernameFromUrl(profile_url, detectedPlatform);
     const s = scoped(req.workspace.id);
@@ -4834,7 +4887,7 @@ app.post(`${BASE_PATH}/api/kol-database`, async (req, res) => {
 });
 
 // Batch add KOLs by URLs
-app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
+app.post(`${BASE_PATH}/api/kol-database/batch`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const { urls } = req.body;
     if (!urls || !Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: 'urls array is required' });
@@ -4845,12 +4898,7 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
       const trimmed = url.trim();
       if (!trimmed) continue;
 
-      let platform = 'unknown';
-      if (trimmed.includes('tiktok.com')) platform = 'tiktok';
-      else if (trimmed.includes('youtube.com') || trimmed.includes('youtu.be')) platform = 'youtube';
-      else if (trimmed.includes('instagram.com')) platform = 'instagram';
-      else if (trimmed.includes('twitch.tv')) platform = 'twitch';
-      else if (trimmed.includes('twitter.com') || trimmed.includes('x.com')) platform = 'x';
+      const platform = detectPlatformFromUrl(trimmed);
 
       const username = extractUsernameFromUrl(trimmed, platform);
       const existing = await s.queryOne(
@@ -4884,7 +4932,7 @@ app.post(`${BASE_PATH}/api/kol-database/batch`, async (req, res) => {
 // Delete KOL from database
 // Retry scrape for a single KOL row in error / partial state. Useful after
 // adding API keys (Apify, MODASH, etc.) — replays the original profile URL.
-app.post(`${BASE_PATH}/api/kol-database/:id/retry-scrape`, async (req, res) => {
+app.post(`${BASE_PATH}/api/kol-database/:id/retry-scrape`, rbac.requirePermission('kol.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const k = await s.queryOne(
@@ -4910,7 +4958,7 @@ app.post(`${BASE_PATH}/api/kol-database/:id/retry-scrape`, async (req, res) => {
 // Bulk retry every row in error/partial state for the current workspace.
 // Rate-limited via discoveryLimiter so a button-mash doesn't fan out 1000
 // concurrent scrapes. Returns count of jobs queued.
-app.post(`${BASE_PATH}/api/kol-database/retry-all`, discoveryLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/kol-database/retry-all`, rbac.requirePermission('kol.update'), discoveryLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const r = await s.query(
@@ -4941,7 +4989,7 @@ app.post(`${BASE_PATH}/api/kol-database/retry-all`, discoveryLimiter, async (req
   }
 });
 
-app.delete(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
+app.delete(`${BASE_PATH}/api/kol-database/:id`, rbac.requirePermission('kol.delete'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.exec(
@@ -4956,7 +5004,7 @@ app.delete(`${BASE_PATH}/api/kol-database/:id`, async (req, res) => {
 });
 
 // Import KOLs from a campaign into the global database
-app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, async (req, res) => {
+app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const parent = await s.queryOne(
@@ -4994,7 +5042,7 @@ app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, async (req
 
 // ==================== Dashboard Stats ====================
 // Workspace-scoped: counts only reflect the caller's current workspace.
-app.get(`${BASE_PATH}/api/stats`, async (req, res) => {
+app.get(`${BASE_PATH}/api/stats`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const wsId = req.workspace.id;
     const s = scoped(wsId);
@@ -5020,17 +5068,13 @@ app.get(`${BASE_PATH}/api/stats`, async (req, res) => {
 // ==================== Pipeline API (Task 1: Scrape -> Write -> Mail) ====================
 
 // Start pipeline for a URL
-app.post(`${BASE_PATH}/api/pipeline/start`, async (req, res) => {
+app.post(`${BASE_PATH}/api/pipeline/start`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const { profile_url, campaign_id } = req.body;
     if (!profile_url) return res.status(400).json({ error: 'profile_url is required' });
 
     // Detect platform
-    let platform = 'unknown';
-    if (profile_url.includes('youtube.com') || profile_url.includes('youtu.be')) platform = 'youtube';
-    else if (profile_url.includes('tiktok.com')) platform = 'tiktok';
-    else if (profile_url.includes('instagram.com')) platform = 'instagram';
-    else if (profile_url.includes('twitch.tv')) platform = 'twitch';
+    const platform = detectPlatformFromUrl(profile_url);
 
     const username = extractUsernameFromUrl(profile_url, platform);
     const id = uuidv4();
@@ -5164,7 +5208,7 @@ async function runPipeline(jobId, profileUrl, platform, username, campaignId, wo
 }
 
 // List pipeline jobs
-app.get(`${BASE_PATH}/api/pipeline/jobs`, async (req, res) => {
+app.get(`${BASE_PATH}/api/pipeline/jobs`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const result = await s.query(`
@@ -5181,7 +5225,7 @@ app.get(`${BASE_PATH}/api/pipeline/jobs`, async (req, res) => {
 });
 
 // Get single pipeline job
-app.get(`${BASE_PATH}/api/pipeline/jobs/:id`, async (req, res) => {
+app.get(`${BASE_PATH}/api/pipeline/jobs/:id`, rbac.requirePermission('contact.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const job = await s.queryOne(`
@@ -5199,7 +5243,7 @@ app.get(`${BASE_PATH}/api/pipeline/jobs/:id`, async (req, res) => {
 });
 
 // Edit pipeline email
-app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, async (req, res) => {
+app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const { email_subject, email_body, email_to } = req.body;
     const s = scoped(req.workspace.id);
@@ -5234,7 +5278,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/edit`, async (req, res) => {
 // JOINs contacts to reflect live state. This removes the old parallel
 // approve → sync sendEmail path that used a deprecated signature and
 // couldn't leverage workspace-specific mailbox_accounts.
-app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, rbac.requirePermission('email.approve'), sendEmailLimiter, sendEmailWorkspaceLimiter, async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const job = await s.queryOne(
@@ -5279,7 +5323,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/approve`, sendEmailLimiter, sendEma
 });
 
 // Reject / regenerate email
-app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, async (req, res) => {
+app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, rbac.requirePermission('contact.update'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const job = await s.queryOne(
@@ -5320,7 +5364,7 @@ app.post(`${BASE_PATH}/api/pipeline/jobs/:id/reject`, async (req, res) => {
 });
 
 // SMTP status
-app.get(`${BASE_PATH}/api/smtp/status`, async (req, res) => {
+app.get(`${BASE_PATH}/api/smtp/status`, rbac.requirePermission('data.read'), async (req, res) => {
   const status = await mailAgent.verifyConnection();
   res.json(status);
 });
@@ -5355,7 +5399,7 @@ async function upsertContentDailyStat(workspaceId, contentUrl, statDate, { views
 }
 
 // Scrape view counts for content URLs
-app.post(`${BASE_PATH}/api/data/content/scrape`, async (req, res) => {
+app.post(`${BASE_PATH}/api/data/content/scrape`, rbac.requirePermission('data.sync'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     // Scrape ALL content in this workspace (not just views=0), to get daily snapshots
@@ -5390,7 +5434,7 @@ app.post(`${BASE_PATH}/api/data/content/scrape`, async (req, res) => {
 });
 
 // Manual update content stats
-app.put(`${BASE_PATH}/api/data/content/:id`, async (req, res) => {
+app.put(`${BASE_PATH}/api/data/content/:id`, rbac.requirePermission('data.sync'), async (req, res) => {
   try {
     const { views, likes, comments, shares } = req.body;
     const { id } = req.params;
@@ -5418,7 +5462,7 @@ app.put(`${BASE_PATH}/api/data/content/:id`, async (req, res) => {
 });
 
 // Get daily stats for a content URL
-app.get(`${BASE_PATH}/api/data/content/:id/daily`, async (req, res) => {
+app.get(`${BASE_PATH}/api/data/content/:id/daily`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const item = await s.queryOne("SELECT content_url FROM content_data WHERE id=? AND workspace_id=?", [req.params.id, req.workspace.id]);
@@ -5432,7 +5476,7 @@ app.get(`${BASE_PATH}/api/data/content/:id/daily`, async (req, res) => {
 });
 
 // Combined dashboard data (current workspace only)
-app.get(`${BASE_PATH}/api/data/dashboard/combined`, async (req, res) => {
+app.get(`${BASE_PATH}/api/data/dashboard/combined`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
     const s = scoped(req.workspace.id);
     const wsId = req.workspace.id;
@@ -5539,7 +5583,7 @@ async function defaultCampaignForWorkspace(workspaceId) {
   return any?.id || null;
 }
 
-app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) => {
+app.post(`${BASE_PATH}/api/discovery/start`, rbac.requirePermission('discovery.start'), discoveryLimiter, async (req, res) => {
   try {
     const { campaign_id, keywords, platforms, min_subscribers, max_results } = req.body;
     const searchKeywords = keywords || 'gaming AI roleplay, AI character game, AI NPC gaming, AI companion roleplay';
@@ -5684,7 +5728,7 @@ app.post(`${BASE_PATH}/api/discovery/start`, discoveryLimiter, async (req, res) 
 });
 
 // List discovery jobs — scoped to caller's workspace.
-app.get(`${BASE_PATH}/api/discovery/jobs`, async (req, res) => {
+app.get(`${BASE_PATH}/api/discovery/jobs`, rbac.requirePermission('discovery.read'), async (req, res) => {
   try {
     const result = await query(
       'SELECT * FROM discovery_jobs WHERE workspace_id = ? ORDER BY created_at DESC',
@@ -5705,7 +5749,7 @@ app.get(`${BASE_PATH}/api/discovery/jobs`, async (req, res) => {
 //
 // Body: { result_ids: [...] }   (or empty / omitted = save all "found")
 // Returns counts of inserted vs skipped (already-existing handle).
-app.post(`${BASE_PATH}/api/discovery/jobs/:id/save-to-db`, async (req, res) => {
+app.post(`${BASE_PATH}/api/discovery/jobs/:id/save-to-db`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const job = await queryOne(
       'SELECT id FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
@@ -5762,7 +5806,7 @@ app.post(`${BASE_PATH}/api/discovery/jobs/:id/save-to-db`, async (req, res) => {
 // Export the candidate list of a discovery job to CSV. Uses the
 // `discoveryResults` column preset so the file's columns match the on-screen
 // table users see in DiscoveryPage.
-app.get(`${BASE_PATH}/api/discovery/jobs/:id/export`, exportLimiter, async (req, res) => {
+app.get(`${BASE_PATH}/api/discovery/jobs/:id/export`, rbac.requirePermission('data.export'), exportLimiter, async (req, res) => {
   try {
     const job = await queryOne(
       'SELECT id, status FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
@@ -5779,7 +5823,7 @@ app.get(`${BASE_PATH}/api/discovery/jobs/:id/export`, exportLimiter, async (req,
   }
 });
 
-app.get(`${BASE_PATH}/api/discovery/jobs/:id`, async (req, res) => {
+app.get(`${BASE_PATH}/api/discovery/jobs/:id`, rbac.requirePermission('discovery.read'), async (req, res) => {
   try {
     const job = await queryOne(
       'SELECT * FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
@@ -5800,7 +5844,7 @@ app.get(`${BASE_PATH}/api/discovery/jobs/:id`, async (req, res) => {
 
 // Process discovery results through the pipeline. Scoped to caller's
 // workspace; creates pipeline_jobs tagged with the same workspace_id.
-app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, async (req, res) => {
+app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, rbac.requirePermission('kol.create'), async (req, res) => {
   try {
     const job = await queryOne(
       'SELECT * FROM discovery_jobs WHERE id = ? AND workspace_id = ?',
@@ -5877,7 +5921,7 @@ app.post(`${BASE_PATH}/api/discovery/jobs/:id/process`, async (req, res) => {
 
 // ==================== Batch KOL Discovery (email-only) ====================
 // Searches YouTube & TikTok, scrapes profiles, only saves those with emails
-app.post(`${BASE_PATH}/api/discovery/batch-email`, async (req, res) => {
+app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email.send'), async (req, res) => {
   try {
     const jobId = uuidv4();
     const platforms = req.body.platforms || ['youtube', 'tiktok'];
@@ -6238,6 +6282,11 @@ async function initializeDefaultData() {
 // Start server after database initialization
 (async () => {
   try {
+    // Fail fast before we ever touch the DB: in production a missing
+    // MAILBOX_ENCRYPTION_KEY means mailbox credentials and platform OAuth
+    // tokens would be written under a key derived from a constant — worse
+    // than plaintext, because the column name says "encrypted".
+    require('./encryption').assertKeyConfigured();
     await initializeDatabase();
     const migrationResult = await runPendingMigrations({ query, queryOne, exec, usePostgres });
     if (migrationResult.applied > 0) {
@@ -6259,7 +6308,12 @@ async function initializeDefaultData() {
             p.catch(e => log.warn('[queue] sync_status enqueue failed:', e.message));
           }
         } catch {}
+        // Same 10-minute tick reaps abandoned OAuth states (see
+        // OAUTH_STATE_TTL_MS) — they used to accumulate forever.
+        sweepExpiredOauthStates().catch(() => {});
       }, 10 * 60 * 1000).unref?.();
+      // One sweep at boot so a restart also clears whatever piled up.
+      sweepExpiredOauthStates().catch(() => {});
       scheduler.start({ query, exec, queryOne, mailAgent, uuidv4, jobQueue });
       scheduledPublish.start({
         query, queryOne, exec, uuidv4, publishOauth, agentRuntime,
@@ -6468,6 +6522,27 @@ function calculateAIScore(kol, criteria, campaignDesc) {
     reason: reasons.slice(0, 3).join(' | '),
     estimatedCpm
   };
+}
+
+// Map a profile URL to a platform id. Was three copies of
+// `url.includes('tiktok.com')`, which classified
+// `https://attacker.example/?ref=tiktok.com` as TikTok — and the TikTok path
+// then fetches that URL. Match on the parsed hostname instead.
+const PLATFORM_DOMAINS = [
+  ['tiktok', ['tiktok.com']],
+  ['youtube', ['youtube.com', 'youtu.be']],
+  ['instagram', ['instagram.com']],
+  ['twitch', ['twitch.tv']],
+  ['x', ['twitter.com', 'x.com']],
+];
+function detectPlatformFromUrl(url, fallback = 'unknown') {
+  let host;
+  try { host = new URL(String(url).trim()).hostname.toLowerCase(); }
+  catch { return fallback; }
+  for (const [platform, domains] of PLATFORM_DOMAINS) {
+    if (domains.some(d => host === d || host.endsWith('.' + d))) return platform;
+  }
+  return fallback;
 }
 
 function extractUsernameFromUrl(url, platform) {

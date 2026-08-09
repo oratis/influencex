@@ -87,6 +87,7 @@ const PG_SCHEMA = `
     user_id TEXT NOT NULL,
     expires_at TIMESTAMP NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
+    token_hash TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
@@ -343,6 +344,7 @@ const PG_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_email_replies_pipeline_job_id ON email_replies(pipeline_job_id);
   CREATE INDEX IF NOT EXISTS idx_email_replies_contact_id ON email_replies(contact_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_content_daily_stats_url ON content_daily_stats(content_url);
   CREATE INDEX IF NOT EXISTS idx_discovery_results_job_id ON discovery_results(job_id);
 `;
@@ -364,6 +366,7 @@ const SQLITE_SCHEMA = `
     user_id TEXT NOT NULL,
     expires_at DATETIME NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    token_hash TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
@@ -620,6 +623,7 @@ const SQLITE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_email_replies_pipeline_job_id ON email_replies(pipeline_job_id);
   CREATE INDEX IF NOT EXISTS idx_email_replies_contact_id ON email_replies(contact_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
   CREATE INDEX IF NOT EXISTS idx_content_daily_stats_url ON content_daily_stats(content_url);
   CREATE INDEX IF NOT EXISTS idx_discovery_results_job_id ON discovery_results(job_id);
 `;
