@@ -36,13 +36,16 @@ function recordLoginAttempt(email, success) {
   loginAttempts.set(email, record);
 }
 
-// Cleanup stale entries every 30 minutes
+// Cleanup stale entries every 30 minutes. unref'd (like every other timer in
+// the codebase) so requiring this module doesn't pin the event loop open —
+// app.listen keeps the server alive; a test or CLI script should be free to
+// exit.
 setInterval(() => {
   const now = Date.now();
   for (const [email, record] of loginAttempts) {
     if (now > record.resetAt) loginAttempts.delete(email);
   }
-}, 30 * 60 * 1000);
+}, 30 * 60 * 1000).unref?.();
 
 // bcrypt cost factor. Each +1 doubles hash time; 12 is the modern OWASP
 // recommendation for 2026-era hardware. Existing user hashes at cost 10
@@ -57,27 +60,66 @@ function verifyPassword(password, hash) {
   return bcrypt.compareSync(password, hash);
 }
 
+// Session tokens are bearer credentials: whoever holds one is the user. We
+// therefore store only their sha256 hash, exactly like the invitation and
+// password-reset tokens do — a leaked DB dump then yields no usable
+// credential. The plaintext token exists only in the login response and the
+// client's Authorization header.
+//
+// Rollout: `sessions.id` used to BE the plaintext token, so those rows cannot
+// be retrofitted (you can't hash what you don't have — the stored value is
+// the secret). Rather than log every user out, the migration adds a
+// `token_hash` column; new sessions get `id = uuid` + `token_hash = sha256`,
+// legacy rows keep `id = <plaintext>` + `token_hash IS NULL` and are matched
+// by the fallback lookup below until they expire on their own (<= 7 days).
+//
+// The `token_hash IS NULL` guard on that fallback is load-bearing. Without
+// it, an attacker who read a *hash* out of the DB could present the hash
+// itself as a bearer token and match a new row by id — the exact bypass this
+// change is meant to close. New rows always have a non-null token_hash, so
+// they can never be reached through the legacy branch.
+//
+// CLEANUP: once one deploy cycle + SESSION_MAX_AGE (7 days) has passed, every
+// legacy row is expired and `findSessionRow`'s second query can be deleted.
+function hashSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+const SESSION_SELECT = 'SELECT s.*, u.id as uid, u.email, u.name, u.role, u.avatar_url FROM sessions s JOIN users u ON s.user_id = u.id';
+
+async function findSessionRow(token) {
+  const hashed = await queryOne(`${SESSION_SELECT} WHERE s.token_hash = ?`, [hashSessionToken(token)]);
+  if (hashed) return hashed;
+  // Legacy pre-hash row — see CLEANUP note above.
+  return queryOne(`${SESSION_SELECT} WHERE s.id = ? AND s.token_hash IS NULL`, [token]);
+}
+
 async function createSession(userId) {
-  const id = crypto.randomBytes(32).toString('hex');
+  const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + SESSION_MAX_AGE).toISOString();
-  await exec('INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)', [id, userId, expiresAt]);
+  await exec(
+    'INSERT INTO sessions (id, user_id, expires_at, token_hash) VALUES (?, ?, ?, ?)',
+    [uuidv4(), userId, expiresAt, hashSessionToken(token)]
+  );
   await exec('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', [userId]);
-  return { token: id, expiresAt };
+  return { token, expiresAt };
 }
 
 async function getSession(token) {
   if (!token) return null;
-  const session = await queryOne('SELECT s.*, u.id as uid, u.email, u.name, u.role, u.avatar_url FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.id = ?', [token]);
+  const session = await findSessionRow(token);
   if (!session) return null;
   if (new Date(session.expires_at) < new Date()) {
-    await exec('DELETE FROM sessions WHERE id = ?', [token]);
+    await exec('DELETE FROM sessions WHERE id = ?', [session.id]);
     return null;
   }
   return { id: session.uid, email: session.email, name: session.name, role: session.role, avatar_url: session.avatar_url };
 }
 
 async function destroySession(token) {
-  await exec('DELETE FROM sessions WHERE id = ?', [token]);
+  if (!token) return;
+  await exec('DELETE FROM sessions WHERE token_hash = ?', [hashSessionToken(token)]);
+  await exec('DELETE FROM sessions WHERE id = ? AND token_hash IS NULL', [token]);
 }
 
 // Middleware: extract user from Authorization header or cookie
@@ -143,6 +185,6 @@ async function cleanupExpiredSessions() {
 }
 
 // Run cleanup every hour
-setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
+setInterval(cleanupExpiredSessions, 60 * 60 * 1000).unref?.();
 
-module.exports = { authMiddleware, registerUser, loginUser, destroySession, getSession, cleanupExpiredSessions, createSession };
+module.exports = { authMiddleware, registerUser, loginUser, destroySession, getSession, cleanupExpiredSessions, createSession, hashSessionToken };

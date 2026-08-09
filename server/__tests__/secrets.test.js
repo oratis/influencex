@@ -3,6 +3,8 @@
  *
  *   - encrypt → decrypt round-trip preserves the object
  *   - legacy plaintext JSON still decrypts (no-migration compatibility)
+ *   - legacy `aead:v1:` ciphertext still decrypts after the crypto modules
+ *     were consolidated onto encryption.js's `enc:v1:` format
  *   - malformed ciphertext errors out instead of silently returning garbage
  *   - IVs are unique (two encrypts of the same value produce different ciphertext)
  */
@@ -21,9 +23,25 @@ test('encrypt → decrypt round-trip preserves nested object', () => {
   const payload = { api_key: 're_abc', smtp: { host: 'smtp.x', port: 587 }, scopes: ['a', 'b'] };
   const ct = secrets.encrypt(payload);
   assert.equal(typeof ct, 'string');
-  assert.ok(ct.startsWith('aead:v1:'), 'should use our versioned prefix');
+  // Writes now go out in the consolidated enc:v1 format (server/encryption.js).
+  assert.ok(ct.startsWith('enc:v1:'), 'should use our versioned prefix');
   const pt = secrets.decrypt(ct);
   assert.deepEqual(pt, payload);
+});
+
+test('legacy aead:v1 ciphertext still decrypts after module consolidation', () => {
+  // Reproduce exactly what the old secrets.js wrote: AES-256-GCM, standard
+  // base64, `aead:v1:<iv>:<tag>:<ct>`. Rows in a live database look like
+  // this and must keep opening.
+  const payload = { api_key: 'legacy-aead-secret', smtp_pass: 'hunter2' };
+  const key = Buffer.from(KEY, 'base64');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
+  const legacy = `aead:v1:${iv.toString('base64')}:${cipher.getAuthTag().toString('base64')}:${ct.toString('base64')}`;
+
+  assert.equal(secrets.isEncrypted(legacy), true);
+  assert.deepEqual(secrets.decrypt(legacy), payload);
 });
 
 test('encrypt → decrypt round-trip preserves a plain string', () => {

