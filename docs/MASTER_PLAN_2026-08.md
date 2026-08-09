@@ -14,28 +14,30 @@
 
 ## 1. Q2 Roadmap 完成度盘点（TODO 审计）
 
+> 状态列已更新到 2026-08-09 收尾时点。审计当时的判断保留在备注里。
+
 | 卡片 | 状态 | 备注 |
 |---|---|---|
 | A1 Sentry | ✅ 完成 | `891f209` |
-| A2 OTel | ✅ 完成 | `8f00ad1`（依赖冲突留下 DX-1 后遗症 → PR-A 收尾） |
-| A3 BullMQ | ⚠️ 半成品 | 模块在但 API 不兼容，Redis 模式下会崩进程 → **PR-C** |
+| A2 OTel | ✅ 完成 | `8f00ad1`；依赖冲突后遗症由 #7 收尾 |
+| A3 BullMQ | ✅ 完成 | #10 修 API 不兼容 + 进程兜底 |
 | A4 Redis cache/rate-limit | ✅ 完成 | `b15201e` |
-| A5 /metrics | ✅ 完成 | `98a0d2d`（BullMQ 模式下队列指标归零 bug → PR-C） |
+| A5 /metrics | ✅ 完成 | `98a0d2d`；BullMQ 模式下指标归零由 #10 修复 |
 | B1 邀请邮件自动化 | ✅ 完成 | `98a0d2d` |
 | B2 A/B winner UI | ✅ 完成 | `4619956` |
-| B3 Conductor 进度 SSE | ⚠️ 半成品 | agent 流有 SSE，Conductor 计划页仍是 3s 轮询且错误静默 → PR-D 修错误可见性；SSE 化列入 §4 |
+| B3 Conductor 进度 SSE | ✅ 完成 | 审计时为半成品 → #9 修错误可见性，#18 完成 SSE 化 |
 | B4 Hunter Email-Finder | ✅ 完成 | `4619956` |
-| B5 EMAIL_EXISTS 文案 | ✅ 完成 | `98a0d2d`（但邀请弹窗 i18n 裸 key 回归 → PR-D） |
-| C1 Playwright 冒烟 | ❌ 未启动 | → **PR-E** |
-| C2 前端组件单测 | ⚠️ 起步 | 4 个组件测试文件；关键页面 0 覆盖 → PR-E 扩 |
-| C3 后端集成测试 | ⚠️ 部分 | 377 单测很强，但 discovery→pipeline→send 端到端链路测试缺失（P0-1 能存活至今就是证据）→ **PR-A 补最小版**，PR-E 扩 |
-| C4 CI 红线 | ❌ 且 CI 本身红 | `npm ci` 缺 `--legacy-peer-deps`，5 月起每次 push 都 fail → **PR-A** |
-| C5 FormField a11y 重构 | ⚠️ 部分 | FormField 组件优秀，但 Ads / Translate / Calendar 等页未迁移（原生白底控件）→ PR-F |
-| D1 Ads 真实下单 | ❌ 未启动 | 仍是离线 planner → §4 |
-| D2 Marketplace 种子 | ❌ 未启动 | → §4 |
-| D3 pgvector wiring | ✅ 完成 | `4619956` |
+| B5 EMAIL_EXISTS 文案 | ✅ 完成 | `98a0d2d`；邀请弹窗裸 key 回归由 #9 修复 |
+| C1 Playwright 冒烟 | ✅ 完成 | #12（5 条，已挂 CI） |
+| C2 前端组件单测 | ✅ 完成 | 4 个 → 13 个文件 / 82 测试（#12/#13/#17/#18/#19） |
+| C3 后端集成测试 | ✅ 完成 | #12 补齐 discovery→pipeline→contact→send 全链路 |
+| C4 CI 红线 | ✅ 完成 | #7 转绿；#12 加 client vitest + Playwright job（共 5 个 job） |
+| C5 FormField a11y 重构 | ✅ 完成 | #13（并顺带查出白底控件的根因是不存在的 CSS class） |
+| D1 Ads 真实下单 | ⏸ 需人工解锁 | 要广告账号 + sandbox 凭据，涉真实计费 |
+| D2 Marketplace 种子 | ✅ 完成 | #19（范围已调整，见 §4-3） |
+| D3 pgvector wiring | ✅ 完成 | `4619956` 接线，但**从未真正工作**（embed 调用契约错） → #20 修复 |
 | D4 Plugin API spec | ✅ 完成 | `docs/PLUGIN_API_v0.md` |
-| D5 Token metering | ⚠️ 部分 | 全局 token/cost 有；按 workspace×agent×月的账目视图缺 → §4 |
+| D5 Token metering | ✅ 完成 | #17（覆盖面是部分的，见 §4-2） |
 
 代码内 TODO/FIXME 注释：**0 个**（工程卫生很好，所有欠账都在文档里——现在也都在本计划里）。
 
@@ -107,9 +109,11 @@ SSRF 统一走 `safeFetch`（重定向后二次校验）、CSV 公式注入前�
 
 ---
 
-## 2b. 执行状态（2026-08-09 更新）
+## 2b. 执行状态（2026-08-09 收尾更新）
 
-**全部止血批次已合并，main 绿：server 572 测试 / client 59 测试 / Playwright 5 条 / CI 五个 job 全过。**
+**本计划全部批次 + Q2 roadmap 剩余可自动推进项均已合并。main 绿：server 656 测试 / client 82 测试 / Playwright 5 条 / CI 五个 job 全过。**
+
+测试基线变化：server 377 → 656（+279），client 0 → 82，E2E 0 → 5。CI 从 2026-05 起持续红，现已连续绿。
 
 | 批次 | PR | 状态 |
 |---|---|---|
@@ -123,6 +127,11 @@ SSRF 统一走 `safeFetch`（重定向后二次校验）、CSV 公式注入前�
 | PR-F2 前端一致性 | [#13](https://github.com/oratis/influencex/pull/13) | ✅ 已合并 |
 | PR-F1 服务端加固 | [#14](https://github.com/oratis/influencex/pull/14) | ✅ 已合并 |
 | 追加：限流/迁移竞态 | [#15](https://github.com/oratis/influencex/pull/15) | ✅ 已合并 |
+| 文档同步 | [#16](https://github.com/oratis/influencex/pull/16) | ✅ 已合并 |
+| D5 用量账目 | [#17](https://github.com/oratis/influencex/pull/17) | ✅ 已合并 |
+| B3 Conductor SSE | [#18](https://github.com/oratis/influencex/pull/18) | ✅ 已合并 |
+| D2 Creator Marketplace | [#19](https://github.com/oratis/influencex/pull/19) | ✅ 已合并 |
+| 追加：embed 契约 + 缓存计费 | [#20](https://github.com/oratis/influencex/pull/20) | ✅ 已合并 |
 
 ### 执行过程中新发现的缺陷（原计划里没有）
 
@@ -139,6 +148,9 @@ SSRF 统一走 `safeFetch`（重定向后二次校验）、CSV 公式注入前�
 | **无邮件服务商时 approve 的任务卡在 `stage='send'`** — dry-run 分支在同步 pipeline 前就返回 | P2 | PR-E 写测试时发现 | 未修，测试如实断言现状 |
 | **YouTube API 查询串未 encodeURIComponent** | P2 | PR-F1 实现时发现 | #15 已修 |
 | **`client/node_modules` 符号链接被误提交** — 指向作者机器绝对路径，check out 后砸掉真实安装（本地已触发 ELOOP） | P2 | 合并 #13 后自食其果 | #15 已修（.gitignore 去掉尾斜杠） |
+| **D3「pgvector wiring」标记完成但从未工作** — `llm.embed({texts:[…]})` 把选项对象当输入传，又把返回对象当数组索引 → `findBestBrandVoice()` 永远返回 null。"没找到相似语调"是合法结果，所以失败完全不可见 | P1 | 写 D5 账本时发现 | #20 已修 |
+| **缓存命中在计费** — `complete()` 对缓存命中跳过 `recordUsage()`（内存统计视为免费），却原样返回原次调用的 `usage` → 落库的 `agent_runs` 按全价记账，与 `getStats()` 自相矛盾 | P1 | 写 D5 账本时发现 | #20 已修（报 0 成本、保留 token 数、附 `cachedUsdCents` 可审计） |
+| **`llm` 模块头声称支持流式，实为从未实现** — 三个 provider 都是单次 fetch + json()。这正是 B3 只能做粗粒度阶段而非 token 级进度的原因 | P3 | 做 B3 时发现 | #20 已更正注释 |
 
 ### 行为变更（需要知会用户）
 
@@ -168,14 +180,25 @@ PR-F ── 任意时间，低风险尾部
 
 ## 4. 止血之后：Q2 roadmap 续推
 
-1. **B3 Conductor SSE** — 🔄 进行中（wave 2）
-2. **D5 usage 账目** — 🔄 进行中（wave 2）。技术前提已确认：`agent_runs` 表已有 workspace_id/agent_id/cost_usd_cents/tokens/started_at，**无需建表，纯聚合 + UI**
-3. **D2 Creator Marketplace** — 🔄 进行中（wave 2）。**范围已调整**：roadmap 原文写"导入 100 个 KOL"，但凭空生成 100 份"看起来像真人"的创作者档案等于把伪造记录当真实数据呈现给用户，不做。改为：机制照建，数据只来自本工作区真实抓取过的 KOL 公开字段（提升进目录，带来源标注），外加 ≤10 条**明确标注为示例**的数据供空实例演示
+1. **B3 Conductor SSE** — ✅ 已完成（[#18](https://github.com/oratis/influencex/pull/18)）。计划构建阶段是**粗粒度的真实检查点**而非模型内省：`server/llm` 无流式支持，token 级进度需先给三个 provider 加流式，属独立 PR
+2. **D5 usage 账目** — ✅ 已完成（[#17](https://github.com/oratis/influencex/pull/17)）。无需建表，`agent_runs` 已有全部字段。**覆盖面是部分的**：`generateOutreachEmail`（最高频路径，签名不带 workspaceId）、brand-voice embedding、community 分类循环均未记账，失败的 run 也不记 token
+3. **D2 Creator Marketplace** — ✅ 已完成（[#19](https://github.com/oratis/influencex/pull/19)）。**范围已调整并落实**：不生成 100 份假档案；数据只来自真实抓取的公开字段 + 6 条明确标注的样例。额外决定：样例行不可加入 campaign（`kols` 无 `is_sample` 列，标签无法随复制存活）
 4. **D1 Ads 真实下单** — ⏸ **需人工解锁**：要 Meta/Google 广告账号与 sandbox 凭据，且涉及真实计费风险，不自行推进
 5. **Hunter 扩展** — ⏸ **需人工决策**：Hunter Email-Finder 是付费 API，要先定预算
-6. **MULTITENANCY.md 收口** — ✅ 已完成（[#11](https://github.com/oratis/influencex/pull/11)，提前执行）
+6. **MULTITENANCY.md 收口** — ✅ 已完成（[#11](https://github.com/oratis/influencex/pull/11)）
 7. **ContactModule/PipelinePage UI 合并评估** — 未启动
-8. **前端按权限隐藏控件** — 新增：#14 的 RBAC 收口只做了服务端，viewer 现在会看到点不动的按钮
+8. **前端按权限隐藏控件** — 未启动。#14 的 RBAC 收口只做了服务端，viewer 现在会看到点不动的按钮并收到 403 toast
+
+### 下一轮可直接开工的清单（按价值排序）
+
+1. **`generateOutreachEmail` 计入用量账本** —— 最高频的未记账 LLM 路径；需把 workspaceId 穿过 5 个调用点
+2. **前端权限门禁** —— 消除 viewer 的 403 toast 体验
+3. **无邮件服务商时 approve 卡在 `stage='send'`** —— 影响所有未配发信服务商的部署
+4. **SSE token 移出 query string** —— 需要一次性 stream ticket（TTL + 吊销），现有两个流端点都受影响
+5. **provider 流式** —— 解锁 B3 的 token 级进度，同时让 `llm` 模块头的承诺成真
+6. **Marketplace 下架/申诉流程** —— 目前撤下一条 listing 只能手工 DELETE
+7. **DNS-rebinding SSRF** —— 需要 resolve-then-pin 派发器
+8. **既有明文 platform token 回填加密** —— 现为下次写入时才加密
 
 ### 遗留的已知问题（已定位，未修）
 
@@ -192,8 +215,9 @@ PR-F ── 任意时间，低风险尾部
 - [x] PR-0～PR-D 全部合入 main，CI 绿
 - [x] PR-E / PR-F 合入（#12 / #13 / #14）
 - [x] E2E_REVIEW 的 P0/P1 条目全部关闭（见 §2b）
+- [x] §4 中可自动推进的 roadmap 项完成（B3 / D5 / D2，见上）
+- [x] memory.md §6 已知 bug 表同步更新
 - [ ] **生产部署一次**，冒烟：登录 / approve 发送 / ROI 页 / 邀请弹窗四点通过 ← **下一步，需人工执行 `./deploy.sh`**
-- [ ] memory.md §6 已知 bug 表同步更新
 
 ### 部署前必读（这批改动改变了启动前置条件）
 
