@@ -5,6 +5,7 @@
 
 const fetch = require('./proxy-fetch');
 const quota = require('./youtube-quota');
+const { youtubeApiUrl } = require('./youtube-api');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 function detectCategory(text) {
@@ -61,7 +62,10 @@ async function searchYouTubeChannels({ keywords, maxResults = 50, minSubscribers
       }
 
       const searchRes = await fetch(
-        `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(query)}&maxResults=${Math.min(maxResults, 50)}&key=${YOUTUBE_API_KEY}`
+        youtubeApiUrl('search', {
+          part: 'snippet', type: 'channel', q: query,
+          maxResults: Math.min(maxResults, 50), key: YOUTUBE_API_KEY,
+        })
       );
       const searchData = await searchRes.json();
       quota.record('search', 1);
@@ -85,7 +89,9 @@ async function searchYouTubeChannels({ keywords, maxResults = 50, minSubscribers
       }
 
       const statsRes = await fetch(
-        `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&id=${channelIds.map(encodeURIComponent).join(',')}&key=${YOUTUBE_API_KEY}`
+        youtubeApiUrl('channels', {
+          part: ['snippet', 'statistics'], id: channelIds, key: YOUTUBE_API_KEY,
+        })
       );
       const statsData = await statsRes.json();
       quota.record('channels', 1);

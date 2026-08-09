@@ -199,3 +199,44 @@ test('scrapeYouTube: a hostile @handle cannot truncate or inject parameters', as
     else process.env.YOUTUBE_API_KEY = oldKey;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Coverage guard.
+//
+// The builder only helps where it is used, and the original injection survived
+// precisely because it was spread across ~13 hand-rolled call sites. This walks
+// server/ and fails if any module builds a Data API URL directly again.
+// ---------------------------------------------------------------------------
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+test('no module builds a YouTube Data API URL by hand', () => {
+  const root = path.join(__dirname, '..');
+  const skipDirs = new Set(['node_modules', '__tests__']);
+  // youtube-api.js owns the one literal. publish/oauth.js holds a static OAuth
+  // userinfo URL with no interpolated values (mine=true), so nothing
+  // user-supplied can reach it.
+  const allowed = new Set(['youtube-api.js', path.join('publish', 'oauth.js')]);
+
+  const offenders = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!skipDirs.has(entry.name)) walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.js')) continue;
+      const rel = path.relative(root, full);
+      if (allowed.has(rel)) continue;
+      if (fs.readFileSync(full, 'utf8').includes('googleapis.com/youtube/v3')) offenders.push(rel);
+    }
+  })(root);
+
+  assert.deepStrictEqual(
+    offenders, [],
+    'these build a YouTube Data API URL directly — route them through ' +
+    'youtubeApiUrl() instead:\n  ' + offenders.join('\n  ')
+  );
+});

@@ -8,6 +8,7 @@
 const fetch = require('./proxy-fetch');
 const { safeFetchRaw } = require('./web/web-fetch');
 const log = require('./logger');
+const { youtubeApiUrl } = require('./youtube-api');
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 // `content_url` is user-supplied, so `hostname.includes('tiktok.com')` was
@@ -68,7 +69,9 @@ async function scrapeYouTubeVideo(url) {
 
   try {
     const res = await fetch(
-      `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${encodeURIComponent(videoId)}&key=${YOUTUBE_API_KEY}`
+      youtubeApiUrl('videos', {
+        part: ['statistics', 'snippet'], id: videoId, key: YOUTUBE_API_KEY,
+      })
     );
     const data = await res.json();
     const video = data.items?.[0];
