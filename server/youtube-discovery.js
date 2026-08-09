@@ -85,7 +85,7 @@ async function searchYouTubeChannels({ keywords, maxResults = 50, minSubscribers
       }
 
       const statsRes = await fetch(
-        `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&id=${channelIds.join(',')}&key=${YOUTUBE_API_KEY}`
+        `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&id=${channelIds.map(encodeURIComponent).join(',')}&key=${YOUTUBE_API_KEY}`
       );
       const statsData = await statsRes.json();
       quota.record('channels', 1);

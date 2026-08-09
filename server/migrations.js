@@ -992,6 +992,54 @@ async function getAppliedMigrations({ query }) {
   return new Set((result.rows || []).map(r => r.id));
 }
 
+// Postgres advisory-lock id for the migration runner. Arbitrary but fixed —
+// every instance must pick the same number to serialize against each other.
+const MIGRATION_LOCK_ID = 8410771;
+
+/**
+ * Serialize the migration run across instances.
+ *
+ * Two Cloud Run instances cold-starting against a database with pending
+ * migrations both read an empty `applied` set, both run the DDL, and both
+ * INSERT the same id — the loser hits a UNIQUE violation and, because the
+ * boot IIFE rethrows, exits(1). The DDL itself is idempotent (every
+ * migration swallows "already exists"), so the only real damage is the
+ * crash; still, serializing is the correct fix.
+ *
+ * The advisory lock must be taken on a DEDICATED connection: `query()` runs
+ * through a pool, and a session-scoped lock taken on one pooled connection
+ * cannot be released from another. Returns a release function; on SQLite (or
+ * if anything goes wrong) it degrades to a no-op and we rely on the
+ * duplicate-tolerant INSERT below.
+ */
+async function acquireMigrationLock(dbApi) {
+  if (!dbApi.usePostgres) return async () => {};
+  let pool;
+  try {
+    ({ pool } = require('./database'));
+  } catch { return async () => {}; }
+  if (!pool || typeof pool.connect !== 'function') return async () => {};
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_ID]);
+  } catch (e) {
+    if (client) client.release();
+    console.warn('[migrations] advisory lock unavailable, continuing unserialized:', e.message);
+    return async () => {};
+  }
+  return async () => {
+    try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID]); }
+    catch { /* connection is being released anyway */ }
+    client.release();
+  };
+}
+
+function isDuplicateKeyError(e) {
+  return /duplicate key|unique constraint|UNIQUE constraint failed/i.test(e.message || '');
+}
+
 async function runPendingMigrations(dbApi) {
   // Audit D-4: flag duplicate IDs (a copy-paste / merge-conflict bug that
   // would otherwise silently skip the second occurrence). We don't enforce
@@ -1005,30 +1053,47 @@ async function runPendingMigrations(dbApi) {
   }
 
   await ensureMigrationsTable(dbApi);
-  const applied = await getAppliedMigrations(dbApi);
+  const releaseLock = await acquireMigrationLock(dbApi);
+  try {
+    // Read the applied set INSIDE the lock: an instance that queued behind a
+    // peer must see what that peer just applied, not a pre-lock snapshot.
+    const applied = await getAppliedMigrations(dbApi);
 
-  const pending = MIGRATIONS.filter(m => !applied.has(m.id));
-  if (pending.length === 0) {
-    return { applied: 0, total: applied.size };
-  }
-
-  console.log(`[migrations] Running ${pending.length} pending migration(s)...`);
-  for (const migration of pending) {
-    const start = Date.now();
-    try {
-      await migration.up(dbApi);
-      await dbApi.exec(
-        'INSERT INTO schema_migrations (id, description) VALUES (?, ?)',
-        [migration.id, migration.description || '']
-      );
-      console.log(`[migrations] ✓ ${migration.id} (${Date.now() - start}ms)`);
-    } catch (e) {
-      console.error(`[migrations] ✗ ${migration.id} failed:`, e.message);
-      throw new Error(`Migration ${migration.id} failed: ${e.message}`);
+    const pending = MIGRATIONS.filter(m => !applied.has(m.id));
+    if (pending.length === 0) {
+      return { applied: 0, total: applied.size };
     }
-  }
 
-  return { applied: pending.length, total: applied.size + pending.length };
+    console.log(`[migrations] Running ${pending.length} pending migration(s)...`);
+    let appliedCount = 0;
+    for (const migration of pending) {
+      const start = Date.now();
+      try {
+        await migration.up(dbApi);
+        await dbApi.exec(
+          'INSERT INTO schema_migrations (id, description) VALUES (?, ?)',
+          [migration.id, migration.description || '']
+        );
+        appliedCount++;
+        console.log(`[migrations] ✓ ${migration.id} (${Date.now() - start}ms)`);
+      } catch (e) {
+        if (isDuplicateKeyError(e)) {
+          // Another process recorded this migration while we were running it
+          // (no advisory lock on SQLite; parallel test workers hit this).
+          // Migrations are idempotent, so the DDL running twice is benign —
+          // crashing the boot over the bookkeeping row is not.
+          console.warn(`[migrations] ${migration.id} already recorded by a concurrent process — skipping`);
+          continue;
+        }
+        console.error(`[migrations] ✗ ${migration.id} failed:`, e.message);
+        throw new Error(`Migration ${migration.id} failed: ${e.message}`);
+      }
+    }
+
+    return { applied: appliedCount, total: applied.size + appliedCount };
+  } finally {
+    await releaseLock();
+  }
 }
 
 module.exports = { runPendingMigrations, MIGRATIONS, MULTITENANT_TABLES };
