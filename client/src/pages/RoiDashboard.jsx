@@ -5,8 +5,7 @@ import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useI18n } from '../i18n';
 import ErrorCard from '../components/ErrorCard';
-
-const FUNNEL_COLORS = ['#6c5ce7', '#74b9ff', '#54a0ff', '#a29bfe', '#00d2a0', '#fdcb6e', '#ff9ff3', '#00b894'];
+import { chartPalette, chartColors } from '../utils/chartTokens';
 
 function formatNumber(n) {
   if (!n && n !== 0) return '-';
@@ -117,25 +116,25 @@ export default function RoiDashboard() {
           label={t('roi.metric_budget_util')}
           value={campaign.budget_utilization ? campaign.budget_utilization + '%' : '-'}
           sub={`${formatCurrency(campaign.budget_spent)} / ${formatCurrency(campaign.budget)}`}
-          color="#6c5ce7"
+          color={chartColors.accent}
         />
         <MetricCard
           label={t('roi.metric_total_views')}
           value={formatNumber(perf.total_views)}
           sub={t('roi.pieces_published_sub', { n: perf.content_count })}
-          color="#74b9ff"
+          color={chartColors.info}
         />
         <MetricCard
           label={t('roi.metric_engagement_rate')}
           value={perf.engagement_rate + '%'}
           sub={t('roi.total_interactions_sub', { n: formatNumber(perf.total_engagement) })}
-          color="#00d2a0"
+          color={chartColors.success}
         />
         <MetricCard
           label={t('roi.metric_effective_cpm')}
           value={roiMetrics.effective_cpm ? formatCurrency(roiMetrics.effective_cpm) : '-'}
           sub={t('roi.cpm_sub')}
-          color="#fdcb6e"
+          color={chartColors.warning}
         />
       </div>
 
@@ -158,34 +157,34 @@ export default function RoiDashboard() {
                 formatter={(v, name, props) => [`${v} (${props.payload.rate})`, t('roi.funnel_tooltip_label')]}
               />
               <Bar dataKey="value" radius={[0, 6, 6, 0]}>
-                {funnelSteps.map((_, i) => <Cell key={i} fill={FUNNEL_COLORS[i]} />)}
+                {funnelSteps.map((_, i) => <Cell key={i} fill={chartPalette()[i % 8]} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '10px', marginTop: '16px' }}>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
-            <div style={{ fontSize: '20px', fontWeight: '700', color: '#74b9ff' }}>{funnel.rates.delivery_rate ?? '0.0'}%</div>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: chartColors.info }}>{funnel.rates.delivery_rate ?? '0.0'}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.delivery_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
-            <div style={{ fontSize: '20px', fontWeight: '700', color: '#a29bfe' }}>{funnel.rates.open_rate ?? '0.0'}%</div>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: chartColors.violet }}>{funnel.rates.open_rate ?? '0.0'}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.open_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
-            <div style={{ fontSize: '20px', fontWeight: '700', color: '#6c5ce7' }}>{funnel.rates.reply_rate}%</div>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: chartColors.accent }}>{funnel.rates.reply_rate}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.reply_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
-            <div style={{ fontSize: '20px', fontWeight: '700', color: '#00d2a0' }}>{funnel.rates.contract_rate}%</div>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: chartColors.success }}>{funnel.rates.contract_rate}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.contract_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
-            <div style={{ fontSize: '20px', fontWeight: '700', color: '#fdcb6e' }}>{funnel.rates.completion_rate}%</div>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: chartColors.warning }}>{funnel.rates.completion_rate}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.completion_rate')}</div>
           </div>
           <div className="card" style={{ padding: '12px', textAlign: 'center' }}>
-            <div style={{ fontSize: '20px', fontWeight: '700', color: '#00b894' }}>{funnel.rates.payment_rate}%</div>
+            <div style={{ fontSize: '20px', fontWeight: '700', color: chartColors.teal }}>{funnel.rates.payment_rate}%</div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.payment_rate')}</div>
           </div>
         </div>
@@ -205,11 +204,11 @@ export default function RoiDashboard() {
                 <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} allowDecimals={false} />
                 <Tooltip contentStyle={{ backgroundColor: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 13 }} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line type="monotone" dataKey="sent" stroke="#6c5ce7" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_sent')} />
-                <Line type="monotone" dataKey="delivered" stroke="#74b9ff" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_delivered')} />
-                <Line type="monotone" dataKey="opened" stroke="#a29bfe" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_opened')} />
-                <Line type="monotone" dataKey="replied" stroke="#00d2a0" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_replied')} />
-                <Line type="monotone" dataKey="failed" stroke="#ff6b6b" strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_failed')} />
+                <Line type="monotone" dataKey="sent" stroke={chartColors.accent} strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_sent')} />
+                <Line type="monotone" dataKey="delivered" stroke={chartColors.info} strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_delivered')} />
+                <Line type="monotone" dataKey="opened" stroke={chartColors.violet} strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_opened')} />
+                <Line type="monotone" dataKey="replied" stroke={chartColors.success} strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_replied')} />
+                <Line type="monotone" dataKey="failed" stroke={chartColors.danger} strokeWidth={2} dot={{ r: 3 }} name={t('roi.funnel_failed')} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -234,7 +233,7 @@ export default function RoiDashboard() {
                       borderRadius: '8px', fontSize: '13px'
                     }}
                   />
-                  <Bar dataKey="count" fill="#6c5ce7" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="count" fill={chartColors.accent} radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -257,20 +256,20 @@ export default function RoiDashboard() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
               <div style={{ padding: '10px', background: 'var(--bg-input)', borderRadius: '8px' }}>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.cost_per_signed')}</div>
-                <div style={{ fontSize: '18px', fontWeight: '700', color: '#74b9ff' }}>
+                <div style={{ fontSize: '18px', fontWeight: '700', color: chartColors.info }}>
                   {roiMetrics.cost_per_signed_contract ? formatCurrency(roiMetrics.cost_per_signed_contract) : '-'}
                 </div>
               </div>
               <div style={{ padding: '10px', background: 'var(--bg-input)', borderRadius: '8px' }}>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.cost_per_completed')}</div>
-                <div style={{ fontSize: '18px', fontWeight: '700', color: '#00d2a0' }}>
+                <div style={{ fontSize: '18px', fontWeight: '700', color: chartColors.success }}>
                   {roiMetrics.cost_per_completed ? formatCurrency(roiMetrics.cost_per_completed) : '-'}
                 </div>
               </div>
             </div>
             <div style={{ padding: '10px', background: 'var(--bg-input)', borderRadius: '8px' }}>
               <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('roi.cpm_label')}</div>
-              <div style={{ fontSize: '18px', fontWeight: '700', color: '#fdcb6e' }}>
+              <div style={{ fontSize: '18px', fontWeight: '700', color: chartColors.warning }}>
                 {roiMetrics.effective_cpm ? formatCurrency(roiMetrics.effective_cpm) : t('roi.no_views_data')}
               </div>
             </div>
@@ -281,11 +280,11 @@ export default function RoiDashboard() {
       <div className="card" style={{ marginTop: '16px' }}>
         <h3 style={{ marginBottom: '14px' }}>{t('roi.content_perf_title')}</h3>
         <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
-          <MetricCard label={t('roi.pieces_published')} value={perf.content_count} color="#6c5ce7" />
-          <MetricCard label={t('roi.views')} value={formatNumber(perf.total_views)} color="#74b9ff" />
-          <MetricCard label={t('roi.likes')} value={formatNumber(perf.total_likes)} color="#ff6b6b" />
-          <MetricCard label={t('roi.comments')} value={formatNumber(perf.total_comments)} color="#00d2a0" />
-          <MetricCard label={t('roi.shares')} value={formatNumber(perf.total_shares)} color="#fdcb6e" />
+          <MetricCard label={t('roi.pieces_published')} value={perf.content_count} color={chartColors.accent} />
+          <MetricCard label={t('roi.views')} value={formatNumber(perf.total_views)} color={chartColors.info} />
+          <MetricCard label={t('roi.likes')} value={formatNumber(perf.total_likes)} color={chartColors.danger} />
+          <MetricCard label={t('roi.comments')} value={formatNumber(perf.total_comments)} color={chartColors.success} />
+          <MetricCard label={t('roi.shares')} value={formatNumber(perf.total_shares)} color={chartColors.warning} />
         </div>
       </div>
     </div>

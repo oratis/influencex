@@ -3,7 +3,7 @@ import { api } from '../api/client';
 import { useAuth } from '../AuthContext';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
 
 export default function UsersPage() {
   const { t } = useI18n();
@@ -181,7 +181,7 @@ export default function UsersPage() {
                   <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{u.email}</td>
                   <td>
                     <span className={`badge ${u.role === 'admin' ? 'badge-red' : u.role === 'editor' || u.role === 'member' ? 'badge-blue' : 'badge-gray'}`}>
-                      {u.role}
+                      {enumLabel(t, 'roles', u.role)}
                     </span>
                   </td>
                   <td style={{ fontSize: '12px', color: 'var(--text-muted)' }}>

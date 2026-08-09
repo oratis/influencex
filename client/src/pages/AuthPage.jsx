@@ -64,6 +64,9 @@ export default function AuthPage() {
                 className="btn auth-google-btn"
                 style={{
                   width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  // Google brand guidelines mandate the exact light button
+                  // chrome + logo colours; these literals are intentional and
+                  // are the only ones exempt from the design.md §0 rule.
                   gap: 10, padding: '10px 16px', background: '#fff', color: '#1a1a1a',
                   border: '1px solid #dadce0', borderRadius: 8, fontSize: 14, fontWeight: 500,
                   marginBottom: 16, cursor: 'pointer',
@@ -77,10 +80,10 @@ export default function AuthPage() {
                 </svg>
                 {t('auth.continue_google')}
               </button>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: '#888', fontSize: 12 }}>
-                <div style={{ flex: 1, height: 1, background: '#333' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: 'var(--text-secondary)', fontSize: 12 }}>
+                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
                 <span>{t('auth.divider_or')}</span>
-                <div style={{ flex: 1, height: 1, background: '#333' }} />
+                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
               </div>
             </>
           )}
@@ -123,10 +126,10 @@ export default function AuthPage() {
             </p>
           </form>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: '#888', fontSize: 12 }}>
-            <div style={{ flex: 1, height: 1, background: '#333' }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '16px 0', color: 'var(--text-secondary)', fontSize: 12 }}>
+            <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
             <span>{t('auth.divider_or')}</span>
-            <div style={{ flex: 1, height: 1, background: '#333' }} />
+            <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
           </div>
 
           <a

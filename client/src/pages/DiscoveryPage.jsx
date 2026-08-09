@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
 import { useCampaign } from '../CampaignContext';
 
 const PLATFORMS = ['youtube', 'instagram', 'tiktok', 'x', 'reddit'];
@@ -228,7 +228,7 @@ export default function DiscoveryPage() {
             <h3 style={{ fontSize: 15, margin: 0 }}>
               {t('discovery.job_title')}
               <span className={`badge ${job.status === 'complete' || job.status === 'success' ? 'badge-green' : job.status === 'failed' || job.status === 'error' ? 'badge-red' : 'badge-blue'}`} style={{ marginLeft: 8 }}>
-                {job.status}
+                {enumLabel(t, 'job_status', job.status)}
               </span>
             </h3>
             {job.id && <code style={{ fontSize: 11, color: 'var(--text-muted)' }}>{job.id.slice(0, 8)}…</code>}

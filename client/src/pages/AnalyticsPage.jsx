@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import { useI18n } from '../i18n';
+import ErrorCard from '../components/ErrorCard';
 
 export default function AnalyticsPage() {
   const { t } = useI18n();
@@ -10,6 +11,7 @@ export default function AnalyticsPage() {
   const [content, setContent] = useState({});
   const [cost, setCost] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
 
   useEffect(() => { loadAll(); }, []);
 
@@ -27,7 +29,12 @@ export default function AnalyticsPage() {
       setPresets(pr.presets || []);
       setContent(c.byType || {});
       setCost(costR);
-    } catch (e) { /* ok */ }
+      setLoadError(null);
+    } catch (e) {
+      // Swallowing this rendered an empty dashboard that looked like
+      // "no activity yet".
+      setLoadError(e);
+    }
     setLoading(false);
   }
 
@@ -45,6 +52,10 @@ export default function AnalyticsPage() {
           <p>{t('analytics.subtitle')}</p>
         </div>
       </div>
+
+      {loadError && !cost && agents.length === 0 && platforms.length === 0 && (
+        <ErrorCard error={loadError} onRetry={loadAll} />
+      )}
 
       {cost && (
         <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>

@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog';
 import { useI18n } from '../i18n';
+import { Drawer } from './Modal';
 
 const AVAILABLE_VARS = [
   'kol_name', 'kol_handle', 'platform', 'followers', 'category',
@@ -87,11 +88,12 @@ export default function TemplateManagerDrawer({ onClose }) {
   }
 
   return (
-    <div style={overlayStyle} onClick={onClose}>
-      <div style={drawerStyle} onClick={e => e.stopPropagation()}>
+    <Drawer onClose={onClose} labelledBy="template-manager-title" width="min(620px, 100%)">
         <div style={headerStyle}>
-          <h3 style={{ margin: 0 }}>{t('templates.title')}</h3>
-          <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>×</button>
+          <h3 id="template-manager-title" style={{ margin: 0 }}>{t('templates.title')}</h3>
+          <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>
+            <span aria-hidden="true">×</span>
+          </button>
         </div>
 
         {editing ? (
@@ -200,8 +202,7 @@ export default function TemplateManagerDrawer({ onClose }) {
             )}
           </div>
         )}
-      </div>
-    </div>
+    </Drawer>
   );
 }
 
@@ -432,14 +433,6 @@ function VariantEditor({ parentId, onCancel, onSave, t }) {
   );
 }
 
-const overlayStyle = {
-  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000,
-  display: 'flex', justifyContent: 'flex-end',
-};
-const drawerStyle = {
-  width: 'min(620px, 100%)', background: 'var(--bg-card)', borderLeft: '1px solid var(--border)',
-  height: '100vh', display: 'flex', flexDirection: 'column',
-};
 const headerStyle = {
   padding: '18px 22px', borderBottom: '1px solid var(--border)',
   display: 'flex', justifyContent: 'space-between', alignItems: 'center',

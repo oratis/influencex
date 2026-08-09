@@ -91,7 +91,7 @@ export default function InviteCodesPage() {
   function handleCopy(code) {
     navigator.clipboard?.writeText(code).then(
       () => toast.success(t('invite_codes.copied')),
-      () => toast.error('Copy failed')
+      () => toast.error(t('common.copy_failed'))
     );
   }
 

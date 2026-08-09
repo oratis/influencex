@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '../i18n';
+import Modal from './Modal';
 import { useAuth } from '../AuthContext';
 import { api } from '../api/client';
 
@@ -162,16 +163,13 @@ export default function CommandPalette() {
   if (!open) return null;
 
   return (
-    <div
-      className="modal-overlay"
-      onClick={() => setOpen(false)}
-      style={{ zIndex: 2500, alignItems: 'flex-start', paddingTop: '15vh' }}
+    <Modal
+      onClose={() => setOpen(false)}
+      label={t('command.placeholder')}
+      initialFocusRef={inputRef}
+      overlayStyle={{ zIndex: 2500, alignItems: 'flex-start', paddingTop: '15vh' }}
+      style={{ maxWidth: 560, width: '90%', padding: 0, overflow: 'hidden' }}
     >
-      <div
-        className="modal"
-        onClick={e => e.stopPropagation()}
-        style={{ maxWidth: 560, width: '90%', padding: 0, overflow: 'hidden' }}
-      >
         <input
           ref={inputRef}
           className="form-input"
@@ -230,7 +228,6 @@ export default function CommandPalette() {
         <div style={{ padding: '8px 14px', borderTop: '1px solid var(--border, transparent)', fontSize: 11, color: 'var(--text-muted)' }}>
           {t('command.footer_hint')}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

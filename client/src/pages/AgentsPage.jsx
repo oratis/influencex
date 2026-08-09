@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
 
 export default function AgentsPage() {
   const { t } = useI18n();
@@ -163,20 +165,20 @@ export default function AgentsPage() {
       </div>
 
       {runningAgentId && (
-        <div className="modal-overlay" onClick={() => setRunningAgentId(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 680 }}>
+        <Modal onClose={() => setRunningAgentId(null)} labelledBy="agents-run-modal-title" style={{ maxWidth: 680 }}>
             <div className="modal-header">
-              <h3>{t('agents.modal_title', { id: runningAgentId })}</h3>
+              <h3 id="agents-run-modal-title">{t('agents.modal_title', { id: runningAgentId })}</h3>
               <button className="btn-icon" onClick={() => setRunningAgentId(null)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
             </div>
             <div className="modal-body">
-              <label className="form-label">{t('agents.modal_input_label')}</label>
-              <textarea
-                className="form-textarea"
-                value={runInput}
-                onChange={e => setRunInput(e.target.value)}
-                style={{ minHeight: 180, fontFamily: 'monospace', fontSize: 13 }}
-              />
+              <FormField label={t('agents.modal_input_label')}>
+                <textarea
+                  className="form-textarea"
+                  value={runInput}
+                  onChange={e => setRunInput(e.target.value)}
+                  style={{ minHeight: 180, fontFamily: 'monospace', fontSize: 13 }}
+                />
+              </FormField>
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setRunningAgentId(null)}>{t('agents.modal_cancel')}</button>
@@ -189,8 +191,7 @@ export default function AgentsPage() {
                 }
               }}>{t('agents.modal_run')}</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {activeRun && (
@@ -219,7 +220,7 @@ export default function AgentsPage() {
                 {runs.map(r => (
                   <tr key={r.id}>
                     <td><code style={{ fontSize: 12 }}>{r.agent_id}</code></td>
-                    <td><span className={`badge ${r.status === 'complete' ? 'badge-green' : r.status === 'error' ? 'badge-red' : 'badge-orange'}`}>{r.status}</span></td>
+                    <td><span className={`badge ${r.status === 'complete' ? 'badge-green' : r.status === 'error' ? 'badge-red' : 'badge-orange'}`}>{enumLabel(t, 'job_status', r.status)}</span></td>
                     <td>{formatMoney(r.cost_usd_cents)}</td>
                     <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{(r.input_tokens || 0) + '/' + (r.output_tokens || 0)}</td>
                     <td style={{ fontSize: 12 }}>{r.duration_ms ? `${r.duration_ms}ms` : '—'}</td>

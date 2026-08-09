@@ -178,8 +178,12 @@ export default function CampaignDetail() {
           {selected.size > 0 && (
             <>
               <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{t('campaigns.selected_count', { count: selected.size })}</span>
-              <button className="btn btn-success btn-sm" onClick={() => handleBatchAction('approved')}>✅ {t('campaigns.btn_approve')}</button>
-              <button className="btn btn-danger btn-sm" onClick={() => handleBatchAction('rejected')}>❌ {t('campaigns.btn_reject')}</button>
+              <button className="btn btn-success btn-sm" onClick={() => handleBatchAction('approved')}>
+                <span aria-hidden="true">✅</span> {t('campaigns.btn_approve')}
+              </button>
+              <button className="btn btn-danger btn-sm" onClick={() => handleBatchAction('rejected')}>
+                <span aria-hidden="true">❌</span> {t('campaigns.btn_reject')}
+              </button>
             </>
           )}
         </div>
@@ -195,7 +199,15 @@ export default function CampaignDetail() {
               <thead>
                 <tr>
                   <th style={{ width: '40px' }}>
-                    <div className={`checkbox ${selected.size === sortedKols.length ? 'checked' : ''}`} onClick={toggleAll} />
+                    {/* Was a styled <div>: no keyboard access, no role, no
+                        name — bulk approve/reject was mouse-only. */}
+                    <input
+                      type="checkbox"
+                      className="checkbox-input"
+                      checked={sortedKols.length > 0 && selected.size === sortedKols.length}
+                      onChange={toggleAll}
+                      aria-label={t('campaigns.select_all')}
+                    />
                   </th>
                   <th>{t('campaigns.col_ai_score')}</th>
                   <th>{t('campaigns.col_kol')}</th>
@@ -213,7 +225,13 @@ export default function CampaignDetail() {
                 {sortedKols.map(kol => (
                   <tr key={kol.id}>
                     <td>
-                      <div className={`checkbox ${selected.has(kol.id) ? 'checked' : ''}`} onClick={() => toggleSelect(kol.id)} />
+                      <input
+                        type="checkbox"
+                        className="checkbox-input"
+                        checked={selected.has(kol.id)}
+                        onChange={() => toggleSelect(kol.id)}
+                        aria-label={t('campaigns.select_kol', { name: kol.display_name || kol.username })}
+                      />
                     </td>
                     <td>
                       <ScoreBadge score={kol.ai_score || 0} />
@@ -243,10 +261,24 @@ export default function CampaignDetail() {
                     <td>
                       <div className="btn-group">
                         {kol.status !== 'approved' && (
-                          <button className="btn btn-sm btn-success" onClick={() => handleStatusChange(kol.id, 'approved')}>✓</button>
+                          <button
+                            className="btn btn-sm btn-success"
+                            onClick={() => handleStatusChange(kol.id, 'approved')}
+                            aria-label={t('campaigns.approve_kol', { name: kol.display_name || kol.username })}
+                            title={t('campaigns.btn_approve')}
+                          >
+                            <span aria-hidden="true">✓</span>
+                          </button>
                         )}
                         {kol.status !== 'rejected' && (
-                          <button className="btn btn-sm btn-danger" onClick={() => handleStatusChange(kol.id, 'rejected')}>✕</button>
+                          <button
+                            className="btn btn-sm btn-danger"
+                            onClick={() => handleStatusChange(kol.id, 'rejected')}
+                            aria-label={t('campaigns.reject_kol', { name: kol.display_name || kol.username })}
+                            title={t('campaigns.btn_reject')}
+                          >
+                            <span aria-hidden="true">✕</span>
+                          </button>
                         )}
                       </div>
                     </td>

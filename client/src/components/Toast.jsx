@@ -48,10 +48,10 @@ export function ToastProvider({ children }) {
 }
 
 const TOAST_STYLES = {
-  success: { bg: 'rgba(0,210,160,0.15)', border: 'rgba(0,210,160,0.3)', color: '#00d2a0', icon: '✓' },
-  error: { bg: 'rgba(255,107,107,0.15)', border: 'rgba(255,107,107,0.3)', color: '#ff6b6b', icon: '✕' },
-  warning: { bg: 'rgba(253,203,110,0.15)', border: 'rgba(253,203,110,0.3)', color: '#fdcb6e', icon: '!' },
-  info: { bg: 'rgba(116,185,255,0.15)', border: 'rgba(116,185,255,0.3)', color: '#74b9ff', icon: 'i' },
+  success: { bg: 'var(--success-bg)', border: 'rgba(0,210,160,0.3)', color: 'var(--success)', icon: '✓' },
+  error: { bg: 'var(--danger-bg)', border: 'rgba(255,107,107,0.3)', color: 'var(--danger)', icon: '✕' },
+  warning: { bg: 'var(--warning-bg)', border: 'rgba(253,203,110,0.3)', color: 'var(--warning)', icon: '!' },
+  info: { bg: 'var(--info-bg)', border: 'rgba(116,185,255,0.3)', color: 'var(--info)', icon: 'i' },
 };
 
 function ToastItem({ toast, onDismiss }) {
