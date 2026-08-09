@@ -28,7 +28,7 @@ InfluenceX (https://influencexes.com) is an **invite-only AI marketing platform*
 - `server/agents-v2/` — 18 LLM agents (strategy, research, content-text/visual/voice/video, kol-outreach, publisher, ads, community, etc.)
 - `server/agent-runtime/` — agent registry + Conductor (goal → plan → run)
 - `server/llm/` — Anthropic + OpenAI + Gemini + 火山方舟 routing layer with cache + cost stats
-- `server/__tests__/` — 678 Node test runner unit tests across 71 files; frontend has 13 Vitest files under `client/src/{components,pages,utils}/` and 5 Playwright tests across 3 specs in `e2e/tests/`
+- `server/__tests__/` — Node test runner unit tests, one file per module (~680 tests / 71 files as of `c7c7d5b`; run `npm test` for the live number rather than trusting this one); frontend has Vitest files under `client/src/{components,pages,utils}/` plus Playwright specs in `e2e/tests/`
 - `client/` — Vite + React 18 SPA (HashRouter); `client/src/pages/*.jsx` is one page per route
 - `docs/` — see file links above
 - `deploy.sh` / `migrate-env-to-secret.sh` / `setup-secrets.sh` — Cloud Run + Secret Manager helpers
@@ -105,7 +105,7 @@ preview_start influencex          # server on :8080 (SQLite if no DATABASE_URL)
 preview_start influencex-client   # Vite dev on :5173 (HMR)
 
 # Tests
-npm test                          # 678 server unit tests, ~1s
+npm test                          # full server suite, ~1s (~680 tests as of c7c7d5b)
 npm test -- --test-concurrency=1  # serialized; use when SQLITE_BUSY flakes (see memory.md §5.2)
 cd client && npx vitest run       # 13 component/page/util test files
 npx playwright test               # 5 e2e tests across 3 specs in e2e/tests/
