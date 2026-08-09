@@ -4,6 +4,8 @@
 **方法:** ① 全新 clone → `npm install` → `npm test` → client build；② 本地 SQLite + seed 数据，浏览器实测 22 条路由全走查（登录/注册/邀请码/Discovery/Pipeline/Contacts/Conductor/Settings/ZH 双语/移动端）；③ 服务端 + 客户端静态代码审计（多租户 / 安全 / 队列 / i18n / 轮询 / a11y），关键结论均已在真实代码或运行环境二次验证。
 **结论 TL;DR:** 平台整体质量高于 4 月审计时的水平（377/377 测试绿、双语覆盖完整、移动端可用、邀请闭环走通），但存在 **2 个 P0 功能性断裂**（Pipeline approve 必 500、ROI 在生产 Postgres 必 500）、**1 个 P0 数据缺陷**（pipeline 写入的 KOL 库记录无 workspace_id）、以及一批多租户/安全缺口。修复清单与执行顺序见 [MASTER_PLAN_2026-08.md](./MASTER_PLAN_2026-08.md)。
 
+> **修复状态（2026-08-09）：本文档所有 P0/P1 条目已全部修复并合入 main**（PR #7–#15）。测试基线从 377 涨到 572（server）+ 59（client）+ 5 条 Playwright，CI 五个 job 全绿。逐项对应关系、以及实现过程中**新撞出来的 9 个缺陷**（含一个会导致生产启动失败的 P0），见 MASTER_PLAN §2b。本文档保留原始审计结论不改写，作为当时状态的存档。
+
 > 严重级定义 — **P0**: 核心链路断裂或数据损坏；**P1**: 高影响 bug / 安全缺口；**P2**: 明确缺陷但有绕行；**P3**: 打磨项。
 > 标注 ✅ = 已在本机运行环境实际复现/验证；未标注 = 静态审计定位（可信度高，修复时按代码路径复核）。
 
@@ -26,22 +28,22 @@
 
 ## 1. P0 — 核心链路断裂（必须立刻修）
 
-### P0-1 ✅ `POST /api/pipeline/jobs/:id/approve` 引用不存在的列，每次调用必 500
+### P0-1 ✅ 已修（#7） · `POST /api/pipeline/jobs/:id/approve` 引用不存在的列，每次调用必 500
 `server/index.js:5174` 更新 `contacts` 时写 `kol_email=COALESCE(kol_email, ?)` — **`contacts` 表没有 `kol_email` 列**（已用 PRAGMA 实测确认；基础 schema 和所有 migration 均未添加，代码库其它地方的 `kol_email` 全是 `k.email AS kol_email` 别名）。更糟的是前一条语句已把 pipeline job 推进到 `stage='send'`，然后本条抛错 → job 卡死在 send 阶段且没有任何邮件入队。**Pipeline 的人工审批发送主链路当前是坏的。**
 同类幻影列：`server/index.js:3455-3461` Cmd-K 联系人搜索 select `kol_username, kol_email` 并按不存在的 `contacts.updated_at` 排序，错误被 `.catch(() => [])` 吞掉 → 搜索联系人永远返回空。
 **修复:** approve 去掉 `kol_email` 写入（收件人已存在 `pipeline_jobs.email_to`）；搜索改 join `kols` 取邮箱、排序列改 `created_at`。补一条会真正执行该 UPDATE 的测试。
 
-### P0-2 `GET /api/campaigns/:id/roi` 在生产 Postgres 上必 500
+### P0-2 ✅ 已修（#7） · `GET /api/campaigns/:id/roi` 在生产 Postgres 上必 500
 `server/roi-dashboard.js:21,25,30` 时间线 CTE 用 SQLite 独有的 `datetime('now','-30 days')`，无 `usePostgres` 分支（已读码确认无分支）。本地 SQLite 测试全绿，但 Cloud SQL PG15 会抛 `function datetime(unknown, unknown) does not exist` → **生产 ROI 页整页挂**。
 **修复:** JS 侧计算 ISO cutoff 作为参数传入（`scheduler.js:52` 已有同样做法），一处改动两方言通吃。
 
-### P0-3 `runPipeline` 写入 `kol_database` 不带 `workspace_id`
+### P0-3 ✅ 已修（#7，结构性根治见 #11） · `runPipeline` 写入 `kol_database` 不带 `workspace_id`
 `server/index.js:5012-5024` 两个方言分支的 INSERT 列清单都没有 `workspace_id`（已读码确认），而列是 nullable 的所以静默成功。后果：pipeline 抓取的 KOL 在 `/api/kol-database`（按 workspace 过滤）里**永远不可见**；每次 run 生成新 uuid，`ON CONFLICT (id)` 永不命中 → 无限堆积重复行。
 **修复:** 列清单加 `workspace_id`（函数已收到该参数），去重键改 `(workspace_id, platform, username)`；补测试。
 
 ---
 
-## 2. P1 — 多租户 / 安全
+## 2. P1 — 多租户 / 安全 ✅ 全部已修（#8 / #14）
 
 | # | 位置 | 问题 | 场景 |
 |---|---|---|---|
@@ -58,7 +60,7 @@
 
 P2/P3 安全杂项（SSRF 重定向绕过、CSV 公式注入、session token 明文存储、Gmail RFC822 头注入、oauth_states 不过期、invite-code lookup 无限流、双加密模块并存）详见 master plan §PR-C。
 
-## 3. P1 — 前端
+## 3. P1 — 前端 ✅ 全部已修（#9 / #13）
 
 | # | 位置 | 问题 |
 |---|---|---|
@@ -73,7 +75,7 @@ P2/P3 安全杂项（SSRF 重定向绕过、CSV 公式注入、session token 明
 
 P2 级前端问题（EventSource/interval 泄漏、搜索无防抖竞态、campaign 切换竞态、静默加载失败页、toast 无 aria-live、8+ 个自绘 modal 无焦点管理、`/data` 幽灵路由、Landing 双 "Sign In" 按钮 ✅、Ads/Translate 页原生白底表单控件 ✅、changelog 不渲染行内 markdown ✅、KOL 库 EMAIL 列语义歧义 ✅）详见 master plan §PR-D/§PR-F。
 
-## 4. P1/P2 — 队列与邮件正确性
+## 4. P1/P2 — 队列与邮件正确性 ✅ 全部已修（#10 / #15）
 
 | # | 位置 | 问题 |
 |---|---|---|
@@ -83,7 +85,7 @@ P2 级前端问题（EventSource/interval 泄漏、搜索无防抖竞态、campa
 | Q-4 | `scheduled-publish.js:69-81` | 领取任务的 UPDATE 无 `AND status='pending'` 守卫 → 多副本双发布 |
 | Q-5 | `index.js:1485-1499` | `/batch-send` 只预检不消费限流票据，且没挂 workspace 限流器 → 反复小批量绕过工作区发送上限 |
 
-## 5. DX / 运维
+## 5. DX / 运维 ✅ 全部已修（#7 / #12 / #15）
 
 | # | 问题 |
 |---|---|
