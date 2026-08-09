@@ -216,7 +216,15 @@ node --test server/__tests__/email-jobs.test.js
 node --test --test-name-pattern "specific test" server/__tests__/*.test.js
 ```
 
-`npm test` 跑全套 **656** 个（69 个文件），~1 秒。前端另有 13 个 vitest 文件（`cd client && npx vitest run`）+ 5 条 Playwright / 3 个 spec（`npx playwright test`）。
+`npm test` 跑全套 **678** 个（71 个文件），~1 秒。前端另有 13 个 vitest 文件（`cd client && npx vitest run`）+ 5 条 Playwright / 3 个 spec（`npx playwright test`）。
+
+**`SQLITE_BUSY` 偶发失败不是你的改动坏了。** `npm test` 是 `node --test`，默认按文件并发，而整套测试共用仓库根目录的**同一个** `influencex.db`。并发写会随机让 2-5 个文件报 `{ code: 'SQLITE_BUSY' }`，每次挂的文件还不一样。判定方法：
+
+```bash
+node --test --test-concurrency=1 server/__tests__/*.test.js   # 串行，~8 秒，稳定 678/678
+```
+
+串行绿 = 并发那几个是 flake。串行也红才是真的坏了。（在 main 上空跑也能复现，与任何 PR 无关。）
 
 ### 5.3 客户端 build 检查
 
@@ -325,7 +333,7 @@ type: `feat` / `fix` / `chore` / `docs` / `refactor`。scope: `discovery` / `out
 - 小改动（i18n / 文案 / a11y） —— 不强求立刻 deploy，下次大改一起
 - bug 修复 —— 立即 deploy（push + run `./deploy.sh`）
 - 安全修复 —— 立即 deploy + 通知用户
-- 大重构 —— 至少跑过全套 656 个服务端测试 + 客户端 build + 本地 preview 烟测，再 deploy
+- 大重构 —— 至少跑过全套 678 个服务端测试 + 客户端 build + 本地 preview 烟测，再 deploy
 
 ### 7.4 push 前 checklist
 
@@ -365,7 +373,7 @@ type: `feat` / `fix` / `chore` / `docs` / `refactor`。scope: `discovery` / `out
 
 ---
 
-**Last reviewed:** 2026-08-09 (post `#20`, main green: server 656 / client 82 / e2e 5).
+**Last reviewed:** 2026-08-09 (post `#24`, main green: server 678 / client 82 / e2e 5).
 Prod revision unchanged since `00049-w2x` — **this batch has not been deployed yet**; see
 [MASTER_PLAN_2026-08.md](./MASTER_PLAN_2026-08.md) §5 for the pre-deploy checklist (the startup
 contract changed: MAILBOX_ENCRYPTION_KEY now fail-fast, webhooks fail-closed without secrets).
