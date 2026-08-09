@@ -25,17 +25,55 @@ function getClient(redisUrl) {
   return _client;
 }
 
-function rateLimit({ max, windowMs, keyFn, message, redisUrl = process.env.REDIS_URL, prefix = process.env.REDIS_RATELIMIT_PREFIX || 'influencex:rl:' } = {}) {
+// Bucket namespacing, mirroring rate-limit.js. Without it every limiter built
+// on the default IP keyFn — auth (10/min), discovery (5/min), export (10/min),
+// sendEmail (20/min) — hashed to one sorted set per IP, so five discovery
+// calls ate half the login budget and the tightest max governed them all.
+// The in-process limiter fixed this in #15; because rate-limit.js swaps to
+// this module whenever REDIS_URL is set, the bug survived in production until
+// the same namespacing landed here.
+//
+// Naming must agree ACROSS REPLICAS, unlike the in-process case where the
+// bucket is local: two replicas that disagree on a namespace silently split
+// one logical limiter into two buckets (doubling the effective cap). The
+// auto-generated `rl<n>` fallback is a per-process construction counter, so
+// it only agrees when every limiter is built unconditionally at module load
+// in a fixed order. That holds today, but it is a silent failure mode — pass
+// an explicit `name` for anything Redis-backed. autoName() warns when you
+// don't.
+let limiterSeq = 0;
+let _warnedAnon = false;
+function namespaced(name, key) {
+  return `${name}|${key}`;
+}
+
+function autoName() {
+  const ns = `rl${++limiterSeq}`;
+  // Once per process: the message is identical every time, and one is enough
+  // to prompt the fix.
+  if (!_warnedAnon) {
+    _warnedAnon = true;
+    console.warn(
+      `[rate-limit] Redis limiter built without a name (using positional "${ns}"). ` +
+      'Positional names only agree across replicas while limiter construction order is ' +
+      'identical; pass { name } to make the bucket explicit.'
+    );
+  }
+  return ns;
+}
+
+function rateLimit({ max, windowMs, keyFn, message, name, redisUrl = process.env.REDIS_URL, prefix = process.env.REDIS_RATELIMIT_PREFIX || 'influencex:rl:' } = {}) {
   if (!redisUrl) {
     throw new Error('Redis rateLimit requires REDIS_URL (or pass redisUrl)');
   }
   const client = getClient(redisUrl);
   const getKey = keyFn || ((req) => req.ip || req.headers['x-forwarded-for'] || 'anonymous');
   const errorMsg = message || 'Too many requests, please slow down';
+  const ns = name || autoName();
 
   return async (req, res, next) => {
     const rawKey = getKey(req);
-    const key = prefix + rawKey;
+    const key = prefix + namespaced(ns, rawKey);
     const now = Date.now();
     const cutoff = now - windowMs;
 
@@ -79,13 +117,17 @@ function rateLimit({ max, windowMs, keyFn, message, redisUrl = process.env.REDIS
  * the same sorted-set window the middleware uses. Check-then-add (same
  * non-Lua tradeoff as the middleware); fail-open on Redis trouble so a cache
  * blip doesn't block real users.
+ *
+ * `name` must match the `name` the limiter it shadows was built with —
+ * otherwise the reservation lands in a bucket nothing ever checks and a batch
+ * sidesteps the cap entirely. Defaults to 'shared', same as rate-limit.js.
  */
-async function consume({ key: rawKey, n = 1, max, windowMs, redisUrl = process.env.REDIS_URL, prefix = process.env.REDIS_RATELIMIT_PREFIX || 'influencex:rl:' } = {}) {
+async function consume({ key: rawKey, n = 1, max, windowMs, name, redisUrl = process.env.REDIS_URL, prefix = process.env.REDIS_RATELIMIT_PREFIX || 'influencex:rl:' } = {}) {
   if (!redisUrl) {
     throw new Error('Redis consume requires REDIS_URL (or pass redisUrl)');
   }
   const client = getClient(redisUrl);
-  const key = prefix + rawKey;
+  const key = prefix + namespaced(name || 'shared', rawKey);
   const now = Date.now();
   try {
     const m = client.multi();
