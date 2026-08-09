@@ -135,7 +135,12 @@ Write the video package. Call compose_video.`;
 
     ctx.emit('progress', { step: 'complete', message: 'Video package ready' });
 
-    const scriptCost = res.usage?.usdCents || 25;
+    // `??`, not `||`: zero is a real answer, not a missing one. A cache hit
+    // reports usdCents 0 by design, and so does any live call on a model absent
+    // from llm's PRICING table (or one small enough to round to zero). `||`
+    // read all three as "unknown" and charged the 25¢ estimate anyway, billing
+    // for spend that never happened. Only genuinely absent usage falls back.
+    const scriptCost = res.usage?.usdCents ?? 25;
     const voiceCharCount = includeVoice && audioDataUrl
       ? [pkg.hook, ...pkg.beats.map(b => b.voiceover), pkg.cta].filter(Boolean).join(' ').length
       : 0;
