@@ -91,6 +91,22 @@ export function toastApiError(err, toast, t) {
   return msg;
 }
 
+// This module lives outside React, so it can't call useI18n(). The i18n
+// provider installs its `t` here on mount (see I18nProvider) and we fall back
+// to English only if that hasn't happened yet (e.g. an error thrown during the
+// very first render pass).
+let translator = null;
+export function setApiTranslator(fn) {
+  translator = typeof fn === 'function' ? fn : null;
+}
+
+function tr(key, fallback) {
+  if (!translator) return fallback;
+  const value = translator(key);
+  // `t()` echoes the key back when it's missing from both dicts.
+  return !value || value === key ? fallback : value;
+}
+
 // Defense-in-depth (audit C-2): if a message looks like a stack trace or
 // driver dump (DB error, Node frame), don't render it raw — the server
 // is supposed to sanitize, but we do a second pass here so a regression
@@ -98,9 +114,10 @@ export function toastApiError(err, toast, t) {
 function sanitizeApiMessage(msg) {
   if (!msg) return '';
   const s = String(msg);
-  if (/at [\w$.]+\s*\(/.test(s)) return 'Something went wrong. Please try again.';
+  const generic = () => tr('common.error_generic', 'Something went wrong. Please try again.');
+  if (/at [\w$.]+\s*\(/.test(s)) return generic();
   if (/sqlite|sqlstate|er_\d|pg_|column .* does not exist|relation .* does not exist|deadlock|constraint failed/i.test(s)) {
-    return 'Something went wrong. Please try again.';
+    return generic();
   }
   if (s.length > 240) return s.slice(0, 240) + '…';
   return s;
@@ -138,7 +155,6 @@ export const api = {
     const q = new URLSearchParams(params).toString();
     return request(`/campaigns/${campaignId}/contacts${q ? '?' + q : ''}`);
   },
-  generateEmail: (data) => request('/contacts/generate', { method: 'POST', body: data }),
   updateContact: (id, data) => request(`/contacts/${id}`, { method: 'PUT', body: data }),
   sendEmail: (id) => request(`/contacts/${id}/send`, { method: 'POST' }),
   recordReply: (id, reply_content) => request(`/contacts/${id}/reply`, { method: 'POST', body: { reply_content } }),
@@ -148,10 +164,6 @@ export const api = {
 
   // Data
   getContentData: () => request('/data/content'),
-  addContentData: (data) => request('/data/content', { method: 'POST', body: data }),
-  getRegistrationData: () => request('/data/registrations'),
-  addRegistrationData: (data) => request('/data/registrations', { method: 'POST', body: data }),
-  seedDemo: () => request('/data/seed-demo', { method: 'POST' }),
 
   // KOL Database
   getKolApiStatus: () => request('/kol-database/api-status'),
@@ -159,7 +171,6 @@ export const api = {
     const q = new URLSearchParams(params).toString();
     return request(`/kol-database${q ? '?' + q : ''}`);
   },
-  getKolDatabaseEntry: (id) => request(`/kol-database/${id}`),
   addKolByUrl: (data) => request('/kol-database', { method: 'POST', body: data }),
   batchAddKolUrls: (urls) => request('/kol-database/batch', { method: 'POST', body: { urls } }),
   deleteKolDatabaseEntry: (id) => request(`/kol-database/${id}`, { method: 'DELETE' }),
@@ -175,13 +186,6 @@ export const api = {
   editPipelineEmail: (id, data) => request(`/pipeline/jobs/${id}/edit`, { method: 'POST', body: data }),
   approvePipelineEmail: (id, data) => request(`/pipeline/jobs/${id}/approve`, { method: 'POST', body: data }),
   rejectPipelineEmail: (id) => request(`/pipeline/jobs/${id}/reject`, { method: 'POST' }),
-  getSmtpStatus: () => request('/smtp/status'),
-
-  // Content Scraping (Task 2)
-  scrapeContentViews: () => request('/data/content/scrape', { method: 'POST' }),
-  getDashboardCombined: () => request('/data/dashboard/combined'),
-  updateContentStats: (id, data) => request(`/data/content/${id}`, { method: 'PUT', body: data }),
-  getContentDailyStats: (id) => request(`/data/content/${id}/daily`),
 
   // Discovery (Task 3)
   startDiscovery: (data) => request('/discovery/start', { method: 'POST', body: data }),
@@ -190,11 +194,7 @@ export const api = {
   processDiscoveryResults: (id, data) => request(`/discovery/jobs/${id}/process`, { method: 'POST', body: data }),
   getDiscoveryPlatforms: () => request('/discovery/platforms'),
 
-  // Stats
-  getStats: () => request('/stats'),
-
   // Email Templates
-  listEmailTemplates: () => request('/email-templates'),
   listAllEmailTemplates: () => request('/email-templates/all'),
   createEmailTemplate: (data) => request('/email-templates', { method: 'POST', body: data }),
   updateEmailTemplate: (id, data) => request(`/email-templates/${id}`, { method: 'PUT', body: data }),
@@ -206,7 +206,6 @@ export const api = {
   getTemplateStats: (id) => request(`/email-templates/${id}/stats`),
   promoteTemplateWinner: (id, winner_id) => request(`/email-templates/${id}/promote-winner`, { method: 'POST', body: { winner_id } }),
   setTemplateAutoPromote: (id, enabled) => request(`/email-templates/${id}/auto-promote`, { method: 'PATCH', body: { enabled } }),
-  renderEmailTemplate: (id, variables) => request(`/email-templates/${id}/render`, { method: 'POST', body: { variables } }),
   renderContactTemplate: (contactId, data) => request(`/contacts/${contactId}/render-template`, { method: 'POST', body: data }),
 
   // Outreach email sending
@@ -227,18 +226,9 @@ export const api = {
   getGmailOAuthStatus: () => request('/mailboxes/oauth/gmail/status'),
   initGmailOAuth: () => request('/mailboxes/oauth/gmail/init', { method: 'POST' }),
 
-  // YouTube quota
-  getYoutubeQuota: () => request('/quota/youtube'),
-
   // Permissions (RBAC)
   getMyPermissions: () => request('/auth/permissions'),
   getRoles: () => request('/auth/roles'),
-
-  // CSV Export URLs (use window.open or fetch with auth header)
-  exportCampaignKolsUrl: (campaignId) => `${BASE}/campaigns/${campaignId}/kols/export`,
-  exportCampaignContactsUrl: (campaignId) => `${BASE}/campaigns/${campaignId}/contacts/export`,
-  exportKolDatabaseUrl: () => `${BASE}/kol-database/export`,
-  exportContentDataUrl: () => `${BASE}/data/content/export`,
 
   // Download CSV with auth (for buttons in UI)
   downloadCsv: async (path, filename) => {
@@ -261,7 +251,6 @@ export const api = {
   // Scheduler
   scheduleContact: (id, scheduled_send_at) => request(`/contacts/${id}/schedule`, { method: 'POST', body: { scheduled_send_at } }),
   cancelScheduledContact: (id) => request(`/contacts/${id}/schedule`, { method: 'DELETE' }),
-  triggerSchedulerTick: () => request('/scheduler/tick', { method: 'POST' }),
 
   // ROI Dashboard
   getCampaignRoi: (id) => request(`/campaigns/${id}/roi`),
@@ -343,13 +332,11 @@ export const api = {
   },
   schedulePublish: (data) => request('/scheduled-publishes', { method: 'POST', body: data }),
   cancelScheduledPublish: (id) => request(`/scheduled-publishes/${id}`, { method: 'DELETE' }),
-  tickScheduledPublishes: () => request('/scheduled-publishes/tick', { method: 'POST' }),
 
   // Platform OAuth
   listPublishPlatforms: () => request('/publish/platforms'),
   initOAuth: (platform) => request(`/publish/oauth/${platform}/init`, { method: 'POST' }),
   disconnectPlatform: (platform) => request(`/publish/platforms/${platform}`, { method: 'DELETE' }),
-  directPublish: (platform, data) => request(`/publish/direct/${platform}`, { method: 'POST', body: data }),
 
   // Brand voices
   listBrandVoices: () => request('/brand-voices'),
@@ -388,7 +375,6 @@ export const api = {
   harvestReviews: (data) => request('/reviews/harvest', { method: 'POST', body: data }),
 
   // Discovery results — export + save-to-KOL-Database
-  exportDiscoveryResultsUrl: (jobId) => `${BASE}/discovery/jobs/${jobId}/export`,
   saveDiscoveryResultsToDb: (jobId, data) => request(`/discovery/jobs/${jobId}/save-to-db`, { method: 'POST', body: data }),
 
   // Cross-entity search (Cmd-K palette)

@@ -4,11 +4,9 @@ import { useCampaign } from '../CampaignContext';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
-
-const PLATFORM_COLORS = {
-  tiktok: '#ff0050', youtube: '#ff0000', instagram: '#e1306c',
-  twitch: '#9146ff', x: '#1da1f2', unknown: '#888',
-};
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
+import ErrorCard from '../components/ErrorCard';
 
 export default function KolDatabase() {
   const { t } = useI18n();
@@ -24,6 +22,7 @@ export default function KolDatabase() {
   const [retryingId, setRetryingId] = useState(null);
   const [selectedKol, setSelectedKol] = useState(null);
   const [apiStatus, setApiStatus] = useState(null);
+  const [loadError, setLoadError] = useState(null);
   const pollRef = useRef(null);
   const toast = useToast();
   const { confirm: confirmDialog } = useConfirm();
@@ -36,7 +35,12 @@ export default function KolDatabase() {
       if (sort) params.sort = sort;
       const data = await api.getKolDatabase(params);
       setKols(data);
-    } catch (e) { console.error(e); }
+      setLoadError(null);
+    } catch (e) {
+      // A failed fetch used to render as an empty state, indistinguishable
+      // from "no creators yet". Surface it with a retry instead.
+      setLoadError(e);
+    }
     setLoading(false);
   };
 
@@ -214,6 +218,8 @@ export default function KolDatabase() {
 
       {loading ? (
         <div className="empty-state"><p>{t('kol_db.loading')}</p></div>
+      ) : loadError && kols.length === 0 ? (
+        <ErrorCard error={loadError} onRetry={loadKols} />
       ) : kols.length === 0 ? (
         <div className="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 48, height: 48, marginBottom: 12 }}>
@@ -252,10 +258,18 @@ export default function KolDatabase() {
                         <div className="kol-avatar">
                           <img src={kol.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${kol.username}`} alt="" />
                         </div>
-                        <div>
-                          <div style={{ fontWeight: '600', fontSize: '13px' }}>{kol.display_name || kol.username}</div>
-                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>@{kol.username}</div>
-                        </div>
+                        {/* The whole row is clickable for mouse users; this
+                            button is what keyboard / screen-reader users reach
+                            (a focusable <tr> would lie about table semantics). */}
+                        <button
+                          type="button"
+                          className="row-open-btn"
+                          onClick={e => { e.stopPropagation(); setSelectedKol(kol); }}
+                          aria-label={t('kol_db.open_detail', { name: kol.display_name || kol.username })}
+                        >
+                          <span style={{ fontWeight: '600', fontSize: '13px' }}>{kol.display_name || kol.username}</span>
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>@{kol.username}</span>
+                        </button>
                       </div>
                     </td>
                     <td><span className="platform-icon"><span className={`platform-dot ${kol.platform}`} />{kol.platform}</span></td>
@@ -291,12 +305,20 @@ export default function KolDatabase() {
                             className="btn btn-sm btn-secondary"
                             onClick={() => handleRetryRow(kol.id)}
                             disabled={retryingId === kol.id}
+                            aria-label={t('kol_db.retry_row_title')}
                             title={t('kol_db.retry_row_title')}
                           >
-                            {retryingId === kol.id ? '⏳' : '🔁'}
+                            <span aria-hidden="true">{retryingId === kol.id ? '⏳' : '🔁'}</span>
                           </button>
                         )}
-                        <button className="btn btn-sm btn-secondary" onClick={() => handleDelete(kol.id)} title={t('kol_db.remove_title')}>🗑️</button>
+                        <button
+                          className="btn btn-sm btn-secondary"
+                          onClick={() => handleDelete(kol.id)}
+                          aria-label={t('kol_db.remove_title')}
+                          title={t('kol_db.remove_title')}
+                        >
+                          <span aria-hidden="true">🗑️</span>
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -357,10 +379,9 @@ function AddKolModal({ onClose, onAdded }) {
   const batchCount = batchUrls.split('\n').filter(u => u.trim()).length;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '640px' }}>
+    <Modal onClose={onClose} labelledBy="kol-add-modal-title" style={{ maxWidth: '640px' }}>
         <div className="modal-header">
-          <h3>{t('kol_db.add_title')}</h3>
+          <h3 id="kol-add-modal-title">{t('kol_db.add_title')}</h3>
           <button className="btn-icon" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}>✕</button>
         </div>
         <div className="modal-body">
@@ -371,8 +392,7 @@ function AddKolModal({ onClose, onAdded }) {
 
           {mode === 'single' ? (
             <form onSubmit={handleSubmitSingle}>
-              <div className="form-group">
-                <label className="form-label">{t('kol_db.single_label')}</label>
+              <FormField label={t('kol_db.single_label')} hint={t('kol_db.single_hint')}>
                 <input
                   className="form-input"
                   placeholder={t('kol_db.single_placeholder')}
@@ -380,18 +400,14 @@ function AddKolModal({ onClose, onAdded }) {
                   onChange={e => setUrl(e.target.value)}
                   autoFocus
                 />
-                <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                  {t('kol_db.single_hint')}
-                </p>
-              </div>
+              </FormField>
               <button type="submit" className="btn btn-primary" disabled={submitting || !url.trim()}>
                 {submitting ? `⏳ ${t('kol_db.processing')}` : `🤖 ${t('kol_db.single_submit')}`}
               </button>
             </form>
           ) : (
             <form onSubmit={handleSubmitBatch}>
-              <div className="form-group">
-                <label className="form-label">{t('kol_db.batch_label')}</label>
+              <FormField label={t('kol_db.batch_label')} hint={t('kol_db.batch_hint')}>
                 <textarea
                   className="form-textarea"
                   placeholder={`https://www.tiktok.com/@creator1\nhttps://youtube.com/@channel2\nhttps://instagram.com/influencer3`}
@@ -400,10 +416,7 @@ function AddKolModal({ onClose, onAdded }) {
                   style={{ minHeight: '200px', fontFamily: 'monospace', fontSize: '13px' }}
                   autoFocus
                 />
-                <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                  {t('kol_db.batch_hint')}
-                </p>
-              </div>
+              </FormField>
               <button type="submit" className="btn btn-primary" disabled={submitting || !batchUrls.trim()}>
                 {submitting ? `⏳ ${t('kol_db.processing')}` : `🤖 ${t('kol_db.batch_submit', { count: batchCount })}`}
               </button>
@@ -412,27 +425,25 @@ function AddKolModal({ onClose, onAdded }) {
 
           {result && (
             <div style={{ marginTop: '14px', padding: '10px 14px', borderRadius: '6px', background: result.success ? 'var(--success-bg)' : 'var(--danger-bg)', fontSize: '13px' }}>
-              <span style={{ color: result.success ? 'var(--success)' : 'var(--danger)' }}>{result.message}</span>
+              <span style={{ color: result.success ? 'var(--success)' : 'var(--danger)' }} role={result.success ? undefined : 'alert'}>{result.message}</span>
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
 function KolDetailModal({ kol, onClose }) {
   const { t } = useI18n();
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '800px' }}>
+    <Modal onClose={onClose} labelledBy="kol-detail-modal-title" style={{ maxWidth: '800px' }}>
         <div className="modal-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <div className="kol-avatar" style={{ width: 48, height: 48 }}>
               <img src={kol.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${kol.username}`} alt="" />
             </div>
             <div>
-              <h3 style={{ marginBottom: '2px' }}>{kol.display_name || kol.username}</h3>
+              <h3 id="kol-detail-modal-title" style={{ marginBottom: '2px' }}>{kol.display_name || kol.username}</h3>
               <div style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', gap: '10px' }}>
                 <span className="platform-icon"><span className={`platform-dot ${kol.platform}`} />{kol.platform}</span>
                 <span>@{kol.username}</span>
@@ -503,8 +514,7 @@ function KolDetailModal({ kol, onClose }) {
             </a>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

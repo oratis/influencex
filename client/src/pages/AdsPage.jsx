@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
+import FormField from '../components/FormField';
 
 export default function AdsPage() {
   const toast = useToast();
@@ -62,48 +63,49 @@ export default function AdsPage() {
         <div className="card">
           <h3 style={{ marginTop: 0 }}>{t('ads.brief')}</h3>
 
-          <Field label={t('ads.brand')}>
-            <input className="input" value={form.brand} onChange={e => update('brand', e.target.value)} placeholder={t('ads.brand_placeholder')} />
-          </Field>
+          <FormField style={{ marginBottom: 10 }} label={t('ads.brand')}>
+            <input className="form-input" value={form.brand} onChange={e => update('brand', e.target.value)} placeholder={t('ads.brand_placeholder')} />
+          </FormField>
 
-          <Field label={t('ads.product_url')}>
-            <input className="input" value={form.product_url} onChange={e => update('product_url', e.target.value)} placeholder={t('ads.product_url_placeholder')} />
-          </Field>
+          <FormField style={{ marginBottom: 10 }} label={t('ads.product_url')}>
+            <input className="form-input" value={form.product_url} onChange={e => update('product_url', e.target.value)} placeholder={t('ads.product_url_placeholder')} />
+          </FormField>
 
-          <Field label={t('ads.objective')}>
-            <select className="input" value={form.objective} onChange={e => update('objective', e.target.value)}>
+          <FormField style={{ marginBottom: 10 }} label={t('ads.objective')}>
+            <select className="form-select" value={form.objective} onChange={e => update('objective', e.target.value)}>
               <option value="awareness">{t('ads.objective_awareness')}</option>
               <option value="consideration">{t('ads.objective_consideration')}</option>
               <option value="conversion">{t('ads.objective_conversion')}</option>
               <option value="retargeting">{t('ads.objective_retargeting')}</option>
             </select>
-          </Field>
+          </FormField>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <Field label={t('ads.budget')}>
-              <input className="input" type="number" min={100} value={form.total_budget_usd} onChange={e => update('total_budget_usd', e.target.value)} />
-            </Field>
-            <Field label={t('ads.duration')}>
-              <input className="input" type="number" min={1} value={form.duration_days} onChange={e => update('duration_days', e.target.value)} />
-            </Field>
+            <FormField style={{ marginBottom: 10 }} label={t('ads.budget')}>
+              <input className="form-input" type="number" min={100} value={form.total_budget_usd} onChange={e => update('total_budget_usd', e.target.value)} />
+            </FormField>
+            <FormField style={{ marginBottom: 10 }} label={t('ads.duration')}>
+              <input className="form-input" type="number" min={1} value={form.duration_days} onChange={e => update('duration_days', e.target.value)} />
+            </FormField>
           </div>
 
-          <Field label={t('ads.geo')}>
-            <input className="input" value={form.geo} onChange={e => update('geo', e.target.value)} placeholder={t('ads.geo_placeholder')} />
-          </Field>
+          <FormField style={{ marginBottom: 10 }} label={t('ads.geo')}>
+            <input className="form-input" value={form.geo} onChange={e => update('geo', e.target.value)} placeholder={t('ads.geo_placeholder')} />
+          </FormField>
 
-          <Field label={t('ads.audience_notes')}>
+          <FormField style={{ marginBottom: 10 }} label={t('ads.audience_notes')}>
             <textarea
-              className="input"
+              className="form-textarea"
               value={form.audience_notes}
               onChange={e => update('audience_notes', e.target.value)}
               rows={3}
               placeholder={t('ads.audience_placeholder')}
-              style={{ resize: 'vertical', fontFamily: 'inherit' }}
+              style={{ minHeight: 0, resize: 'vertical', fontFamily: 'inherit' }}
             />
-          </Field>
+          </FormField>
 
-          <Field label={t('ads.platforms')}>
+          <fieldset style={{ marginBottom: 10, border: 0, padding: 0 }}>
+            <legend style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{t('ads.platforms')}</legend>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {[
                 { id: 'meta', label: 'Meta (FB + IG)' },
@@ -118,7 +120,7 @@ export default function AdsPage() {
                 </label>
               ))}
             </div>
-          </Field>
+          </fieldset>
 
           <button className="btn btn-primary" style={{ width: '100%', marginTop: 12 }} onClick={handleGenerate} disabled={busy}>
             {busy ? t('ads.running') : t('ads.run')}
@@ -143,15 +145,6 @@ export default function AdsPage() {
   );
 }
 
-function Field({ label, children }) {
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>
-      {children}
-    </div>
-  );
-}
-
 function PlanView({ plan, cost, t }) {
   const platformLabel = {
     meta: 'Meta', google_search: 'Google Search', google_display: 'Google Display',
@@ -165,11 +158,11 @@ function PlanView({ plan, cost, t }) {
             <div style={{ fontSize: 12, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5 }}>{t('ads.campaign_slug')}</div>
             <h3 style={{ margin: '2px 0 4px' }}>{plan.campaign_slug}</h3>
             <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-              {plan.objective} · {t('ads.days_suffix', { n: plan.duration_days || '?' })} · ${plan.budget?.total_usd?.toLocaleString() || '?'}
+              {enumLabel(t, 'ads', `objective_${plan.objective}`)} · {t('ads.days_suffix', { n: plan.duration_days || '?' })} · ${plan.budget?.total_usd?.toLocaleString() || '?'}
             </div>
           </div>
           {plan.execution?.mode === 'offline_plan' && (
-            <div style={{ padding: '4px 10px', borderRadius: 6, background: '#fef3c7', color: '#92400e', fontSize: 11, fontWeight: 600 }}>
+            <div className="badge badge-orange" style={{ fontSize: 11, fontWeight: 600 }}>
               {t('ads.offline_plan')}
             </div>
           )}
@@ -189,8 +182,8 @@ function PlanView({ plan, cost, t }) {
                   <span style={{ fontWeight: 600 }}>{platformLabel[s.platform] || s.platform}</span>
                   <span>{s.pct}% · ${((plan.budget.total_usd || 0) * s.pct / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
                 </div>
-                <div style={{ height: 6, background: 'var(--surface-hover)', borderRadius: 3, overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${s.pct}%`, background: 'var(--primary)' }} />
+                <div style={{ height: 6, background: 'var(--bg-input)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${s.pct}%`, background: 'var(--accent)' }} />
                 </div>
                 {s.rationale && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{s.rationale}</div>}
               </div>
@@ -240,7 +233,7 @@ function PlanView({ plan, cost, t }) {
           {p.utm && (
             <details style={{ marginBottom: 12 }}>
               <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>{t('ads.utm')}</summary>
-              <pre style={{ fontSize: 12, background: 'var(--surface-hover)', padding: 8, borderRadius: 4, marginTop: 8, overflow: 'auto' }}>
+              <pre style={{ fontSize: 12, background: 'var(--bg-input)', padding: 8, borderRadius: 4, marginTop: 8, overflow: 'auto' }}>
 {`utm_source=${p.utm.utm_source || ''}
 utm_medium=${p.utm.utm_medium || ''}
 utm_campaign=${p.utm.utm_campaign || ''}`}
@@ -275,7 +268,7 @@ utm_campaign=${p.utm.utm_campaign || ''}`}
       ))}
 
       {plan.risks?.length > 0 && (
-        <div className="card" style={{ borderLeft: '3px solid #f59e0b' }}>
+        <div className="card" style={{ borderLeft: '3px solid var(--warning)' }}>
           <h4 style={{ marginTop: 0 }}>{t('ads.risks')}</h4>
           <ul style={{ margin: 0, paddingLeft: 20 }}>
             {plan.risks.map((r, i) => <li key={i} style={{ fontSize: 13, marginBottom: 4 }}>{r}</li>)}

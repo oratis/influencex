@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import { useToast } from './Toast';
 import { useI18n } from '../i18n';
+import { Drawer } from './Modal';
 import { toLocalInputValue, localInputValueToIso } from '../utils/datetime';
 
 /**
@@ -197,17 +198,16 @@ export default function ContactThreadDrawer({ contact, campaignId, onClose, onCh
   if (!contact) return null;
 
   return (
-    <div style={overlayStyle} onClick={onClose}>
-      <div style={drawerStyle} onClick={e => e.stopPropagation()}>
+    <Drawer onClose={onClose} labelledBy="contact-thread-drawer-title">
         <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <img alt="" src={contact.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${contact.username}`} style={{ width: 40, height: 40, borderRadius: '50%' }} />
             <div>
-              <div style={{ fontWeight: 600 }}>{contact.display_name || contact.username}</div>
+              <div id="contact-thread-drawer-title" style={{ fontWeight: 600 }}>{contact.display_name || contact.username}</div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{contact.kol_email || t('contacts.drawer_no_email')}</div>
             </div>
           </div>
-          <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}>×</button>
+          <button onClick={onClose} aria-label={t('common.close')} title={t('common.close')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 20, cursor: 'pointer' }}><span aria-hidden="true">×</span></button>
         </div>
 
         <div className="tabs" style={{ padding: '0 22px', marginTop: 10 }}>
@@ -269,7 +269,7 @@ export default function ContactThreadDrawer({ contact, campaignId, onClose, onCh
                     const mb = mailboxes.find(m => m.id === mailboxId) || mailboxes.find(m => m.is_default);
                     if (mb && mb.provider === 'smtp') {
                       return (
-                        <div style={{ fontSize: 11, color: 'var(--warning, #fdcb6e)', marginTop: 4 }}>
+                        <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 4 }}>
                           ⚠️ {t('contacts.drawer_mailbox_smtp_warn')}
                         </div>
                       );
@@ -355,19 +355,10 @@ export default function ContactThreadDrawer({ contact, campaignId, onClose, onCh
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Drawer>
   );
 }
 
-const overlayStyle = {
-  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000,
-  display: 'flex', justifyContent: 'flex-end',
-};
-const drawerStyle = {
-  width: 'min(640px, 100%)', background: 'var(--bg-card)', borderLeft: '1px solid var(--border)',
-  height: '100vh', display: 'flex', flexDirection: 'column',
-};
 const labelStyle = { display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 };
 
 function ThreadMessage({ msg, t }) {
@@ -380,7 +371,7 @@ function ThreadMessage({ msg, t }) {
       marginLeft: outbound ? 0 : 20, marginRight: outbound ? 20 : 0,
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-        <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '2px 6px', borderRadius: 4, color: '#fff', background: outbound ? '#6c5ce7' : '#00d2a0' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', padding: '2px 6px', borderRadius: 4, color: outbound ? 'var(--text-primary)' : 'var(--bg-primary)', background: outbound ? 'var(--accent)' : 'var(--success)' }}>
           {outbound ? t('contacts.thread_sent') : t('contacts.thread_reply')}
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{msg.sent_at ? new Date(msg.sent_at).toLocaleString() : ''}</span>
@@ -393,7 +384,7 @@ function ThreadMessage({ msg, t }) {
 
 function TimelineEvent({ ev, t }) {
   const icons = { sent: '📤', delivered: '📬', opened: '👀', clicked: '🖱️', bounced: '⚠️', complained: '🚫', failed: '❌' };
-  const colors = { sent: 'var(--accent)', delivered: 'var(--success)', opened: '#6c5ce7', clicked: '#6c5ce7', bounced: 'var(--danger)', complained: 'var(--danger)', failed: 'var(--danger)' };
+  const colors = { sent: 'var(--accent)', delivered: 'var(--success)', opened: 'var(--accent)', clicked: 'var(--accent)', bounced: 'var(--danger)', complained: 'var(--danger)', failed: 'var(--danger)' };
   const color = colors[ev.event_type] || 'var(--text-muted)';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-muted)', padding: '2px 6px' }}>

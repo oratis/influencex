@@ -4,8 +4,10 @@ import { useCampaign } from '../CampaignContext';
 import { useWorkspace } from '../WorkspaceContext';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
 import ErrorCard from '../components/ErrorCard';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
 
 // Fallback used when a workspace hasn't saved a preferred keyword list.
 // Moved from a hardcoded state default to a named constant so it's easy to
@@ -461,8 +463,13 @@ export default function PipelinePage() {
                   style={{ width: '120px', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px' }}
                 />
               </div>
-              <button className="btn btn-secondary" onClick={saveDiscoveryDefaults} title={t('pipeline.save_defaults_hint')}>
-                💾
+              <button
+                className="btn btn-secondary"
+                onClick={saveDiscoveryDefaults}
+                aria-label={t('pipeline.save_defaults')}
+                title={t('pipeline.save_defaults_hint')}
+              >
+                <span aria-hidden="true">💾</span>
               </button>
               <button className="btn btn-primary" onClick={handleStartDiscovery} disabled={discovering}>
                 {discovering ? t('pipeline.working') : `🔍 ${t('pipeline.discovery_run')}`}
@@ -475,7 +482,7 @@ export default function PipelinePage() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <span style={{ fontWeight: '600' }}>{t('pipeline.discovery_run_label')}</span>
-                  <span className={`badge ${job.status === 'complete' ? 'badge-green' : job.status === 'running' ? 'badge-orange' : 'badge-red'}`} style={{ marginLeft: '8px' }}>{job.status}</span>
+                  <span className={`badge ${job.status === 'complete' ? 'badge-green' : job.status === 'running' ? 'badge-orange' : 'badge-red'}`} style={{ marginLeft: '8px' }}>{enumLabel(t, 'job_status', job.status)}</span>
                   <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '12px' }}>
                     {t('pipeline.discovery_found', { n: job.total_found })} | {t('pipeline.discovery_processed', { n: job.total_processed })}
                   </span>
@@ -493,7 +500,7 @@ export default function PipelinePage() {
                 {t('pipeline.discovery_keywords_prefix', { keywords: job.search_criteria?.keywords || '-' })} | {new Date(job.created_at).toLocaleString()}
               </div>
               {job.status === 'error' && job.error_message && (
-                <div style={{ fontSize: '12px', color: 'var(--danger, #ff6b6b)', marginTop: 6, padding: '6px 10px', background: 'rgba(255,107,107,0.08)', borderRadius: 6 }}>
+                <div style={{ fontSize: '12px', color: 'var(--danger)', marginTop: 6, padding: '6px 10px', background: 'rgba(255,107,107,0.08)', borderRadius: 6 }}>
                   <strong>{t('common.error')}:</strong> {job.error_message}
                 </div>
               )}
@@ -528,7 +535,7 @@ export default function PipelinePage() {
                             <span style={{ fontSize: '12px' }}>{r.relevance_score}</span>
                           </div>
                         </td>
-                        <td><span className={`badge ${r.status === 'queued' ? 'badge-orange' : r.status === 'found' ? 'badge-gray' : 'badge-green'}`}>{r.status}</span></td>
+                        <td><span className={`badge ${r.status === 'queued' ? 'badge-orange' : r.status === 'found' ? 'badge-gray' : 'badge-green'}`}>{enumLabel(t, 'discovery.result_status', r.status)}</span></td>
                       </tr>
                     ))}
                   </tbody>
@@ -559,19 +566,32 @@ function EmailReviewModal({ job, onApprove, onReject, onClose, loading }) {
   };
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '24px', width: '700px', maxHeight: '85vh', overflow: 'auto', border: '1px solid var(--border)' }}>
+    <Modal
+      onClose={onClose}
+      labelledBy="pipeline-review-modal-title"
+      overlayClassName=""
+      overlayStyle={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      className=""
+      style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '24px', width: '700px', maxHeight: '85vh', overflow: 'auto', border: '1px solid var(--border)' }}
+    >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             {job.avatar_url && <img src={job.avatar_url} alt="" style={{ width: 48, height: 48, borderRadius: '50%' }} />}
             <div>
-              <h3 style={{ margin: 0 }}>{job.display_name || job.username}</h3>
+              <h3 id="pipeline-review-modal-title" style={{ margin: 0 }}>{job.display_name || job.username}</h3>
               <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
                 @{job.username} | {job.platform} | {t('pipeline.followers_suffix', { count: formatNumber(job.followers || 0) })}
               </span>
             </div>
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '18px' }}>x</button>
+          <button
+            onClick={onClose}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '18px' }}
+          >
+            <span aria-hidden="true">✕</span>
+          </button>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '16px' }}>
@@ -589,36 +609,34 @@ function EmailReviewModal({ job, onApprove, onReject, onClose, loading }) {
           </div>
         </div>
 
-        <div style={{ marginBottom: '12px' }}>
-          <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>{t('pipeline.modal_send_to')}</label>
+        <FormField label={t('pipeline.modal_send_to')} style={{ marginBottom: '12px' }}>
           <input
             type="email"
+            className="form-input"
             value={emailTo}
             onChange={e => setEmailTo(e.target.value)}
             placeholder={t('pipeline.prompt_email_placeholder')}
-            style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px' }}
           />
-        </div>
+        </FormField>
 
-        <div style={{ marginBottom: '12px' }}>
-          <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>{t('pipeline.modal_subject')}</label>
+        <FormField label={t('pipeline.modal_subject')} style={{ marginBottom: '12px' }}>
           <input
             type="text"
+            className="form-input"
             value={subject}
             onChange={e => setSubject(e.target.value)}
-            style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px' }}
           />
-        </div>
+        </FormField>
 
-        <div style={{ marginBottom: '16px' }}>
-          <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>{t('pipeline.modal_body')}</label>
+        <FormField label={t('pipeline.modal_body')} style={{ marginBottom: '16px' }}>
           <textarea
+            className="form-textarea"
             value={body}
             onChange={e => setBody(e.target.value)}
             rows={12}
-            style={{ width: '100%', padding: '10px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)', fontSize: '13px', resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }}
+            style={{ minHeight: 0, lineHeight: '1.5' }}
           />
-        </div>
+        </FormField>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
           <button className="btn btn-secondary" onClick={() => onReject(job)} disabled={loading}>
@@ -637,8 +655,7 @@ function EmailReviewModal({ job, onApprove, onReject, onClose, loading }) {
             {job.error}
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -646,16 +663,29 @@ function EmailThreadModal({ data, onClose }) {
   const { t } = useI18n();
   const { job, thread } = data;
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-      <div style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '24px', width: '700px', maxHeight: '85vh', overflow: 'auto', border: '1px solid var(--border)' }} onClick={e => e.stopPropagation()}>
+    <Modal
+      onClose={onClose}
+      labelledBy="pipeline-thread-modal-title"
+      overlayClassName=""
+      overlayStyle={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      className=""
+      style={{ background: 'var(--bg-card)', borderRadius: '12px', padding: '24px', width: '700px', maxHeight: '85vh', overflow: 'auto', border: '1px solid var(--border)' }}
+    >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
           <div>
-            <h3 style={{ margin: 0 }}>{t('pipeline.thread_title')}</h3>
+            <h3 id="pipeline-thread-modal-title" style={{ margin: 0 }}>{t('pipeline.thread_title')}</h3>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0' }}>
               {job?.display_name || job?.username} ({job?.email_to})
             </p>
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '18px' }}>x</button>
+          <button
+            onClick={onClose}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '18px' }}
+          >
+            <span aria-hidden="true">✕</span>
+          </button>
         </div>
 
         {(!thread || thread.length === 0) ? (
@@ -677,8 +707,9 @@ function EmailThreadModal({ data, onClose }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span style={{
                       fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', padding: '2px 6px',
-                      borderRadius: '4px', color: '#fff',
-                      background: msg.direction === 'outbound' ? '#6c5ce7' : '#00d2a0',
+                      borderRadius: '4px',
+                      color: msg.direction === 'outbound' ? 'var(--text-primary)' : 'var(--bg-primary)',
+                      background: msg.direction === 'outbound' ? 'var(--accent)' : 'var(--success)',
                     }}>
                       {msg.direction === 'outbound' ? t('pipeline.thread_sent') : t('pipeline.thread_reply')}
                     </span>
@@ -702,8 +733,7 @@ function EmailThreadModal({ data, onClose }) {
             ))}
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -731,7 +761,7 @@ function EmailTasksPane({ tasks, stats, onRetry, onSyncStatus, t }) {
           <div className="stat-label">{t('pipeline.email_stat_running')}</div></div>
         </div>
         <div className="stat-card">
-          <div><div className="stat-value" style={{ color: '#a29bfe' }}>{scheduled.length}</div>
+          <div><div className="stat-value" style={{ color: 'var(--accent-hover)' }}>{scheduled.length}</div>
           <div className="stat-label">{t('pipeline.email_stat_scheduled')}</div></div>
         </div>
         <div className="stat-card">

@@ -61,7 +61,7 @@ export default function ReviewsPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 100px 100px', gap: 12 }}>
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label" htmlFor="reviews-source">{t('reviews.source')}</label>
-              <select id="reviews-source" className="form-input" value={source} onChange={e => setSource(e.target.value)}>
+              <select id="reviews-source" className="form-select" value={source} onChange={e => setSource(e.target.value)}>
                 {SOURCES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
               </select>
             </div>

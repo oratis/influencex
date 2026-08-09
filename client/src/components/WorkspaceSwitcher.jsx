@@ -46,7 +46,7 @@ export default function WorkspaceSwitcher() {
       >
         <div style={{
           width: 28, height: 28, borderRadius: 6,
-          background: 'linear-gradient(135deg, #6c5ce7, #a29bfe)',
+          background: 'var(--gradient-1)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           color: 'white', fontWeight: 700, fontSize: 13,
         }}>

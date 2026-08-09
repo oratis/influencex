@@ -7,6 +7,8 @@ import { useI18n } from '../i18n';
 import ContactThreadDrawer, { EmailStatusBadge } from '../components/ContactThreadDrawer';
 import TemplateManagerDrawer from '../components/TemplateManagerDrawer';
 import ErrorCard from '../components/ErrorCard';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
 
 export default function ContactModule() {
   const { t } = useI18n();
@@ -268,6 +270,7 @@ export default function ContactModule() {
                     <input
                       type="checkbox"
                       style={{ marginTop: 4 }}
+                      aria-label={t('contacts.select_contact', { name: contact.display_name || contact.username })}
                       checked={selectedIds.has(contact.id)}
                       onChange={() => toggleSelected(contact.id)}
                     />
@@ -297,7 +300,7 @@ export default function ContactModule() {
                   <EmailStatusBadge status={contact.status} t={t} />
                   {contact.email_blocked_at && (
                     <span className="badge badge-red" title={contact.email_blocked_reason || ''}>
-                      🚫 {t('contacts.email_blocked', { reason: (contact.email_blocked_reason || 'hard bounces').slice(0, 40) })}
+                      🚫 {t('contacts.email_blocked', { reason: (contact.email_blocked_reason || t('contacts.email_blocked_default_reason')).slice(0, 40) })}
                       <button
                         className="btn btn-sm"
                         style={{ marginLeft: 6, padding: '0 6px', fontSize: 10, background: 'transparent', border: '1px solid currentColor', color: 'inherit' }}
@@ -450,24 +453,27 @@ function BulkSendModal({ ids, contacts, templates, onCancel, onConfirm, t }) {
   const withoutBody = contacts.length - withBody;
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
-      <div className="card" style={{ width: 520, maxWidth: '90%', padding: 22 }} onClick={e => e.stopPropagation()}>
-        <h3 style={{ marginTop: 0 }}>{t('contacts.bulk_send_title')}</h3>
+    <Modal
+      onClose={onCancel}
+      labelledBy="contacts-bulk-send-title"
+      overlayClassName=""
+      overlayStyle={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      className="card"
+      style={{ width: 520, maxWidth: '90%', padding: 22 }}
+    >
+        <h3 id="contacts-bulk-send-title" style={{ marginTop: 0 }}>{t('contacts.bulk_send_title')}</h3>
         <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
           {t('contacts.bulk_send_summary', { total: ids.length, withBody, withoutBody })}
         </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
-            {t('contacts.bulk_template_label')}
-          </label>
+        <FormField label={t('contacts.bulk_template_label')} hint={t('contacts.bulk_template_hint')} style={{ marginBottom: 12 }}>
           <select className="form-select" value={templateId} onChange={e => setTemplateId(e.target.value)}>
             <option value="">{t('contacts.bulk_template_none')}</option>
             {templates.custom.length > 0 && (
               <optgroup label={t('contacts.drawer_template_custom')}>
                 {templates.custom.map(tp => (
                   <option key={tp.id} value={tp.id}>
-                    {tp.name}{tp.variant_count ? ` (${tp.variant_count} variants)` : ''}
+                    {tp.name}{tp.variant_count ? ` ${t('contacts.template_variant_count', { count: tp.variant_count })}` : ''}
                   </option>
                 ))}
               </optgroup>
@@ -476,13 +482,10 @@ function BulkSendModal({ ids, contacts, templates, onCancel, onConfirm, t }) {
               {templates.builtin.map(tp => <option key={tp.id} value={tp.id}>{tp.name}</option>)}
             </optgroup>
           </select>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-            {t('contacts.bulk_template_hint')}
-          </div>
-        </div>
+        </FormField>
 
         {needsTemplate && !templateId && (
-          <div style={{ padding: 10, background: 'var(--warning-bg, rgba(253,203,110,0.1))', border: '1px solid rgba(253,203,110,0.3)', borderRadius: 6, fontSize: 12, marginBottom: 12 }}>
+          <div role="alert" style={{ padding: 10, background: 'var(--warning-bg)', border: '1px solid rgba(253,203,110,0.3)', borderRadius: 6, fontSize: 12, marginBottom: 12 }}>
             ⚠️ {t('contacts.bulk_send_template_required', { count: withoutBody })}
           </div>
         )}
@@ -497,7 +500,6 @@ function BulkSendModal({ ids, contacts, templates, onCancel, onConfirm, t }) {
             📤 {t('contacts.bulk_send_confirm_btn', { count: ids.length })}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

@@ -32,6 +32,18 @@
   --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
+
+  /* Data-viz palette (design.md §12). recharts can't consume var() reliably,
+     so these are read back as literals by src/utils/chartTokens.js — the
+     values still live here and nowhere else. */
+  --chart-1: #6c5ce7;
+  --chart-2: #74b9ff;
+  --chart-3: #54a0ff;
+  --chart-4: #a29bfe;
+  --chart-5: #00d2a0;
+  --chart-6: #fdcb6e;
+  --chart-7: #ff9ff3;
+  --chart-8: #00b894;
 }
 
 body {
@@ -201,6 +213,21 @@ tr:last-child td { border-bottom: none; }
 .kol-meta { font-size: 12px; color: var(--text-secondary); display: flex; gap: 12px; margin-top: 3px; }
 .kol-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
+/* Text-styled button used to make a clickable table row keyboard-reachable
+   without lying about table semantics (see KolDatabase). */
+.row-open-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  background: none; border: none; padding: 0; margin: 0; cursor: pointer;
+  font: inherit; color: inherit; text-align: left;
+}
+.row-open-btn:hover { color: var(--accent); }
+
+/* Native checkbox styled to match the old div-based `.checkbox` look. */
+.checkbox-input {
+  width: 18px; height: 18px; accent-color: var(--accent);
+  cursor: pointer; flex-shrink: 0; margin: 0;
+}
+
 /* Modal */
 .modal-overlay {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -229,16 +256,6 @@ tr:last-child td { border-bottom: none; }
 }
 .tab:hover { color: var(--text-primary); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-
-/* Checkbox */
-.checkbox-wrapper { display: flex; align-items: center; gap: 8px; cursor: pointer; }
-.checkbox {
-  width: 18px; height: 18px; border: 2px solid var(--border); border-radius: 4px;
-  display: flex; align-items: center; justify-content: center; transition: all 0.2s;
-  background: var(--bg-input); cursor: pointer; flex-shrink: 0;
-}
-.checkbox.checked { background: var(--accent); border-color: var(--accent); }
-.checkbox.checked::after { content: '✓'; color: white; font-size: 12px; font-weight: 700; }
 
 /* Platform checkboxes */
 .platform-checks { display: flex; gap: 12px; flex-wrap: wrap; }

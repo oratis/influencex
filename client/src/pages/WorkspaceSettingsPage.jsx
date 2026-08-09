@@ -4,7 +4,9 @@ import { useWorkspace } from '../WorkspaceContext';
 import { useAuth } from '../AuthContext';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
 
 export default function WorkspaceSettingsPage() {
   const { t } = useI18n();
@@ -244,7 +246,7 @@ export default function WorkspaceSettingsPage() {
                           </div>
                         </td>
                         <td style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{m.email}</td>
-                        <td><span className={`badge ${m.role === 'admin' ? 'badge-red' : m.role === 'editor' ? 'badge-blue' : 'badge-gray'}`}>{m.role}</span></td>
+                        <td><span className={`badge ${m.role === 'admin' ? 'badge-red' : m.role === 'editor' ? 'badge-blue' : 'badge-gray'}`}>{enumLabel(t, 'roles', m.role)}</span></td>
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{m.joined_at ? new Date(m.joined_at).toLocaleDateString() : '—'}</td>
                         <td>
                           {canAdmin && m.id !== user?.id && (
@@ -282,10 +284,13 @@ export default function WorkspaceSettingsPage() {
       )}
 
       {inviteForm && (
-        <div className="modal-overlay" onClick={() => !inviteSubmitting && setInviteForm(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+        <Modal
+          onClose={() => { if (!inviteSubmitting) setInviteForm(null); }}
+          labelledBy="workspace-invite-modal-title"
+          style={{ maxWidth: 520 }}
+        >
             <div className="modal-header">
-              <h3>{t('workspace.invite_title')}</h3>
+              <h3 id="workspace-invite-modal-title">{t('workspace.invite_title')}</h3>
               <button
                 className="btn-icon"
                 onClick={() => setInviteForm(null)}
@@ -295,10 +300,7 @@ export default function WorkspaceSettingsPage() {
               >✕</button>
             </div>
             <div className="modal-body">
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
-                  {t('workspace.invite_email_prompt')}
-                </label>
+              <FormField label={t('workspace.invite_email_prompt')} required style={{ marginBottom: 16 }}>
                 <input
                   className="form-input"
                   type="email"
@@ -310,11 +312,11 @@ export default function WorkspaceSettingsPage() {
                   }}
                   autoFocus
                 />
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+              </FormField>
+              <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+                <legend style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
                   {t('workspace.role_title')}
-                </label>
+                </legend>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {[
                     { value: 'admin', desc: t('workspace.role_admin_desc') },
@@ -332,7 +334,7 @@ export default function WorkspaceSettingsPage() {
                           padding: '10px 12px',
                           border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
                           borderRadius: 6,
-                          background: selected ? 'var(--accent-bg, rgba(59,130,246,0.08))' : 'transparent',
+                          background: selected ? 'var(--accent-light)' : 'transparent',
                           cursor: 'pointer',
                         }}
                       >
@@ -345,14 +347,14 @@ export default function WorkspaceSettingsPage() {
                           style={{ marginTop: 3 }}
                         />
                         <div>
-                          <div style={{ fontWeight: 600, fontSize: 13, textTransform: 'capitalize' }}>{opt.value}</div>
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>{t(`roles.${opt.value}`)}</div>
                           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>{opt.desc}</div>
                         </div>
                       </label>
                     );
                   })}
                 </div>
-              </div>
+              </fieldset>
             </div>
             <div className="modal-footer">
               <button
@@ -370,25 +372,24 @@ export default function WorkspaceSettingsPage() {
                 {inviteSubmitting ? t('workspace.loading') : t('workspace.invite_submit')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {inviteLinkModal && (
-        <div className="modal-overlay" onClick={() => setInviteLinkModal(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+        <Modal onClose={() => setInviteLinkModal(null)} labelledBy="workspace-invite-link-title" style={{ maxWidth: 560 }}>
             <div className="modal-header">
-              <h3>{t('workspace.invite_link_title')}</h3>
+              <h3 id="workspace-invite-link-title">{t('workspace.invite_link_title')}</h3>
               <button className="btn-icon" onClick={() => setInviteLinkModal(null)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
             </div>
             <div className="modal-body">
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
-                {t('workspace.invite_link_hint', { email: inviteLinkModal.email, role: inviteLinkModal.role })}
+                {t('workspace.invite_link_hint', { email: inviteLinkModal.email, role: enumLabel(t, 'roles', inviteLinkModal.role) })}
               </p>
               <div style={{ display: 'flex', gap: 8, alignItems: 'stretch', marginBottom: 10 }}>
                 <input
                   className="form-input"
                   readOnly
+                  aria-label={t('workspace.invite_link_title')}
                   value={inviteLinkModal.link}
                   onFocus={e => e.target.select()}
                   style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
@@ -414,8 +415,7 @@ export default function WorkspaceSettingsPage() {
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setInviteLinkModal(null)}>{t('common.close')}</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

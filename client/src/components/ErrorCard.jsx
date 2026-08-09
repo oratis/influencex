@@ -18,21 +18,21 @@ export default function ErrorCard({ error, onRetry, title, body, compact }) {
         margin: compact ? '12px 0' : '24px auto',
         maxWidth: compact ? 'none' : 520,
         padding: compact ? 12 : 20,
-        border: '1px solid var(--border, #e5e7eb)',
-        borderRadius: 10,
-        background: 'var(--surface, #fff)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        background: 'var(--bg-card)',
       }}
     >
       <div style={{ fontSize: compact ? 14 : 16, fontWeight: 600, marginBottom: 6 }}>
         {resolvedTitle}
       </div>
       {resolvedBody && (
-        <p style={{ margin: 0, marginBottom: 12, color: 'var(--text-muted, #6b7280)', fontSize: 14 }}>
+        <p style={{ margin: 0, marginBottom: 12, color: 'var(--text-secondary)', fontSize: 14 }}>
           {resolvedBody}
         </p>
       )}
       {message && (
-        <pre style={{ background: 'var(--muted, #f3f4f6)', padding: 8, borderRadius: 6, fontSize: 12, overflow: 'auto', maxHeight: 120, margin: 0, marginBottom: 12 }}>
+        <pre style={{ background: 'var(--bg-input)', padding: 8, borderRadius: 6, fontSize: 12, overflow: 'auto', maxHeight: 120, margin: 0, marginBottom: 12 }}>
           {String(message)}
         </pre>
       )}

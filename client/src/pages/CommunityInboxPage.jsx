@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import { useToast } from '../components/Toast';
-import { useI18n } from '../i18n';
+import { useI18n, enumLabel } from '../i18n';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
 
 export default function CommunityInboxPage() {
   const { t } = useI18n();
@@ -111,11 +113,23 @@ export default function CommunityInboxPage() {
     } catch (e) { toast.error(e.message); }
   }
 
+  // Reuse the shared status tokens rather than a private hex palette
+  // (design.md §0 / §2.3).
   const sentimentColor = {
-    positive: '#10b981', neutral: '#6b7280', negative: '#f59e0b',
-    hostile: '#ef4444', spam: '#9ca3af',
+    positive: 'var(--success)',
+    neutral: 'var(--text-secondary)',
+    negative: 'var(--warning)',
+    hostile: 'var(--danger)',
+    spam: 'var(--text-muted)',
   };
-  const priorityColor = { urgent: '#ef4444', normal: '#6b7280', low: '#9ca3af' };
+  const sentimentBadge = {
+    positive: 'badge-green', neutral: 'badge-gray', negative: 'badge-orange',
+    hostile: 'badge-red', spam: 'badge-gray',
+  };
+  const priorityColor = {
+    urgent: 'var(--danger)', normal: 'var(--text-secondary)', low: 'var(--text-muted)',
+  };
+  const priorityBadge = { urgent: 'badge-red', normal: 'badge-gray', low: 'badge-gray' };
 
   return (
     <div className="page-container fade-in">
@@ -147,7 +161,13 @@ export default function CommunityInboxPage() {
       <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: 16 }}>
         <div className="card" style={{ padding: 0, maxHeight: 'calc(100vh - 260px)', overflow: 'auto' }}>
           <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 8, alignItems: 'center' }}>
-            <select value={platformFilter} onChange={e => setPlatformFilter(e.target.value)} className="input" style={{ padding: '4px 8px' }}>
+            <select
+              value={platformFilter}
+              onChange={e => setPlatformFilter(e.target.value)}
+              className="form-select"
+              aria-label={t('inbox.filter_all_platforms')}
+              style={{ padding: '4px 28px 4px 8px', width: 'auto' }}
+            >
               <option value="">{t('inbox.filter_all_platforms')}</option>
               <option value="twitter">X (Twitter)</option>
               <option value="linkedin">LinkedIn</option>
@@ -166,34 +186,42 @@ export default function CommunityInboxPage() {
           ) : (
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
               {messages.map(m => (
-                <li
-                  key={m.id}
-                  onClick={() => setSelected(m)}
-                  style={{
-                    padding: '10px 14px',
-                    borderBottom: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    background: selected?.id === m.id ? 'var(--surface-hover)' : undefined,
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600 }}>{m.author_handle || m.author_name || t('inbox.unknown_author')}</span>
-                    <span style={{ color: 'var(--text-muted)' }}>{m.platform}</span>
-                  </div>
-                  <div style={{ fontSize: 13, lineHeight: 1.4, color: 'var(--text)', marginBottom: 6 }}>
-                    {truncate(m.text, 140)}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, fontSize: 11 }}>
-                    {m.sentiment && (
-                      <span style={{ color: sentimentColor[m.sentiment] || '#6b7280', fontWeight: 500 }}>● {m.sentiment}</span>
-                    )}
-                    {m.priority && m.priority !== 'normal' && (
-                      <span style={{ color: priorityColor[m.priority], fontWeight: 500 }}>{m.priority}</span>
-                    )}
-                    <span style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
-                      {m.occurred_at ? new Date(m.occurred_at).toLocaleString() : ''}
-                    </span>
-                  </div>
+                <li key={m.id}>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(m)}
+                    aria-pressed={selected?.id === m.id}
+                    style={{
+                      display: 'block', width: '100%', textAlign: 'left', font: 'inherit',
+                      color: 'var(--text-primary)',
+                      padding: '10px 14px',
+                      border: 0,
+                      borderBottom: '1px solid var(--border)',
+                      cursor: 'pointer',
+                      background: selected?.id === m.id ? 'var(--bg-card-hover)' : 'transparent',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+                      <span style={{ fontWeight: 600 }}>{m.author_handle || m.author_name || t('inbox.unknown_author')}</span>
+                      <span style={{ color: 'var(--text-muted)' }}>{m.platform}</span>
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.4, color: 'var(--text-primary)', marginBottom: 6 }}>
+                      {truncate(m.text, 140)}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, fontSize: 11 }}>
+                      {m.sentiment && (
+                        <span style={{ color: sentimentColor[m.sentiment] || 'var(--text-secondary)', fontWeight: 500 }}>
+                          <span aria-hidden="true">● </span>{enumLabel(t, 'community', `sentiment_${m.sentiment}`)}
+                        </span>
+                      )}
+                      {m.priority && m.priority !== 'normal' && (
+                        <span style={{ color: priorityColor[m.priority], fontWeight: 500 }}>{enumLabel(t, 'community', `priority_${m.priority}`)}</span>
+                      )}
+                      <span style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                        {m.occurred_at ? new Date(m.occurred_at).toLocaleString() : ''}
+                      </span>
+                    </div>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -214,7 +242,7 @@ export default function CommunityInboxPage() {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600 }}>{selected.author_name || selected.author_handle || t('inbox.unknown_author')}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {selected.author_handle} · {selected.platform} · {selected.kind}
+                    {selected.author_handle} · {selected.platform} · {enumLabel(t, 'community', `kind_${selected.kind}`)}
                   </div>
                 </div>
                 {selected.url && (
@@ -224,21 +252,27 @@ export default function CommunityInboxPage() {
                 )}
               </div>
 
-              <div style={{ background: 'var(--surface-hover)', padding: 12, borderRadius: 8, marginBottom: 16, whiteSpace: 'pre-wrap' }}>
+              <div style={{ background: 'var(--bg-card-hover)', padding: 12, borderRadius: 8, marginBottom: 16, whiteSpace: 'pre-wrap' }}>
                 {selected.text}
               </div>
 
               <div style={{ display: 'flex', gap: 8, marginBottom: 16, fontSize: 12 }}>
                 {selected.sentiment && (
-                  <Badge color={sentimentColor[selected.sentiment]}>{t('inbox.badge_sentiment', { val: selected.sentiment })}</Badge>
+                  <span className={`badge ${sentimentBadge[selected.sentiment] || 'badge-gray'}`}>
+                    {t('inbox.badge_sentiment', { val: enumLabel(t, 'community', `sentiment_${selected.sentiment}`) })}
+                  </span>
                 )}
-                {selected.priority && <Badge color={priorityColor[selected.priority]}>{t('inbox.badge_priority', { val: selected.priority })}</Badge>}
-                {(selected.tags || []).map(tag => <Badge key={tag} color="#6b7280">{tag}</Badge>)}
+                {selected.priority && (
+                  <span className={`badge ${priorityBadge[selected.priority] || 'badge-gray'}`}>
+                    {t('inbox.badge_priority', { val: enumLabel(t, 'community', `priority_${selected.priority}`) })}
+                  </span>
+                )}
+                {(selected.tags || []).map(tag => <span key={tag} className="badge badge-gray">{tag}</span>)}
               </div>
 
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>{t('inbox.draft_label')}</label>
+                  <label htmlFor="inbox-draft-reply" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>{t('inbox.draft_label')}</label>
                   <button
                     onClick={() => handleDraft(selected)}
                     disabled={draftBusy}
@@ -249,12 +283,13 @@ export default function CommunityInboxPage() {
                   </button>
                 </div>
                 <textarea
+                  id="inbox-draft-reply"
                   value={selected.draft_reply || ''}
                   onChange={e => handleDraftEdit(e.target.value)}
                   placeholder={t('inbox.draft_placeholder')}
                   rows={5}
-                  className="input"
-                  style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
+                  className="form-textarea"
+                  style={{ width: '100%', minHeight: 0, resize: 'vertical', fontFamily: 'inherit' }}
                 />
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button className="btn btn-primary" onClick={handleDraftSave}>{t('inbox.btn_save_draft')}</button>
@@ -283,33 +318,34 @@ export default function CommunityInboxPage() {
       </div>
 
       {showApifySync && (
-        <div className="modal-overlay" onClick={() => setShowApifySync(false)} style={{ zIndex: 1500 }}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+        <Modal
+          onClose={() => setShowApifySync(false)}
+          labelledBy="inbox-apify-sync-title"
+          overlayStyle={{ zIndex: 1500 }}
+          style={{ maxWidth: 560 }}
+        >
             <div className="modal-header">
-              <h3>{t('inbox.apify_sync_title')}</h3>
+              <h3 id="inbox-apify-sync-title">{t('inbox.apify_sync_title')}</h3>
               <button className="btn-icon" onClick={() => setShowApifySync(false)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
             </div>
             <div className="modal-body">
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
                 {t('inbox.apify_sync_subtitle')}
               </p>
-              <div className="form-group">
-                <label className="form-label" htmlFor="apify-platform">{t('inbox.apify_sync_platform')}</label>
+              <FormField label={t('inbox.apify_sync_platform')} id="apify-platform">
                 <select
-                  id="apify-platform"
-                  className="form-input"
+                  className="form-select"
                   value={apifyPlatform}
                   onChange={e => setApifyPlatform(e.target.value)}
                 >
                   <option value="instagram">Instagram</option>
                   <option value="tiktok">TikTok</option>
                 </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label" htmlFor="apify-urls">{t('inbox.apify_sync_urls')}</label>
+              </FormField>
+              <FormField label={t('inbox.apify_sync_urls')} id="apify-urls" hint={t('inbox.apify_sync_hint')}>
                 <textarea
-                  id="apify-urls"
-                  className="form-input"
+                  className="form-textarea"
+                  style={{ minHeight: 0 }}
                   rows={5}
                   placeholder={apifyPlatform === 'instagram'
                     ? 'https://www.instagram.com/p/ABCDE/\nhttps://www.instagram.com/reel/XYZ/'
@@ -317,10 +353,7 @@ export default function CommunityInboxPage() {
                   value={apifyUrls}
                   onChange={e => setApifyUrls(e.target.value)}
                 />
-                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                  {t('inbox.apify_sync_hint')}
-                </p>
-              </div>
+              </FormField>
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowApifySync(false)}>{t('common.cancel')}</button>
@@ -328,8 +361,7 @@ export default function CommunityInboxPage() {
                 {apifyBusy ? t('common.loading') : t('inbox.apify_sync_submit')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );
@@ -337,31 +369,24 @@ export default function CommunityInboxPage() {
 
 function StatusChip({ label, value, active, onClick }) {
   return (
-    <div
+    <button
+      type="button"
       className="stat-card"
       onClick={onClick}
+      aria-pressed={active}
       style={{
         cursor: 'pointer',
-        border: active ? '1px solid var(--primary)' : undefined,
-        boxShadow: active ? '0 0 0 1px var(--primary)' : undefined,
+        textAlign: 'left',
+        font: 'inherit',
+        color: 'var(--text-primary)',
+        width: '100%',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        boxShadow: active ? '0 0 0 1px var(--accent)' : undefined,
       }}
     >
-      <div className="stat-icon blue">{String(value)}</div>
+      <div className="stat-icon blue" aria-hidden="true">{String(value)}</div>
       <div><div className="stat-value">{value}</div><div className="stat-label">{label}</div></div>
-    </div>
-  );
-}
-
-function Badge({ color, children }) {
-  return (
-    <span style={{
-      padding: '2px 8px',
-      borderRadius: 10,
-      fontSize: 11,
-      color: '#fff',
-      background: color || '#6b7280',
-      whiteSpace: 'nowrap',
-    }}>{children}</span>
+    </button>
   );
 }
 

@@ -3,6 +3,9 @@ import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
+import ErrorCard from '../components/ErrorCard';
 
 /**
  * Platform connections + scheduled publishes overview.
@@ -18,6 +21,7 @@ export default function ConnectionsPage() {
   const [apiKeyValues, setApiKeyValues] = useState({});
   const [apiKeySaving, setApiKeySaving] = useState(false);
   const [mailboxEditor, setMailboxEditor] = useState(null); // null | 'new' | mailbox row
+  const [loadError, setLoadError] = useState(null);
   const toast = useToast();
   const { confirm: confirmDialog } = useConfirm();
   const { t } = useI18n();
@@ -53,9 +57,12 @@ export default function ConnectionsPage() {
       setMailboxes(m.items || []);
       setEnvFallback(m.envFallback || null);
       setGmailConfigured(!!g.configured);
+      setLoadError(null);
       setLoading(false);
       return p.platforms || [];
     } catch (e) {
+      // Don't let a failed load masquerade as "nothing connected yet".
+      setLoadError(e);
       setLoading(false);
       return null;
     }
@@ -214,6 +221,12 @@ export default function ConnectionsPage() {
           <p>{t('connections.subtitle')}</p>
         </div>
       </div>
+
+      {/* A failed load previously rendered as "no platforms / no mailboxes",
+          identical to a fresh workspace. Show the failure + a retry. */}
+      {loadError && platforms.length === 0 && mailboxes.length === 0 && (
+        <ErrorCard error={loadError} onRetry={loadAll} />
+      )}
 
       {/* Mailbox accounts */}
       <div className="card" style={{ marginBottom: 16 }}>
@@ -395,23 +408,23 @@ export default function ConnectionsPage() {
       )}
 
       {apiKeyModal && (
-        <div onClick={() => !apiKeySaving && setApiKeyModal(null)} style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 100,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          {/* existing api-key modal contents */}
-          <div onClick={e => e.stopPropagation()} className="card" style={{
-            maxWidth: 480, width: '90%', padding: 24,
-          }}>
-            <h3 style={{ marginTop: 0 }}>{t('connections.api_key_modal_title', { platform: apiKeyModal.label })}</h3>
+        <Modal
+          onClose={() => { if (!apiKeySaving) setApiKeyModal(null); }}
+          labelledBy="connections-api-key-title"
+          overlayClassName=""
+          overlayStyle={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 100,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          className="card"
+          style={{ maxWidth: 480, width: '90%', padding: 24 }}
+        >
+            <h3 id="connections-api-key-title" style={{ marginTop: 0 }}>{t('connections.api_key_modal_title', { platform: apiKeyModal.label })}</h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 16 }}>
               {t('connections.api_key_modal_help')}
             </p>
             {apiKeyModal.fields.map(f => (
-              <div key={f.name} style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                  {f.label}
-                </label>
+              <FormField key={f.name} label={f.label} hint={f.help} style={{ marginBottom: 12 }}>
                 <input
                   type={f.type === 'password' ? 'password' : 'text'}
                   value={apiKeyValues[f.name] || ''}
@@ -419,8 +432,7 @@ export default function ConnectionsPage() {
                   className="form-input"
                   style={{ width: '100%' }}
                 />
-                {f.help && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{f.help}</div>}
-              </div>
+              </FormField>
             ))}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
               <button className="btn btn-secondary" onClick={() => setApiKeyModal(null)} disabled={apiKeySaving}>{t('common.cancel')}</button>
@@ -428,8 +440,7 @@ export default function ConnectionsPage() {
                 {apiKeySaving ? t('connections.api_key_connecting') : t('connections.connect')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );
@@ -438,10 +449,16 @@ export default function ConnectionsPage() {
 function DnsCheckModal({ result, onClose, t }) {
   const ok = result.spf.present && result.dmarc.present && Object.keys(result.dkim.found).length > 0;
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={e => e.stopPropagation()} className="card" style={{ width: 620, maxWidth: '92%', padding: 22, maxHeight: '85vh', overflow: 'auto' }}>
-        <h3 style={{ marginTop: 0 }}>
-          {ok ? '✅' : '⚠️'} {t('connections.dns_check_title', { domain: result.domain })}
+    <Modal
+      onClose={onClose}
+      labelledBy="connections-dns-check-title"
+      overlayClassName=""
+      overlayStyle={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      className="card"
+      style={{ width: 620, maxWidth: '92%', padding: 22, maxHeight: '85vh', overflow: 'auto' }}
+    >
+        <h3 id="connections-dns-check-title" style={{ marginTop: 0 }}>
+          <span aria-hidden="true">{ok ? '✅' : '⚠️'}</span> {t('connections.dns_check_title', { domain: result.domain })}
         </h3>
         <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.dns_check_subtitle')}</p>
 
@@ -479,10 +496,9 @@ function DnsCheckModal({ result, onClose, t }) {
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button className="btn btn-primary" onClick={onClose}>{t('common.close') || 'Close'}</button>
+          <button className="btn btn-primary" onClick={onClose}>{t('common.close')}</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -506,8 +522,11 @@ function MailboxEditorModal({ mailbox, onCancel, onSave, t }) {
   }));
 
   const providerFields = form.provider === 'resend' ? (
-    <div style={{ marginBottom: 12 }}>
-      <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.mailbox_api_key')}</label>
+    <FormField
+      label={t('connections.mailbox_api_key')}
+      hint={isEdit ? t('connections.mailbox_api_key_help_edit') : undefined}
+      style={{ marginBottom: 12 }}
+    >
       <input
         type="password"
         className="form-input"
@@ -515,28 +534,23 @@ function MailboxEditorModal({ mailbox, onCancel, onSave, t }) {
         value={form.credentials.api_key || ''}
         onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, api_key: e.target.value } }))}
       />
-      {isEdit && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{t('connections.mailbox_api_key_help_edit')}</div>}
-    </div>
+    </FormField>
   ) : (
     <>
-      <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
-        <div style={{ flex: 2 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_host')}</label>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <FormField label={t('connections.smtp_host')} style={{ flex: 2, marginBottom: 12 }}>
           <input className="form-input" value={form.credentials.smtp_host} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_host: e.target.value } }))} placeholder="smtp.gmail.com" />
-        </div>
-        <div style={{ flex: 1 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_port')}</label>
+        </FormField>
+        <FormField label={t('connections.smtp_port')} style={{ flex: 1, marginBottom: 12 }}>
           <input type="number" className="form-input" value={form.credentials.smtp_port} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_port: parseInt(e.target.value) || 587 } }))} />
-        </div>
+        </FormField>
       </div>
-      <div style={{ marginBottom: 10 }}>
-        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_user')}</label>
+      <FormField label={t('connections.smtp_user')} style={{ marginBottom: 10 }}>
         <input className="form-input" value={form.credentials.smtp_user} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_user: e.target.value } }))} />
-      </div>
-      <div style={{ marginBottom: 12 }}>
-        <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.smtp_password')}</label>
+      </FormField>
+      <FormField label={t('connections.smtp_password')} style={{ marginBottom: 12 }}>
         <input type="password" className="form-input" placeholder={isEdit ? t('connections.mailbox_api_key_edit_ph') : ''} value={form.credentials.smtp_pass} onChange={e => setForm(f => ({ ...f, credentials: { ...f.credentials, smtp_pass: e.target.value } }))} />
-      </div>
+      </FormField>
     </>
   );
 
@@ -561,40 +575,41 @@ function MailboxEditorModal({ mailbox, onCancel, onSave, t }) {
   }
 
   return (
-    <div onClick={onCancel} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={e => e.stopPropagation()} className="card" style={{ width: 520, maxWidth: '90%', padding: 20, maxHeight: '85vh', overflowY: 'auto' }}>
-        <h3 style={{ marginTop: 0 }}>{isEdit ? t('connections.mailbox_edit_title') : t('connections.mailbox_add_title')}</h3>
+    <Modal
+      onClose={onCancel}
+      labelledBy="connections-mailbox-editor-title"
+      overlayClassName=""
+      overlayStyle={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      className="card"
+      style={{ width: 520, maxWidth: '90%', padding: 20, maxHeight: '85vh', overflowY: 'auto' }}
+    >
+        <h3 id="connections-mailbox-editor-title" style={{ marginTop: 0 }}>{isEdit ? t('connections.mailbox_edit_title') : t('connections.mailbox_add_title')}</h3>
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.mailbox_provider')}</label>
+        <FormField label={t('connections.mailbox_provider')} style={{ marginBottom: 12 }}>
           <select className="form-select" value={form.provider} disabled={isEdit} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))}>
             <option value="resend">Resend</option>
             <option value="smtp">SMTP</option>
           </select>
-        </div>
+        </FormField>
 
-        <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
-          <div style={{ flex: 1 }}>
-            <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.mailbox_from_email')}</label>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <FormField label={t('connections.mailbox_from_email')} required style={{ flex: 1, marginBottom: 12 }}>
             <input type="email" className="form-input" value={form.from_email} onChange={e => setForm(f => ({ ...f, from_email: e.target.value }))} placeholder="you@yourdomain.com" />
-          </div>
-          <div style={{ flex: 1 }}>
-            <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.mailbox_from_name')}</label>
+          </FormField>
+          <FormField label={t('connections.mailbox_from_name')} style={{ flex: 1, marginBottom: 12 }}>
             <input className="form-input" value={form.from_name} onChange={e => setForm(f => ({ ...f, from_name: e.target.value }))} />
-          </div>
+          </FormField>
         </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.mailbox_reply_to')}</label>
+        <FormField label={t('connections.mailbox_reply_to')} style={{ marginBottom: 12 }}>
           <input type="email" className="form-input" value={form.reply_to} onChange={e => setForm(f => ({ ...f, reply_to: e.target.value }))} />
-        </div>
+        </FormField>
 
         {providerFields}
 
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('connections.mailbox_signature')}</label>
+        <FormField label={t('connections.mailbox_signature')} style={{ marginBottom: 12 }}>
           <textarea className="form-textarea" style={{ minHeight: 80 }} value={form.signature_html} onChange={e => setForm(f => ({ ...f, signature_html: e.target.value }))} placeholder="&lt;p&gt;Best,&lt;br/&gt;Team&lt;/p&gt;" />
-        </div>
+        </FormField>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 16 }}>
           <input type="checkbox" checked={form.is_default} onChange={e => setForm(f => ({ ...f, is_default: e.target.checked }))} />
@@ -605,7 +620,6 @@ function MailboxEditorModal({ mailbox, onCancel, onSave, t }) {
           <button className="btn btn-secondary" onClick={onCancel}>{t('common.cancel')}</button>
           <button className="btn btn-primary" onClick={submit} disabled={!form.from_email}>{t('common.save')}</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

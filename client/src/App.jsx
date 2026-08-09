@@ -1,5 +1,5 @@
 import React, { useState, useEffect, Suspense, lazy } from 'react';
-import { Routes, Route, NavLink, Navigate, Link } from 'react-router-dom';
+import { Routes, Route, NavLink, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { CampaignProvider, useCampaign } from './CampaignContext';
 import { ToastProvider } from './components/Toast';
@@ -217,7 +217,15 @@ function AppContent() {
             ))}
           </nav>
           <div className="sidebar-user">
-            <div className="sidebar-user-info" onClick={() => setShowUserMenu(v => !v)}>
+            <button
+              type="button"
+              className="sidebar-user-info"
+              onClick={() => setShowUserMenu(v => !v)}
+              aria-expanded={showUserMenu}
+              aria-haspopup="menu"
+              aria-label={t('nav.user_menu')}
+              style={{ width: '100%', background: 'none', border: 0, font: 'inherit', color: 'inherit', textAlign: 'left' }}
+            >
               <div className="sidebar-avatar">
                 <img src={user.avatar_url || `https://api.dicebear.com/7.x/initials/svg?seed=${user.name}`} alt="" />
               </div>
@@ -228,19 +236,26 @@ function AppContent() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" style={{ flexShrink: 0, opacity: 0.5 }}>
                 <polyline points="6 9 12 15 18 9"/>
               </svg>
-            </div>
+            </button>
             {showUserMenu && (
-              <div className="sidebar-user-menu">
+              <div className="sidebar-user-menu" role="menu">
                 <div className="sidebar-user-menu-item" style={{ opacity: 0.5, cursor: 'default' }}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                   <span>{t(`roles.${user.role || 'member'}`)}</span>
                 </div>
-                <div className="sidebar-user-menu-item" onClick={() => { setShowUserMenu(false); localStorage.removeItem('influencex_onboarding_done_v1'); window.dispatchEvent(new Event('onboarding:restart')); }}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="sidebar-user-menu-item"
+                  style={menuItemButtonStyle}
+                  onClick={() => { setShowUserMenu(false); localStorage.removeItem('influencex_onboarding_done_v1'); window.dispatchEvent(new Event('onboarding:restart')); }}
+                >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
                   <span>{t('onboarding.restart_menu')}</span>
-                </div>
+                </button>
                 <NavLink
                   to="/changelog"
+                  role="menuitem"
                   className="sidebar-user-menu-item"
                   onClick={() => { setShowUserMenu(false); setHasUnreadChangelog(false); }}
                   style={{ textDecoration: 'none' }}
@@ -253,10 +268,16 @@ function AppContent() {
                     </span>
                   )}
                 </NavLink>
-                <div className="sidebar-user-menu-item" onClick={() => { setShowUserMenu(false); logout(); }}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="sidebar-user-menu-item"
+                  style={menuItemButtonStyle}
+                  onClick={() => { setShowUserMenu(false); logout(); }}
+                >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                   <span>{t('auth.sign_out')}</span>
-                </div>
+                </button>
               </div>
             )}
           </div>
@@ -264,6 +285,11 @@ function AppContent() {
         <div className="main-wrapper">
           <GlobalHeader onToggleMobileNav={() => setMobileNavOpen(o => !o)} />
           <main className="main-content" onClick={() => { if (showUserMenu) setShowUserMenu(false); if (mobileNavOpen) setMobileNavOpen(false); }}>
+            {/* Per-route boundary: a render crash inside one page is contained
+                to the content area, leaving the sidebar + header usable so the
+                user can navigate away. Keyed on the route so navigating after
+                a crash remounts a fresh (non-errored) boundary. */}
+            <RouteBoundary>
             <Routes>
               <Route path="/" element={<HomeRedirect />} />
               <Route path="/login" element={<Navigate to="/" replace />} />
@@ -296,6 +322,7 @@ function AppContent() {
               <Route path="/workspace/settings" element={<WorkspaceSettingsPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
+            </RouteBoundary>
           </main>
         </div>
       </div>
@@ -386,6 +413,20 @@ function BoundaryWithI18n({ children }) {
   const { t } = useI18n();
   return <ErrorBoundary t={t}>{children}</ErrorBoundary>;
 }
+
+// Content-area boundary. `key` on the current path means a crashed page's
+// boundary is thrown away when the user navigates, instead of latching the
+// error UI forever.
+function RouteBoundary({ children }) {
+  const { t } = useI18n();
+  const location = useLocation();
+  return <ErrorBoundary key={location.pathname} t={t}>{children}</ErrorBoundary>;
+}
+
+const menuItemButtonStyle = {
+  width: '100%', background: 'none', border: 0, font: 'inherit',
+  textAlign: 'left', color: 'inherit',
+};
 
 export default function App() {
   return (

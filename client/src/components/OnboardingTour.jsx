@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '../i18n';
+import Modal from './Modal';
 import { useCampaign } from '../CampaignContext';
 
 const STORAGE_KEY = 'influencex_onboarding_done_v1';
@@ -89,18 +90,12 @@ export default function OnboardingTour() {
   const s = STEPS[step];
 
   return (
-    <div
-      className="modal-overlay"
-      onClick={dismiss}
-      style={{ zIndex: 2400, alignItems: 'center', justifyContent: 'center' }}
-      role="dialog"
-      aria-labelledby="onboarding-title"
+    <Modal
+      onClose={dismiss}
+      labelledBy="onboarding-title"
+      overlayStyle={{ zIndex: 2400, alignItems: 'center', justifyContent: 'center' }}
+      style={{ maxWidth: 480, width: '90%', padding: 24 }}
     >
-      <div
-        className="modal"
-        onClick={e => e.stopPropagation()}
-        style={{ maxWidth: 480, width: '90%', padding: 24 }}
-      >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', letterSpacing: 1, textTransform: 'uppercase' }}>
             {t('onboarding.step_progress', { n: step + 1, total: STEPS.length })}
@@ -155,7 +150,6 @@ export default function OnboardingTour() {
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

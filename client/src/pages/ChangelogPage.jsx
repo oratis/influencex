@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useI18n } from '../i18n';
+import ErrorCard from '../components/ErrorCard';
+import InlineMarkdown from '../utils/inlineMarkdown';
 
 const SEEN_KEY = 'influencex_changelog_last_seen_v1';
 
@@ -10,7 +12,7 @@ export default function ChangelogPage() {
   const { t } = useI18n();
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(null);
 
   useEffect(() => { load(); }, []);
 
@@ -18,12 +20,16 @@ export default function ChangelogPage() {
     setLoading(true);
     try {
       const res = await fetch('/api/changelog');
+      // Without this, a 500 fell straight into `res.json()` and either threw a
+      // parse error or produced an empty list that looked like "no releases".
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
       setEntries(body.entries || []);
+      setError(null);
       const top = (body.entries || [])[0]?.date;
       if (top) localStorage.setItem(SEEN_KEY, top);
     } catch (e) {
-      setError(e.message);
+      setError(e);
     }
     setLoading(false);
   }
@@ -36,7 +42,7 @@ export default function ChangelogPage() {
       </div>
 
       {loading && <div className="empty-state"><p>{t('common.loading')}</p></div>}
-      {error && <div className="auth-error" style={{ marginBottom: 16 }}>{error}</div>}
+      {error && entries.length === 0 && <ErrorCard error={error} onRetry={load} />}
 
       {!loading && entries.length === 0 && !error && (
         <div className="empty-state">
@@ -76,7 +82,7 @@ function Section({ title, items, accent }) {
         letterSpacing: 0.5, color: accent || 'var(--text-muted)',
       }}>{title}</h4>
       <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.6, color: 'var(--text-secondary)' }}>
-        {items.map((it, i) => <li key={i}>{it}</li>)}
+        {items.map((it, i) => <li key={i}><InlineMarkdown>{it}</InlineMarkdown></li>)}
       </ul>
     </div>
   );

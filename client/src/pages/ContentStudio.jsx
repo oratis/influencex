@@ -3,6 +3,8 @@ import { api } from '../api/client';
 import { useToast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useI18n } from '../i18n';
+import Modal from '../components/Modal';
+import FormField from '../components/FormField';
 import { toLocalInputValue, localInputValueToIso } from '../utils/datetime';
 
 // Audit D-5: only follow image-download links to provider domains we
@@ -646,8 +648,10 @@ export default function ContentStudio() {
                           navigator.clipboard.writeText(r.text);
                           toast.success(t('studio.copied_platform', { platform: r.platform }));
                         }}
+                        aria-label={t('studio.copy_text')}
+                        title={t('studio.copy_text')}
                       >
-                        📋
+                        <span aria-hidden="true">📋</span>
                       </button>
                     </div>
                   </>
@@ -697,10 +701,9 @@ export default function ContentStudio() {
       </div>
 
       {showScheduleModal && (
-        <div className="modal-overlay" onClick={() => setShowScheduleModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+        <Modal onClose={() => setShowScheduleModal(false)} labelledBy="studio-schedule-modal-title" style={{ maxWidth: 480 }}>
             <div className="modal-header">
-              <h3>{t('studio.schedule_publish')}</h3>
+              <h3 id="studio-schedule-modal-title">{t('studio.schedule_publish')}</h3>
               <button className="btn-icon" onClick={() => setShowScheduleModal(false)} aria-label={t('common.close')} title={t('common.close')}>✕</button>
             </div>
             <div className="modal-body">
@@ -708,13 +711,14 @@ export default function ContentStudio() {
                 {t('studio.schedule_note')}
                 <strong>{defaultPlatformsFor(format).join(', ')}</strong>
               </p>
-              <label className="form-label">{t('studio.scheduled_time')}</label>
-              <input
-                type="datetime-local"
-                className="form-input"
-                value={scheduleAt}
-                onChange={e => setScheduleAt(e.target.value)}
-              />
+              <FormField label={t('studio.scheduled_time')}>
+                <input
+                  type="datetime-local"
+                  className="form-input"
+                  value={scheduleAt}
+                  onChange={e => setScheduleAt(e.target.value)}
+                />
+              </FormField>
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowScheduleModal(false)}>{t('common.cancel')}</button>
@@ -722,8 +726,7 @@ export default function ContentStudio() {
                 {t('common.schedule')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       <style>{`
