@@ -28,7 +28,7 @@ InfluenceX (https://influencexes.com) is an **invite-only AI marketing platform*
 - `server/agents-v2/` — 18 LLM agents (strategy, research, content-text/visual/voice/video, kol-outreach, publisher, ads, community, etc.)
 - `server/agent-runtime/` — agent registry + Conductor (goal → plan → run)
 - `server/llm/` — Anthropic + OpenAI + Gemini + 火山方舟 routing layer with cache + cost stats
-- `server/__tests__/` — 377 Node test runner unit tests (frontend has 4 Vitest component tests in `client/src/components/*.test.jsx`)
+- `server/__tests__/` — 656 Node test runner unit tests across 69 files; frontend has 13 Vitest files under `client/src/{components,pages,utils}/` and 5 Playwright tests across 3 specs in `e2e/tests/`
 - `client/` — Vite + React 18 SPA (HashRouter); `client/src/pages/*.jsx` is one page per route
 - `docs/` — see file links above
 - `deploy.sh` / `migrate-env-to-secret.sh` / `setup-secrets.sh` — Cloud Run + Secret Manager helpers
@@ -104,8 +104,10 @@ NOT `influencex.com`. Don't typo this in copy, env vars, OAuth redirect URIs, or
 preview_start influencex          # server on :8080 (SQLite if no DATABASE_URL)
 preview_start influencex-client   # Vite dev on :5173 (HMR)
 
-# Tests (server only — no frontend tests yet)
-npm test                          # 234 unit tests, ~3s
+# Tests
+npm test                          # 656 server unit tests, ~1s
+cd client && npx vitest run       # 13 component/page/util test files
+npx playwright test               # 5 e2e tests across 3 specs in e2e/tests/
 
 # Build client
 cd client && npx vite build       # outputs client/dist/
@@ -121,7 +123,8 @@ cd client && npx vite build       # outputs client/dist/
 
 # Connect to prod Postgres via Cloud SQL Auth Proxy (read-only investigation)
 cloud-sql-proxy --port 5434 gameclaw-492005:us-central1:influencex-db &
-# password is in .env DATABASE_URL (postgres user)
+# There is NO local .env — pull the postgres password from Secret Manager:
+gcloud secrets versions access latest --secret=DATABASE_URL --project=gameclaw-492005
 node -e "const {Client}=require('pg');..."   # one-off queries
 ```
 
@@ -186,7 +189,7 @@ Each prod deploy increments the Cloud Run revision number (`influencex-NNNNN-xxx
 ## Debugging Production
 
 - **Cloud Run logs:** `gcloud run services logs read influencex --region=us-central1 --limit=50`
-- **Postgres queries:** start `cloud-sql-proxy --port 5434 gameclaw-492005:us-central1:influencex-db` then connect with any pg client. Password is in `.env` DATABASE_URL
+- **Postgres queries:** start `cloud-sql-proxy --port 5434 gameclaw-492005:us-central1:influencex-db` then connect with any pg client. There is no local `.env` — get the password from `gcloud secrets versions access latest --secret=DATABASE_URL --project=gameclaw-492005` (delete any copy you write to disk)
 - **Sentry** — wired server-side (`server/sentry.js`) + client-side since `891f209` (needs `SENTRY_DSN`)
 - **OpenTelemetry** — wired via `server/otel.js` since `8f00ad1` (needs OTLP endpoint env)
 
@@ -198,8 +201,8 @@ See [docs/memory.md](docs/memory.md) for the full list. Highlights:
 - **`hakko-q1-all` is a legacy demo campaign**: server seeds it on first boot. Don't use as a fallback in new code — use `defaultCampaignForWorkspace()` instead.
 - **Pipeline ↔ Contact dual flow**: solved by `pipeline_jobs.contact_id` link + worker reverse-sync. UI shows the same row from both pages.
 - **Hunter.io fallback** only works for KOLs with a linked website on their channel page. No-website KOLs need a paid Hunter Email-Finder plan + known domain.
-- **Frontend has no tests** — Sprint 2 task C1+C2 will add Playwright + Vitest. Until then, manual smoke after every feature.
 - **`subscriptions` table is dormant** — left from removed Stripe billing. Don't query.
+- **`brand_voices` is empty in production** (verified 2026-08-09, 0 rows). Brand-voice similarity was inert until `0c5323b`, but nothing was lost — the first voice created after the next deploy embeds correctly. Note the embedding is written **only on create** (`POST /api/brand-voices`); there is no update route, so any future edit endpoint must re-embed.
 
 ## Session Safety
 

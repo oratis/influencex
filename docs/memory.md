@@ -18,7 +18,7 @@
 | **Service** | `influencex` (Cloud Run) |
 | **Cloud SQL Instance** | `influencex-db` (Postgres 15) |
 | **Cloud SQL Connection** | `gameclaw-492005:us-central1:influencex-db` |
-| **DB user / password** | `postgres` / 见 `.env` `DATABASE_URL`（不在此处明文） |
+| **DB user / password** | `postgres` / 见 Secret Manager 的 `DATABASE_URL`（**本地没有 `.env`**，见 §5.5） |
 | **Database name** | `influencex` |
 | **Image registry** | `gcr.io/gameclaw-492005/influencex:latest` |
 | **OAuth callback base** | `https://influencexes.com` |
@@ -37,7 +37,8 @@
 ```bash
 cloud-sql-proxy --port 5434 gameclaw-492005:us-central1:influencex-db &
 # 然后用任何 pg client 连 localhost:5434
-# password 从 .env DATABASE_URL 提取
+# password 从 Secret Manager 取（本地没有 .env）：
+gcloud secrets versions access latest --secret=DATABASE_URL --project=gameclaw-492005
 ```
 
 **注意**：本地常驻一个 cloud-sql-proxy 指向另一个项目（`dimbluedot:us-central1:luddi-pg`，端口 5433）。我们要的是 5434 端口。
@@ -215,7 +216,7 @@ node --test server/__tests__/email-jobs.test.js
 node --test --test-name-pattern "specific test" server/__tests__/*.test.js
 ```
 
-`npm test` 跑全套 234 个，~3 秒。
+`npm test` 跑全套 **656** 个（69 个文件），~1 秒。前端另有 13 个 vitest 文件（`cd client && npx vitest run`）+ 5 条 Playwright / 3 个 spec（`npx playwright test`）。
 
 ### 5.3 客户端 build 检查
 
@@ -233,7 +234,7 @@ build 失败通常是：
 gcloud run services logs read influencex --region=us-central1 --limit=50 --project=gameclaw-492005
 ```
 
-**没有 Sentry / OTEL**（Sprint 1 待加）。要查报错只能 grep Cloud Run 日志。
+Sentry（`server/sentry.js`，客户端自 `891f209`）与 OpenTelemetry（`server/otel.js`，自 `8f00ad1`）**都已接入** —— 需要 `SENTRY_DSN` / OTLP endpoint 环境变量才会真正上报。没配的话仍然只能 grep Cloud Run 日志。
 
 ### 5.5 prod DB 一次性查询
 
@@ -241,7 +242,7 @@ gcloud run services logs read influencex --region=us-central1 --limit=50 --proje
 cloud-sql-proxy --port 5434 gameclaw-492005:us-central1:influencex-db &
 node -e "
 const { Client } = require('pg');
-const c = new Client({ host: 'localhost', port: 5434, user: 'postgres', password: '<在.env里>', database: 'influencex' });
+const c = new Client({ host: 'localhost', port: 5434, user: 'postgres', password: '<见下方 gcloud 命令>', database: 'influencex' });
 c.connect().then(async () => {
   const r = await c.query('SELECT ...');
   console.log(r.rows);
@@ -266,7 +267,7 @@ kill %1
 | 无 frontend 测试 | 13 个文件 / 82 个 vitest + 5 条 Playwright，全部挂 CI（#12/#13） |
 | 无 Sentry / OTEL | 早已接入；依赖冲突后遗症 #7 收尾 |
 | In-process job queue 多副本丢消息 | BullMQ API 修复 + 发送原子抢占 + 进程级异常兜底（#10） |
-| pgvector 启用但 agent 没用 | 实际是**接了但从未工作**（embed 调用契约错，`findBestBrandVoice` 永远返回 null）→ #20 修复 |
+| pgvector 启用但 agent 没用 | 实际是**接了但从未工作**（embed 调用契约错，`findBestBrandVoice` 永远返回 null）→ #20 修复。**2026-08-09 查过 prod：`brand_voices` 表 0 行**，所以坏了这么久也没丢数据，不需要 backfill |
 | ContactModule 5s 轮询撞 429 | 后台刷新不再置 loading + 请求序号守卫（#9）；限流器桶隔离（#15） |
 | Hunter API 仅对有外链网站的 KOL 有效 | 仍然成立，但已是产品决策（付费 API 预算）而非 bug |
 
@@ -284,6 +285,7 @@ kill %1
 | `content_daily_stats` 全局 UNIQUE(content_url, stat_date) | 跨工作区同 URL 同日第二条快照被静默跳过 | fail-closed，彻底解决需改约束 |
 | Marketplace 无下架/申诉流程 | 撤一条 listing 只能手工 DELETE | provenance 列可定位，需配合创作者 opt-out |
 | **design.md 与现状脱节** | §10.3 说焦点还原未实现、§12 硬编码 FUNNEL_COLORS、§8.3 modal 契约现已是组件 | #13 之后未同步 |
+| **brand voice 只在创建时写 embedding** | 以后加编辑接口会留下过期向量 | `POST /api/brand-voices` 是唯一写点（`server/index.js:3419`），目前只有 GET/POST/DELETE，没有 update 路由所以暂时无害 |
 | `ContactModule.jsx` 与 `PipelinePage.jsx` UI 重复 | 两个 page 显示相似数据 | 未评估 |
 
 ### 这轮学到的、值得记住的失效模式
@@ -323,7 +325,7 @@ type: `feat` / `fix` / `chore` / `docs` / `refactor`。scope: `discovery` / `out
 - 小改动（i18n / 文案 / a11y） —— 不强求立刻 deploy，下次大改一起
 - bug 修复 —— 立即 deploy（push + run `./deploy.sh`）
 - 安全修复 —— 立即 deploy + 通知用户
-- 大重构 —— 至少跑过 234 个测试 + 客户端 build + 本地 preview 烟测，再 deploy
+- 大重构 —— 至少跑过全套 656 个服务端测试 + 客户端 build + 本地 preview 烟测，再 deploy
 
 ### 7.4 push 前 checklist
 
