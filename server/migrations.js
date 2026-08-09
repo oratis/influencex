@@ -960,6 +960,97 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-08-10-creators-public-marketplace',
+    description: 'Creator Marketplace catalog (roadmap D2). Cross-workspace, public-profile fields ONLY — no email, no contact info, no campaign linkage. Every row carries provenance (which workspace contributed it, when, and that the source is a public profile page) per ROADMAP_2026-Q2 §5 "Marketplace 种子数据合规". Seeds a handful of unmistakably-labelled sample rows so /marketplace is demonstrable on an empty install; set MARKETPLACE_SAMPLE_DATA=false to skip them.',
+    up: async ({ exec, query }) => {
+      // NOT multi-tenant on purpose: this is the one shared table in the
+      // schema. It is deliberately absent from MULTITENANT_TABLES and from
+      // database.js's scoped() path — see server/marketplace.js for the
+      // full reasoning and the field allowlist that keeps it public-only.
+      //
+      // `source` records HOW the row was obtained, not who it is about:
+      //   'public_profile' — promoted from a workspace's own scraped
+      //                      kol_database row, whose data came off the
+      //                      creator's public profile page.
+      //   'sample'         — synthetic demo row, is_sample = 1.
+      // `contributed_by_workspace_id` is provenance for auditing/takedowns.
+      // It is NEVER returned by the API: which workspace is tracking which
+      // creator is itself tenant-private information.
+      await exec(`
+        CREATE TABLE IF NOT EXISTS creators_public (
+          id TEXT PRIMARY KEY,
+          platform TEXT NOT NULL,
+          username TEXT NOT NULL,
+          display_name TEXT,
+          avatar_url TEXT,
+          profile_url TEXT,
+          followers INTEGER DEFAULT 0,
+          engagement_rate REAL DEFAULT 0,
+          category TEXT,
+          source TEXT NOT NULL DEFAULT 'public_profile',
+          contributed_by_workspace_id TEXT,
+          contributed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          is_sample INTEGER DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      for (const stmt of [
+        // One listing per creator per platform. Two workspaces that both
+        // scraped the same channel contribute one row, not two.
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_creators_public_identity ON creators_public(platform, username)',
+        'CREATE INDEX IF NOT EXISTS idx_creators_public_platform ON creators_public(platform)',
+        'CREATE INDEX IF NOT EXISTS idx_creators_public_followers ON creators_public(followers)',
+        'CREATE INDEX IF NOT EXISTS idx_creators_public_category ON creators_public(category)',
+      ]) {
+        try { await exec(stmt); } catch (e) { if (!/already exists/i.test(e.message)) throw e; }
+      }
+
+      // ---- Sample rows -------------------------------------------------
+      // Deliberately NOT 100 invented creators. Fabricating plausible
+      // channel names, follower counts and URLs would put made-up people
+      // in front of users as if they were real, bookable creators. These
+      // six exist only so the page has something to render before any
+      // workspace has contributed; they are flagged is_sample = 1, named
+      // "Sample Creator X", and point at example.com (an IANA-reserved
+      // documentation domain that can never be a real profile).
+      if (String(process.env.MARKETPLACE_SAMPLE_DATA).toLowerCase() === 'false') return;
+
+      const samples = [
+        ['youtube',   'sample-creator-a', 'Sample Creator A', 128000, 4.2, 'gaming'],
+        ['youtube',   'sample-creator-b', 'Sample Creator B', 46000,  6.1, 'tech'],
+        ['tiktok',    'sample-creator-c', 'Sample Creator C', 512000, 8.4, 'beauty'],
+        ['tiktok',    'sample-creator-d', 'Sample Creator D', 9800,   11.3, 'food'],
+        ['instagram', 'sample-creator-e', 'Sample Creator E', 74000,  3.7, 'fitness'],
+        ['instagram', 'sample-creator-f', 'Sample Creator F', 21000,  5.5, 'travel'],
+      ];
+      for (const [platform, username, displayName, followers, engagement, category] of samples) {
+        // Fixed ids keep the migration idempotent and let an operator delete
+        // the sample set with a single predicate (is_sample = 1).
+        const id = `sample-${platform}-${username}`;
+        const existing = await query(
+          'SELECT id FROM creators_public WHERE platform = ? AND username = ?',
+          [platform, username]
+        );
+        if ((existing.rows || []).length > 0) continue;
+        await exec(
+          `INSERT INTO creators_public
+             (id, platform, username, display_name, avatar_url, profile_url,
+              followers, engagement_rate, category, source,
+              contributed_by_workspace_id, is_sample)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sample', NULL, 1)`,
+          [
+            id, platform, username, displayName,
+            `https://example.com/avatars/${username}.png`,
+            `https://example.com/${platform}/${username}`,
+            followers, engagement, category,
+          ]
+        );
+      }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,

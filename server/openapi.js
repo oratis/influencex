@@ -99,6 +99,7 @@ function buildOpenApiSpec(basePath = '/InfluenceX') {
       { name: 'contacts', description: 'Contact / outreach management' },
       { name: 'pipeline', description: 'Auto-scrape / write / send pipeline' },
       { name: 'discovery', description: 'KOL discovery by keyword search' },
+      { name: 'marketplace', description: 'Shared cross-workspace catalog of public creator profiles' },
       { name: 'data', description: 'Content and registration analytics' },
       { name: 'exports', description: 'CSV exports' },
       { name: 'users', description: 'User management (admin only)' },
@@ -186,6 +187,48 @@ function buildOpenApiSpec(basePath = '/InfluenceX') {
       },
       '/kol-database/export': {
         get: { tags: ['exports'], summary: 'Export entire KOL database as CSV', responses: { '200': { description: 'CSV file' } } },
+      },
+      // Creator Marketplace (roadmap D2). Unlike every other resource here,
+      // the catalog is shared across workspaces — which is why it carries
+      // public profile fields only and never contact data.
+      '/marketplace/creators': {
+        get: {
+          tags: ['marketplace'],
+          summary: 'Browse / search the shared creator catalog (public profile fields only — no email or contact data)',
+          parameters: [
+            { name: 'platform', in: 'query', schema: { type: 'string' } },
+            { name: 'category', in: 'query', schema: { type: 'string' } },
+            { name: 'min_followers', in: 'query', schema: { type: 'integer' } },
+            { name: 'q', in: 'query', description: 'Handle or display name', schema: { type: 'string' } },
+            { name: 'sort', in: 'query', schema: { type: 'string', enum: ['followers', 'engagement', 'recent'] } },
+            { name: 'limit', in: 'query', description: 'Capped server-side', schema: { type: 'integer', default: 24, maximum: 100 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+          ],
+          responses: { '200': { description: 'Creators, total, categories, has_sample' } },
+        },
+      },
+      '/marketplace/creators/{id}/add-to-campaign': {
+        post: {
+          tags: ['marketplace'],
+          summary: 'Copy a catalog listing into one of your own campaigns (workspace-scoped write)',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': { description: 'KOL created in the caller workspace' },
+            '400': { description: 'Missing campaign_id, or the listing is sample data' },
+            '404': { description: 'Creator or campaign not found in this workspace' },
+            '409': { description: 'Already in the campaign' },
+          },
+        },
+      },
+      '/marketplace/contribute': {
+        post: {
+          tags: ['marketplace'],
+          summary: 'Promote this workspace\'s scraped KOLs into the shared catalog (platform admin). Public fields only; provenance recorded per row',
+          responses: {
+            '200': { description: '{ contributed, refreshed, skipped, total }' },
+            '403': { description: 'Platform admins only' },
+          },
+        },
       },
       '/contacts/{id}/send': {
         post: {

@@ -114,6 +114,12 @@ const EXPECTED = {
   'GET /api/discovery/jobs/:id/export': 'data.export',
   'GET /api/data/content/export': 'data.export',
 
+  // Creator Marketplace (roadmap D2). Browsing the shared catalog is a read;
+  // copying a listing into one of your campaigns creates a kols row.
+  // Contributing INTO the shared catalog is platform-admin — see below.
+  'POST /api/marketplace/creators/:id/add-to-campaign': 'kol.create',
+  'GET /api/marketplace/creators': 'kol.read',
+
   // Reads stay open to viewers
   'GET /api/campaigns': 'campaign.read',
   'GET /api/kol-database': 'kol.read',
@@ -221,6 +227,10 @@ test('every /api route is gated, platform-admin-only, or explicitly allowlisted'
 const PLATFORM_ADMIN_ROUTES = [
   'POST /api/data/seed-demo',   // rewrites a fixed-id campaign row
   'GET /api/admin/usage',       // reads token/cost across every tenant
+  // Publishes rows into creators_public, the one table every tenant reads.
+  // A workspace-role check would be self-granting here (anyone can create a
+  // workspace where they are admin), so this needs the global users.role.
+  'POST /api/marketplace/contribute',
 ];
 
 for (const routeKey of PLATFORM_ADMIN_ROUTES) {
