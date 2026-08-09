@@ -10,6 +10,13 @@
  *   - Tool use / function calling (Anthropic + OpenAI both supported)
  *   - Retry with exponential backoff on 429/5xx
  *
+ * Metering contract: a cache hit is FREE. It reports `usdCents: 0` and is kept
+ * out of the billed counters, because no request was made and no provider
+ * charged us. Its token counts and `cachedUsdCents` (the spend avoided) survive
+ * for visibility, and `stats.cached` accumulates the same volume so the
+ * persisted ledger in `agent_runs` stays reconcilable against getStats(). Only
+ * calls with `temperature` 0 or absent are cacheable at all — see complete().
+ *
  * NOT supported: streaming. Every provider call is a single fetch + json().
  * (This header claimed "Streaming via async iterator" for a long time; it was
  * never implemented, and Conductor's plan-progress SSE had to fall back to
@@ -32,10 +39,29 @@ const DEFAULT_PROVIDER = process.env.LLM_DEFAULT_PROVIDER ||
    process.env.GOOGLE_AI_API_KEY ? 'google' : null);
 
 // Usage accumulator (reset via resetStats)
+//
+// `byProvider` / `byModel` / `totalUsdCents` meter money that actually left the
+// building: recordUsage() runs on the live-call path only, so a cache hit adds
+// nothing to them. But a cache hit still reports its original token counts (see
+// complete()), and those reach `agent_runs` — so with cached volume tracked
+// nowhere, this meter and the persisted ledger could never be reconciled; the
+// ledger would just look inexplicably larger with no way to say why.
+//
+// `cached` closes that gap. It counts hits separately, and its `usdCents` is
+// spend *avoided* rather than spend incurred. Within one process lifetime, over
+// the runs that process recorded, both of these hold:
+//
+//   SUM(agent_runs.cost_usd_cents) === totalUsdCents
+//   SUM(agent_runs.input_tokens)   === Σ byProvider[*].inputTokens + cached.inputTokens
+//
+// Money agrees outright; tokens agree once cached volume is added back.
+const emptyCacheBucket = () => ({ calls: 0, inputTokens: 0, outputTokens: 0, usdCents: 0 });
+
 const stats = {
   byProvider: {},   // provider → { calls, inputTokens, outputTokens, usdCents }
   byModel: {},
   totalUsdCents: 0,
+  cached: emptyCacheBucket(),   // cache hits: free, but not invisible
 };
 
 function recordUsage(provider, model, inputTokens, outputTokens, usdCents) {
@@ -51,6 +77,19 @@ function recordUsage(provider, model, inputTokens, outputTokens, usdCents) {
   stats.totalUsdCents += usdCents;
 }
 
+/**
+ * Record a cache hit. Deliberately NOT recordUsage(): no request was made, so
+ * no provider charged us, and folding this into the billed buckets would
+ * reintroduce exactly the over-billing this separation exists to prevent.
+ * `avoidedUsdCents` is what the hit would have cost had it gone out live.
+ */
+function recordCacheHit(inputTokens, outputTokens, avoidedUsdCents) {
+  stats.cached.calls += 1;
+  stats.cached.inputTokens += inputTokens;
+  stats.cached.outputTokens += outputTokens;
+  stats.cached.usdCents += avoidedUsdCents;
+}
+
 function getStats() {
   return JSON.parse(JSON.stringify(stats));
 }
@@ -59,6 +98,7 @@ function resetStats() {
   stats.byProvider = {};
   stats.byModel = {};
   stats.totalUsdCents = 0;
+  stats.cached = emptyCacheBucket();
 }
 
 // Pricing per 1M tokens. Update as prices change.
@@ -371,8 +411,17 @@ async function complete({
       // cents for a request that never left the process, and disagree with
       // getStats(). Report zero spend, keep the token counts for visibility,
       // and let `fromCache` explain the discrepancy to anyone comparing.
+      //
+      // The stored entry is never mutated — `usage` below is a fresh object on
+      // every hit, built from the original — so `cachedUsdCents` stays accurate
+      // across repeat hits on the same key rather than decaying to zero.
+      const base = cached.usage || {};
+      const avoidedUsdCents = base.usdCents || 0;
+      // Tracked here, not in the billed buckets, so the persisted ledger's
+      // token counts remain reconcilable against getStats(). See `stats`.
+      recordCacheHit(base.inputTokens || 0, base.outputTokens || 0, avoidedUsdCents);
       const usage = cached.usage
-        ? { ...cached.usage, usdCents: 0, billedUsdCents: 0, cachedUsdCents: cached.usage.usdCents || 0 }
+        ? { ...base, usdCents: 0, billedUsdCents: 0, cachedUsdCents: avoidedUsdCents }
         : cached.usage;
       return { ...cached, usage, fromCache: true };
     }
@@ -455,4 +504,7 @@ module.exports = {
   resetStats,
   computeCostCents,
   PRICING,
+  // exported for tests — lets a test prime defaultCache for the exact key
+  // complete() will look up, so cache-hit accounting is testable offline.
+  cacheKey,
 };
