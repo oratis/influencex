@@ -8,8 +8,12 @@
  *   - Token + cost metering per call
  *   - Response caching (keyed on provider:model:prompt) for idempotent use
  *   - Tool use / function calling (Anthropic + OpenAI both supported)
- *   - Streaming via async iterator
  *   - Retry with exponential backoff on 429/5xx
+ *
+ * NOT supported: streaming. Every provider call is a single fetch + json().
+ * (This header claimed "Streaming via async iterator" for a long time; it was
+ * never implemented, and Conductor's plan-progress SSE had to fall back to
+ * coarse server-side phases because of it.)
  *
  * Environment:
  *   ANTHROPIC_API_KEY  — for claude-*
@@ -359,7 +363,19 @@ async function complete({
   const cKey = shouldCache ? cacheKey(effectiveProvider, effectiveModel, messages, tools) : null;
   if (cKey) {
     const cached = defaultCache.get(cKey);
-    if (cached) return { ...cached, fromCache: true };
+    if (cached) {
+      // A cache hit costs nothing, and recordUsage() is deliberately not
+      // called for it — so the in-memory stats already treat it as free.
+      // Returning the original call's `usage` unchanged made callers that
+      // persist it (agent_runs, and therefore the usage ledger) bill real
+      // cents for a request that never left the process, and disagree with
+      // getStats(). Report zero spend, keep the token counts for visibility,
+      // and let `fromCache` explain the discrepancy to anyone comparing.
+      const usage = cached.usage
+        ? { ...cached.usage, usdCents: 0, billedUsdCents: 0, cachedUsdCents: cached.usage.usdCents || 0 }
+        : cached.usage;
+      return { ...cached, usage, fromCache: true };
+    }
   }
 
   let result;

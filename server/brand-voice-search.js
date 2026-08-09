@@ -54,7 +54,12 @@ async function embedBrandVoice(voice) {
   const text = composeBrandVoiceText(voice);
   if (!text) return null;
   try {
-    const vectors = await llm.embed({ texts: [text] });
+    // llm.embed(input, opts) takes a string or string[] and returns
+    // { vectors, model, dims, ... } — not a bare array, and not an options
+    // object. Both call sites here passed `{ texts: [...] }` as the input and
+    // then indexed the result object like an array, so this path could only
+    // ever throw or yield undefined.
+    const { vectors } = await llm.embed([text]);
     return vectors?.[0] || null;
   } catch (e) {
     log.warn('[brand-voice] embed failed:', e.message);
@@ -80,8 +85,8 @@ async function findBestBrandVoice({ workspaceId, brief, db, usePostgres }) {
 
   let queryEmbed;
   try {
-    const v = await llm.embed({ texts: [brief] });
-    queryEmbed = v?.[0];
+    const { vectors } = await llm.embed([brief]);
+    queryEmbed = vectors?.[0];
   } catch (e) {
     log.warn('[brand-voice] query embed failed:', e.message);
     return null;
