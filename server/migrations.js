@@ -885,6 +885,52 @@ const MIGRATIONS = [
     },
   },
 
+  {
+    id: '2026-08-09-workspace-id-not-null',
+    description: 'Enforce workspace_id NOT NULL on multi-tenant tables (Postgres only; per-table, skipped when orphan rows exist). Closes the gap that let NULL-workspace rows be written silently — see docs/MULTITENANCY.md §2.',
+    up: async ({ exec, query, usePostgres }) => {
+      // SQLite has no ALTER COLUMN ... SET NOT NULL; enforcing it there would
+      // mean a full table rebuild (create/copy/drop/rename) per table, which
+      // risks data loss on the dev/test path for no production benefit —
+      // production is Postgres. SQLite keeps the runtime guards only.
+      // Callers that don't declare a driver (tests, seed script) are SQLite.
+      if (!usePostgres) return;
+
+      for (const table of MULTITENANT_TABLES) {
+        let orphans;
+        try {
+          const r = await query(`SELECT COUNT(*) AS n FROM ${table} WHERE workspace_id IS NULL`);
+          orphans = parseInt((r.rows && r.rows[0] && r.rows[0].n) || 0, 10);
+        } catch (e) {
+          // Table may not exist in this deployment — nothing to constrain.
+          if (/does not exist|no such table/i.test(e.message)) continue;
+          throw e;
+        }
+
+        if (orphans > 0) {
+          // Do NOT fail the boot: an orphan row is a data-quality problem for
+          // an operator to triage (the rows are already invisible to every
+          // workspace-scoped read), not a reason to take the service down.
+          // Re-running this migration later, after cleanup, is a no-op for
+          // tables already constrained.
+          console.warn(
+            `[migrations] ${table}: ${orphans} row(s) with NULL workspace_id — leaving column nullable. ` +
+            `Assign or delete those rows, then re-run this migration id after removing it from schema_migrations.`
+          );
+          continue;
+        }
+
+        try {
+          await exec(`ALTER TABLE ${table} ALTER COLUMN workspace_id SET NOT NULL`);
+        } catch (e) {
+          // Already NOT NULL (re-run) — Postgres is a no-op here, but be
+          // tolerant of any driver that reports it as an error.
+          if (!/already|cannot be cast|does not exist/i.test(e.message)) throw e;
+        }
+      }
+    },
+  },
+
 ];
 
 // Slugify helper — lowercase, replace non-alphanumeric with dashes,
@@ -956,4 +1002,4 @@ async function runPendingMigrations(dbApi) {
   return { applied: pending.length, total: applied.size + pending.length };
 }
 
-module.exports = { runPendingMigrations, MIGRATIONS };
+module.exports = { runPendingMigrations, MIGRATIONS, MULTITENANT_TABLES };
