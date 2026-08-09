@@ -107,6 +107,49 @@ SSRF 统一走 `safeFetch`（重定向后二次校验）、CSV 公式注入前�
 
 ---
 
+## 2b. 执行状态（2026-08-09 更新）
+
+**全部止血批次已合并，main 绿：server 572 测试 / client 59 测试 / Playwright 5 条 / CI 五个 job 全过。**
+
+| 批次 | PR | 状态 |
+|---|---|---|
+| PR-0 文档 | [#6](https://github.com/oratis/influencex/pull/6) | ✅ 已合并 |
+| PR-A P0 + CI | [#7](https://github.com/oratis/influencex/pull/7) | ✅ 已合并 |
+| PR-B 多租户/安全 | [#8](https://github.com/oratis/influencex/pull/8) | ✅ 已合并 |
+| PR-C 队列幂等 | [#10](https://github.com/oratis/influencex/pull/10) | ✅ 已合并 |
+| PR-D 前端 bug | [#9](https://github.com/oratis/influencex/pull/9) | ✅ 已合并 |
+| PR-J 结构性收口（§4-6 提前执行） | [#11](https://github.com/oratis/influencex/pull/11) | ✅ 已合并 |
+| PR-E 测试护栏 | [#12](https://github.com/oratis/influencex/pull/12) | ✅ 已合并 |
+| PR-F2 前端一致性 | [#13](https://github.com/oratis/influencex/pull/13) | ✅ 已合并 |
+| PR-F1 服务端加固 | [#14](https://github.com/oratis/influencex/pull/14) | ✅ 已合并 |
+| 追加：限流/迁移竞态 | [#15](https://github.com/oratis/influencex/pull/15) | ✅ 已合并 |
+
+### 执行过程中新发现的缺陷（原计划里没有）
+
+这些不是 review 时定位到的，是在实现和验证过程中撞出来的，价值不低于原清单：
+
+| 发现 | 严重度 | 来源 | 处置 |
+|---|---|---|---|
+| **限流器共用一个桶** — auth/discovery/export/sendEmail 按 IP 落同一窗口，最严的那个实际管住全部；且 `consume()` 把批量预留写进了没人检查的桶 | P1 | PR-F1 实现时发现 | #15 已修，实测验证 |
+| **迁移读-改-写竞态** — 两实例冷启动，输的一方 UNIQUE 冲突 → exit(1) | P1 | PR-E 写测试时发现 | #15 已修（PG advisory lock + 容忍重复记账） |
+| **session 索引写进基础 schema → 已有库启动即死** | P0 | 我在真实已有库上验证 PR-F1 时发现 | #14 内修复（测试全用新库，测不出来） |
+| **ErrorCard 引用不存在的 CSS token → 暗色应用里白底白字** | P1 | PR-F2 实现时发现 | #13 已修（这正是"加载失败看起来像空状态"的根因） |
+| **Ads/Translate 页用了应用里不存在的 `className="input"`** | P2 | PR-F2 实现时发现 | #13 已修（原生白底控件的根因） |
+| **SSE agent-run 端点在 HEAD 上根本不可达** — workspace 中间件未跳过该路径，401 早于 handler 的 query-token 鉴权 | P1 | PR-B 实现时发现 | #8 已修 |
+| **无邮件服务商时 approve 的任务卡在 `stage='send'`** — dry-run 分支在同步 pipeline 前就返回 | P2 | PR-E 写测试时发现 | 未修，测试如实断言现状 |
+| **YouTube API 查询串未 encodeURIComponent** | P2 | PR-F1 实现时发现 | #15 已修 |
+| **`client/node_modules` 符号链接被误提交** — 指向作者机器绝对路径，check out 后砸掉真实安装（本地已触发 ELOOP） | P2 | 合并 #13 后自食其果 | #15 已修（.gitignore 去掉尾斜杠） |
+
+### 行为变更（需要知会用户）
+
+- **viewer 失去全部 5 个 CSV 导出**（`data.export` 归 editor+，符合文档权限模型）
+- **editor 不能再取消自己创建的定时发布**（`content.delete` 归 admin，"删除类=admin"）
+- 前端仍会渲染 viewer 点不动的按钮 → 会看到 403 toast。UI 侧按权限隐藏是 S-6 的客户端半边，尚未做
+- **生产未配 `RESEND_WEBHOOK_SECRET`/`APIFY_WEBHOOK_SECRET` 时 webhook 将拒收**（fail-closed，#8）
+- **生产未配 `MAILBOX_ENCRYPTION_KEY` 时启动即失败**（#14；CLAUDE.md 早就这么写，但此前无代码执行）
+
+---
+
 ## 3. 依赖与节奏
 
 ```
@@ -123,24 +166,40 @@ PR-F ── 任意时间，低风险尾部
 
 ---
 
-## 4. 止血之后：Q2 roadmap 续推（本计划不实施，仅排序）
+## 4. 止血之后：Q2 roadmap 续推
 
-1. **B3 完整版** — Conductor plan SSE 推流（"正在分析受众→生成 plan"），替代 3s 轮询
-2. **D5 完整版** — workspace×agent×月 usage 账目 API + Analytics 页表格（为分级计费打底）
-3. **D1 Ads 真实下单** — Meta Sandbox 草稿先行（5 天，roadmap 原案）
-4. **D2 Creator Marketplace 种子** — `creators_public` + 100 KOL 导入 + `/marketplace` 页
-5. **Hunter 扩展**（memory.md Bug #10 遗留）— 无外链 KOL 的 Email-Finder 付费路径评估
-6. **MULTITENANCY.md 收口** — 全表 `workspace_id` SET NOT NULL migration（PR-B 合并且数据回填核查后执行；这是防止 P0-3 类问题复发的结构性根治）
-7. **ContactModule/PipelinePage UI 合并评估**（memory.md 已知项，Sprint 3 原案）
+1. **B3 Conductor SSE** — 🔄 进行中（wave 2）
+2. **D5 usage 账目** — 🔄 进行中（wave 2）。技术前提已确认：`agent_runs` 表已有 workspace_id/agent_id/cost_usd_cents/tokens/started_at，**无需建表，纯聚合 + UI**
+3. **D2 Creator Marketplace** — 🔄 进行中（wave 2）。**范围已调整**：roadmap 原文写"导入 100 个 KOL"，但凭空生成 100 份"看起来像真人"的创作者档案等于把伪造记录当真实数据呈现给用户，不做。改为：机制照建，数据只来自本工作区真实抓取过的 KOL 公开字段（提升进目录，带来源标注），外加 ≤10 条**明确标注为示例**的数据供空实例演示
+4. **D1 Ads 真实下单** — ⏸ **需人工解锁**：要 Meta/Google 广告账号与 sandbox 凭据，且涉及真实计费风险，不自行推进
+5. **Hunter 扩展** — ⏸ **需人工决策**：Hunter Email-Finder 是付费 API，要先定预算
+6. **MULTITENANCY.md 收口** — ✅ 已完成（[#11](https://github.com/oratis/influencex/pull/11)，提前执行）
+7. **ContactModule/PipelinePage UI 合并评估** — 未启动
+8. **前端按权限隐藏控件** — 新增：#14 的 RBAC 收口只做了服务端，viewer 现在会看到点不动的按钮
+
+### 遗留的已知问题（已定位，未修）
+
+- **无邮件服务商时 approve 卡在 `stage='send'`** — 影响所有未配 Resend/SMTP 的部署
+- **DNS-rebinding SSRF** — `assertSafeUrl` 是字面主机检查，公网域名解析到内网 IP 仍可通过；需要 resolve-then-pin 派发器
+- **既有明文 platform token 未回填加密** — 读时透明兼容、下次写入时加密，但不会主动清理
+- **`content_daily_stats` 的全局 `UNIQUE(content_url, stat_date)`** — 跨工作区同 URL 同日的第二条快照被静默跳过（fail-closed），彻底解决需要改约束
+- **design.md 与现状脱节** — §10.3 说焦点还原未实现、§12 硬编码 `FUNNEL_COLORS`、§8.3 的 modal 契约现在是组件而非约定
 
 ---
 
 ## 5. 完成定义
 
-- [ ] PR-0～PR-D 全部合入 main，CI 绿
-- [ ] 生产部署一次，冒烟：登录 / approve 发送 / ROI 页 / 邀请弹窗四点通过
-- [ ] E2E_REVIEW 中所有 P0/P1 条目在文档中标记 ✅ 已修
+- [x] PR-0～PR-D 全部合入 main，CI 绿
+- [x] PR-E / PR-F 合入（#12 / #13 / #14）
+- [x] E2E_REVIEW 的 P0/P1 条目全部关闭（见 §2b）
+- [ ] **生产部署一次**，冒烟：登录 / approve 发送 / ROI 页 / 邀请弹窗四点通过 ← **下一步，需人工执行 `./deploy.sh`**
 - [ ] memory.md §6 已知 bug 表同步更新
-- [ ] PR-E/PR-F 开出（允许跨周合入）
+
+### 部署前必读（这批改动改变了启动前置条件）
+
+1. **`MAILBOX_ENCRYPTION_KEY` 必须已在 Secret Manager 中** —— 否则生产启动直接 fail-fast（#14 起才真正强制）
+2. **`RESEND_WEBHOOK_SECRET` / `APIFY_WEBHOOK_SECRET` 未配则 webhook 拒收**（#8 fail-closed）；若当前未配，先补上再部署，否则入站回信会被拒
+3. **首次部署后查 migration 日志**：`workspace_id NOT NULL` 会逐表跳过仍有孤儿行的表并打警告；用 `GET /api/admin/orphan-rows` 查清单，清理后把该 migration id 从 `schema_migrations` 删掉重跑
+4. **RBAC 收口是行为变更** —— 见 §2b「行为变更」，若与实际用法不符先调整再部署
 
 **Owner:** Claude Code 会话推进，决策默认按本计划执行；偏离计划的产品级决定（如 RBAC 收口影响现有用户权限）单独列出请人工确认。
