@@ -3,7 +3,7 @@
 # Why: git classifies a whole file as binary if a NUL byte (0x00) appears in the
 # first 8000 bytes. `git diff` then degrades to "Bin 9679 -> 10779 bytes" and
 # `git blame` stops working entirely. That happened to server/usage-ledger.js
-# (#27): a composite-key separator was written as a raw 0x00 instead of the
+# (fixed in #30): a composite-key separator was written as a raw 0x00 instead of
 # `\u0000` escape, and it survived review precisely because the file could not
 # be diffed. Nobody was careless — a single pipeline that eats backslash escapes
 # is enough to produce it, and the damage hides itself.

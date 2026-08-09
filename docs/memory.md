@@ -216,12 +216,14 @@ node --test server/__tests__/email-jobs.test.js
 node --test --test-name-pattern "specific test" server/__tests__/*.test.js
 ```
 
-`npm test` 跑全套 **678** 个（71 个文件），~1 秒。前端另有 13 个 vitest 文件（`cd client && npx vitest run`）+ 5 条 Playwright / 3 个 spec（`npx playwright test`）。
+`npm test` 跑全套服务端测试，~1 秒（`c7c7d5b` 时约 680 个 / 71 个文件）。前端另有 vitest（`cd client && npx vitest run`）+ Playwright（`npx playwright test`）。
+
+**不要在文档里写死测试数量。** 上面这个数字只是个量级参考，带 commit 才有意义 —— 每合一个带测试的 PR 它就过期一次。#26 刚把 5 处 `234`/`377`/`656` 改成当时正确的 `678`，#28 一合并就又变成 679。**要准确数字就现跑一次**，别引用文档里的。
 
 **`SQLITE_BUSY` 偶发失败不是你的改动坏了。** `npm test` 是 `node --test`，默认按文件并发，而整套测试共用仓库根目录的**同一个** `influencex.db`。并发写会随机让 2-5 个文件报 `{ code: 'SQLITE_BUSY' }`，每次挂的文件还不一样。判定方法：
 
 ```bash
-node --test --test-concurrency=1 server/__tests__/*.test.js   # 串行，~8 秒，稳定 678/678
+node --test --test-concurrency=1 server/__tests__/*.test.js   # 串行，~8 秒，全绿
 ```
 
 串行绿 = 并发那几个是 flake。串行也红才是真的坏了。（在 main 上空跑也能复现，与任何 PR 无关。）
@@ -301,7 +303,7 @@ kill %1
 1. **静默错配比崩溃危险**：引用不存在的 CSS token（ErrorCard 白底白字）、不存在的 class（`className="input"` 原生控件）、错误的函数契约（`llm.embed` 永远返回 null）——三者都不报错，只是安静地渲染成错的样子或永远返回空。**"看起来像空状态"要当成 bug 线索查。**
 2. **只在新库上测 = 测不到生产**：session 索引写进基础 schema，全新库没问题，已有库启动即死。563 个测试全绿也拦不住。**改 schema 必须在有数据的库上启动一次。**
 3. **列可空 = 隐形数据丢失**：`workspace_id` 一直 nullable，任何忘记带它的 INSERT 都静默成功、然后从所有 scoped 读里消失。#11 用条件 NOT NULL 做了结构性根治。
-4. **源码里的裸控制字节 = 文件从 review 里消失**：`usage-ledger.js` 的复合键分隔符是直接写进源码的裸 `0x00`，而不是 `\u0000` 转义。NUL 一旦落在文件前 8000 字节内，git 就把**整个文件**判成二进制 —— `git diff` 只剩 `Bin N -> M bytes`，`git blame` 彻底失效。**它不需要谁疏忽：任何一个会吞反斜杠转义的管线都能产生它，而且产生之后会把自己藏起来。** #27 修了这个实例，`.gitattributes` 的 `diff` 属性做了结构性兜底（对 NUL 文件也强制文本 diff）。**在全量 diff 里看到源码文件显示 `Bin`，立刻当 bug 查。**
+4. **源码里的裸控制字节 = 文件从 review 里消失**：`usage-ledger.js` 的复合键分隔符是直接写进源码的裸 `0x00`，而不是 `\u0000` 转义。NUL 一旦落在文件前 8000 字节内，git 就把**整个文件**判成二进制 —— `git diff` 只剩 `Bin N -> M bytes`，`git blame` 彻底失效。**它不需要谁疏忽：任何一个会吞反斜杠转义的管线都能产生它，而且产生之后会把自己藏起来。** #30 修了这个实例（#27 是同一修复的重复 PR，已 close），`.gitattributes` 的 `diff` 属性做了结构性兜底（对 NUL 文件也强制文本 diff）。**在全量 diff 里看到源码文件显示 `Bin`，立刻当 bug 查。**
 
 ## 7. 与协作者的协议
 
@@ -334,7 +336,7 @@ type: `feat` / `fix` / `chore` / `docs` / `refactor`。scope: `discovery` / `out
 - 小改动（i18n / 文案 / a11y） —— 不强求立刻 deploy，下次大改一起
 - bug 修复 —— 立即 deploy（push + run `./deploy.sh`）
 - 安全修复 —— 立即 deploy + 通知用户
-- 大重构 —— 至少跑过全套 678 个服务端测试 + 客户端 build + 本地 preview 烟测，再 deploy
+- 大重构 —— 至少跑过全套服务端测试（全绿，不是"大部分绿"）+ 客户端 build + 本地 preview 烟测，再 deploy
 
 ### 7.4 push 前 checklist
 
@@ -374,7 +376,7 @@ type: `feat` / `fix` / `chore` / `docs` / `refactor`。scope: `discovery` / `out
 
 ---
 
-**Last reviewed:** 2026-08-09 (post `#24`, main green: server 678 / client 82 / e2e 5).
+**Last reviewed:** 2026-08-09 (post `#29` / `c7c7d5b`, main green: server 679 serialized / client 82 / e2e 5).
 Prod revision unchanged since `00049-w2x` — **this batch has not been deployed yet**; see
 [MASTER_PLAN_2026-08.md](./MASTER_PLAN_2026-08.md) §5 for the pre-deploy checklist (the startup
 contract changed: MAILBOX_ENCRYPTION_KEY now fail-fast, webhooks fail-closed without secrets).
