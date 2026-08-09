@@ -344,7 +344,10 @@ const PG_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_email_replies_pipeline_job_id ON email_replies(pipeline_job_id);
   CREATE INDEX IF NOT EXISTS idx_email_replies_contact_id ON email_replies(contact_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+  -- idx_sessions_token_hash is created by the 2026-08-09-hash-session-tokens
+  -- migration, NOT here: this block also runs against pre-existing databases,
+  -- where CREATE TABLE IF NOT EXISTS is a no-op and sessions has no token_hash
+  -- column yet — indexing it would abort the boot before migrations can add it.
   CREATE INDEX IF NOT EXISTS idx_content_daily_stats_url ON content_daily_stats(content_url);
   CREATE INDEX IF NOT EXISTS idx_discovery_results_job_id ON discovery_results(job_id);
 `;
@@ -623,7 +626,10 @@ const SQLITE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_email_replies_pipeline_job_id ON email_replies(pipeline_job_id);
   CREATE INDEX IF NOT EXISTS idx_email_replies_contact_id ON email_replies(contact_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+  -- idx_sessions_token_hash is created by the 2026-08-09-hash-session-tokens
+  -- migration, NOT here: this block also runs against pre-existing databases,
+  -- where CREATE TABLE IF NOT EXISTS is a no-op and sessions has no token_hash
+  -- column yet — indexing it would abort the boot before migrations can add it.
   CREATE INDEX IF NOT EXISTS idx_content_daily_stats_url ON content_daily_stats(content_url);
   CREATE INDEX IF NOT EXISTS idx_discovery_results_job_id ON discovery_results(job_id);
 `;

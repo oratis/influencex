@@ -114,9 +114,6 @@ const EXPECTED = {
   'GET /api/discovery/jobs/:id/export': 'data.export',
   'GET /api/data/content/export': 'data.export',
 
-  // Demo seeding writes into a live workspace
-  'POST /api/data/seed-demo': 'system.manage',
-
   // Reads stay open to viewers
   'GET /api/campaigns': 'campaign.read',
   'GET /api/kol-database': 'kol.read',
@@ -213,6 +210,23 @@ test('every /api route is gated, platform-admin-only, or explicitly allowlisted'
     'another way, add it to UNGATED_ALLOWLIST with a reason:\n  ' + ungated.join('\n  ')
   );
 });
+
+// Platform-level operations must NOT be gated with rbac.requirePermission:
+// it prefers req.workspaceRole, and any user can create a workspace where
+// they are admin — so a workspace-role check is self-granting here. These
+// need the global users.role check instead.
+const PLATFORM_ADMIN_ROUTES = [
+  'POST /api/data/seed-demo',   // rewrites a fixed-id campaign row
+];
+
+for (const routeKey of PLATFORM_ADMIN_ROUTES) {
+  test(`${routeKey} is platform-admin-only (not a workspace-role check)`, () => {
+    const r = BY_KEY.get(routeKey);
+    assert.ok(r, `route not found in index.js: ${routeKey}`);
+    assert.ok(r.platformAdmin, 'must use requirePlatformAdmin');
+    assert.ok(!r.permission, 'must not rely on rbac.requirePermission — see comment above');
+  });
+}
 
 test('the allowlist has no stale entries', () => {
   const stale = [...UNGATED_ALLOWLIST].filter(k => {
