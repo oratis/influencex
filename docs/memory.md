@@ -25,7 +25,7 @@
 | **Resend From email** | `contact@market.hakko.ai` |
 | **Resend Reply-To** | `market@hakko.ai` |
 | **Cloudflare** | DNS + CDN（不挡 Cloud Run 流量） |
-| **Memory.md 上次更新** | 2026-04-25 (post `44324f9`) |
+| **Memory.md 上次更新** | 2026-08-09 (post `#20`) |
 
 ### 1.1 当前 Admin
 
@@ -257,19 +257,40 @@ kill %1
 
 ## 6. 已知 bug（不阻塞但要记得）
 
-| Bug | 影响 | 修复 ETA |
-|---|---|---|
-| `subscriptions` 表 dormant | 占空间 5MB | 永不修（删除会破坏 migration 历史） |
-| Hunter API 仅对有外链网站的 KOL 有效 | 约 30% KOL 找不到邮箱 | Sprint 2 B4（Hunter Email-Finder 路径） |
-| ContactModule 5s 轮询，多 tab 加倍 | rate-limit 撞 429 | 已加自适应退避（`44324f9` 之前的 `fa692ca`） |
-| 无 frontend 测试 | 前端重构靠手动 | Sprint 1 C1, Sprint 2 C2 |
-| 无 Sentry / OTEL | 线上 bug 等于天书 | Sprint 1 A1, A2 |
-| In-process job queue | `--max-instances > 1` 会丢消息 | Sprint 1 A3 |
-| pgvector 启用但 agent 没用 | 浪费索引存储 | Sprint 2 D3 |
-| `ContactModule.jsx` 与 `PipelinePage.jsx` UI 重复 | 两个 page 显示相似数据 | 暂保留（迁移代价大于收益），Sprint 3 评估 |
-| `process.env.K_SERVICE` 在 Cloud Run 自动设置但本地需手动 | 本地连不上 Unix socket | 本地用 SQLite fallback 即可 |
+> **2026-08-09 全量更新** —— 一次全局 e2e review + 15 个 PR（#6–#20）关闭了下表大部分历史条目。完整对照见 [E2E_REVIEW_2026-08.md](./E2E_REVIEW_2026-08.md) 与 [MASTER_PLAN_2026-08.md](./MASTER_PLAN_2026-08.md)。
 
----
+### 已关闭
+
+| 原条目 | 关闭方式 |
+|---|---|
+| 无 frontend 测试 | 13 个文件 / 82 个 vitest + 5 条 Playwright，全部挂 CI（#12/#13） |
+| 无 Sentry / OTEL | 早已接入；依赖冲突后遗症 #7 收尾 |
+| In-process job queue 多副本丢消息 | BullMQ API 修复 + 发送原子抢占 + 进程级异常兜底（#10） |
+| pgvector 启用但 agent 没用 | 实际是**接了但从未工作**（embed 调用契约错，`findBestBrandVoice` 永远返回 null）→ #20 修复 |
+| ContactModule 5s 轮询撞 429 | 后台刷新不再置 loading + 请求序号守卫（#9）；限流器桶隔离（#15） |
+| Hunter API 仅对有外链网站的 KOL 有效 | 仍然成立，但已是产品决策（付费 API 预算）而非 bug |
+
+### 仍然成立 / 新增
+
+| Bug | 影响 | 备注 |
+|---|---|---|
+| `subscriptions` 表 dormant | 占空间 | 永不修 |
+| **无邮件服务商时 approve 卡在 `stage='send'`** | 未配 Resend/SMTP 的部署，审批过的任务永远到不了 monitor | dry-run 分支在同步 pipeline 前就 return；#12 的测试如实断言了现状 |
+| **`generateOutreachEmail` 不计入用量账本** | 最高频 LLM 路径的花费不可见 | 签名不带 workspaceId，需穿过 5 个调用点 |
+| **前端未按权限隐藏控件** | viewer 会看到点不动的按钮并收到 403 toast | #14 的 RBAC 只做了服务端 |
+| **SSE token 走 query string** | 会进服务端/代理日志与浏览器历史 | 两个流端点都受影响，需一次性 stream ticket |
+| **DNS-rebinding SSRF** | 公网域名解析到内网 IP 仍可通过 | `assertSafeUrl` 是字面主机检查，需 resolve-then-pin |
+| **既有明文 platform token 未回填加密** | 历史行仍是明文 | 读时透明兼容、下次写入才加密 |
+| `content_daily_stats` 全局 UNIQUE(content_url, stat_date) | 跨工作区同 URL 同日第二条快照被静默跳过 | fail-closed，彻底解决需改约束 |
+| Marketplace 无下架/申诉流程 | 撤一条 listing 只能手工 DELETE | provenance 列可定位，需配合创作者 opt-out |
+| **design.md 与现状脱节** | §10.3 说焦点还原未实现、§12 硬编码 FUNNEL_COLORS、§8.3 modal 契约现已是组件 | #13 之后未同步 |
+| `ContactModule.jsx` 与 `PipelinePage.jsx` UI 重复 | 两个 page 显示相似数据 | 未评估 |
+
+### 这轮学到的、值得记住的失效模式
+
+1. **静默错配比崩溃危险**：引用不存在的 CSS token（ErrorCard 白底白字）、不存在的 class（`className="input"` 原生控件）、错误的函数契约（`llm.embed` 永远返回 null）——三者都不报错，只是安静地渲染成错的样子或永远返回空。**"看起来像空状态"要当成 bug 线索查。**
+2. **只在新库上测 = 测不到生产**：session 索引写进基础 schema，全新库没问题，已有库启动即死。563 个测试全绿也拦不住。**改 schema 必须在有数据的库上启动一次。**
+3. **列可空 = 隐形数据丢失**：`workspace_id` 一直 nullable，任何忘记带它的 INSERT 都静默成功、然后从所有 scoped 读里消失。#11 用条件 NOT NULL 做了结构性根治。
 
 ## 7. 与协作者的协议
 
@@ -342,4 +363,7 @@ type: `feat` / `fix` / `chore` / `docs` / `refactor`。scope: `discovery` / `out
 
 ---
 
-**Last reviewed:** 2026-04-25 (post `44324f9`, prod revision `00049-w2x`)
+**Last reviewed:** 2026-08-09 (post `#20`, main green: server 656 / client 82 / e2e 5).
+Prod revision unchanged since `00049-w2x` — **this batch has not been deployed yet**; see
+[MASTER_PLAN_2026-08.md](./MASTER_PLAN_2026-08.md) §5 for the pre-deploy checklist (the startup
+contract changed: MAILBOX_ENCRYPTION_KEY now fail-fast, webhooks fail-closed without secrets).
