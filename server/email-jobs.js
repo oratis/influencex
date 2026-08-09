@@ -150,38 +150,39 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
 
     const mailbox = await resolveMailbox(contact);
 
-    // Dev fallback: if no provider config, mark sent (keeps existing behavior).
-    if (!mailAgent.isConfigured() && !mailbox) {
-      await exec(
-        `UPDATE contacts SET status='sent', sent_at=CURRENT_TIMESTAMP, send_error=NULL, last_send_attempt_at=CURRENT_TIMESTAMP, send_attempts=COALESCE(send_attempts,0)+1 WHERE id=?`,
-        [contactId]
-      );
-      return { dryRun: true };
-    }
+    // Dev fallback: with no provider configured we don't call out to anyone,
+    // but everything downstream still runs. This used to `return` early, which
+    // skipped the pipeline_jobs sync below — so on every provider-less
+    // deployment an approved job reached contacts.status='sent' while
+    // pipeline_jobs.stage stayed at 'send' forever, and the Pipeline page
+    // showed it stuck mid-flight with no thread row and no event.
+    const dryRun = !mailAgent.isConfigured() && !mailbox;
 
     await exec(
       `UPDATE contacts SET send_attempts = COALESCE(send_attempts, 0) + 1, last_send_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`,
       [contactId]
     );
 
-    const result = await mailAgent.sendEmail({
-      to: emailTo,
-      subject,
-      body,
-      mailboxAccount: mailbox,
-      // Persist refreshed Gmail tokens so the next send uses the new access_token
-      onCredsRefreshed: async (fresh) => {
-        if (!mailbox?.id) return;
-        try {
-          await exec(
-            'UPDATE mailbox_accounts SET credentials_encrypted = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-            [secrets.encrypt(fresh), mailbox.id]
-          );
-        } catch (e) {
-          log.warn('[email-jobs] failed to persist refreshed creds:', e.message);
-        }
-      },
-    });
+    const result = dryRun
+      ? { success: true, messageId: null, provider: 'dry-run' }
+      : await mailAgent.sendEmail({
+        to: emailTo,
+        subject,
+        body,
+        mailboxAccount: mailbox,
+        // Persist refreshed Gmail tokens so the next send uses the new access_token
+        onCredsRefreshed: async (fresh) => {
+          if (!mailbox?.id) return;
+          try {
+            await exec(
+              'UPDATE mailbox_accounts SET credentials_encrypted = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+              [secrets.encrypt(fresh), mailbox.id]
+            );
+          } catch (e) {
+            log.warn('[email-jobs] failed to persist refreshed creds:', e.message);
+          }
+        },
+      });
 
     if (!result.success) {
       // Transient vs terminal distinction: network-ish errors -> throw to retry.
@@ -255,10 +256,10 @@ function register({ jobQueue, query, queryOne, exec, mailAgent }) {
       contactId,
       providerMessageId: result.messageId,
       eventType: 'sent',
-      payload: { provider: result.provider, to: emailTo },
+      payload: { provider: result.provider, to: emailTo, dryRun: dryRun || undefined },
     });
 
-    return { success: true, messageId: result.messageId };
+    return { success: true, messageId: result.messageId, dryRun: dryRun || undefined };
   });
 
   // ---- email.batch_send ----
