@@ -231,6 +231,28 @@ function buildOpenApiSpec(basePath = '/InfluenceX') {
       '/users/{id}': {
         delete: { tags: ['users'], summary: 'Delete a user (admin only)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'Deleted' } } },
       },
+      '/usage': {
+        get: {
+          tags: ['data'],
+          summary: 'Token/cost usage for the current workspace, bucketed by month and agent',
+          parameters: [
+            { name: 'months', in: 'query', required: false, schema: { type: 'integer', default: 6, minimum: 1, maximum: 24 }, description: 'Window size in months, including the current partial month' },
+            { name: 'agent', in: 'query', required: false, schema: { type: 'string' }, description: 'Restrict to a single agent id' },
+          ],
+          responses: { '200': { description: 'month × agent grid plus per-month, per-agent and grand totals' } },
+        },
+      },
+      '/admin/usage': {
+        get: {
+          tags: ['system'],
+          summary: 'Token/cost usage across every workspace (platform admin only)',
+          parameters: [
+            { name: 'months', in: 'query', required: false, schema: { type: 'integer', default: 6, minimum: 1, maximum: 24 } },
+            { name: 'agent', in: 'query', required: false, schema: { type: 'string' } },
+          ],
+          responses: { '200': { description: 'Same aggregation as /usage plus a per-workspace breakdown' }, '403': { description: 'Not a platform admin' } },
+        },
+      },
       '/quota/youtube': {
         get: { tags: ['system'], summary: 'YouTube Data API daily quota usage', responses: { '200': { description: 'Quota status' } } },
       },

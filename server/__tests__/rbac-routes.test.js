@@ -120,6 +120,7 @@ const EXPECTED = {
   'GET /api/pipeline/jobs': 'contact.read',
   'GET /api/stats': 'data.read',
   'GET /api/mailboxes': 'data.read',
+  'GET /api/usage': 'data.read',
 };
 
 for (const [routeKey, expectedPerm] of Object.entries(EXPECTED)) {
@@ -217,6 +218,7 @@ test('every /api route is gated, platform-admin-only, or explicitly allowlisted'
 // need the global users.role check instead.
 const PLATFORM_ADMIN_ROUTES = [
   'POST /api/data/seed-demo',   // rewrites a fixed-id campaign row
+  'GET /api/admin/usage',       // reads token/cost across every tenant
 ];
 
 for (const routeKey of PLATFORM_ADMIN_ROUTES) {

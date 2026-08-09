@@ -309,6 +309,15 @@ export const api = {
   // persisting expiring image URLs like Volcengine's 24h signed ones)
   fetchAsDataUrl: (url) => request('/util/fetch-as-data-url', { method: 'POST', body: { url } }),
 
+  // Usage ledger — persisted token/cost by month × agent for this workspace.
+  // Unlike getAgentCostSummary(), this survives a server restart.
+  getUsage: (params = {}) => {
+    const q = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null && v !== '')
+    ).toString();
+    return request(`/usage${q ? '?' + q : ''}`);
+  },
+
   // Analytics
   getPresetAnalytics: () => request('/analytics/presets'),
   getPlatformAnalytics: () => request('/analytics/platforms'),
