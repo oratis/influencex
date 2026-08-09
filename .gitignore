@@ -1,6 +1,9 @@
-# Dependencies
-node_modules/
-client/node_modules/
+# Dependencies. No trailing slash: with one, the pattern matches only real
+# directories, so a `node_modules` SYMLINK (what you get when sharing installs
+# between git worktrees) slips past it and can be committed — see the
+# accompanying commit for what that broke.
+node_modules
+client/node_modules
 
 # Environment
 .env
