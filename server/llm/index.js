@@ -319,6 +319,26 @@ async function callOpenAI({ model, messages, system, tools, maxTokens = 1024, te
 // ============================================================================
 // Unified entry point
 
+/**
+ * Resolve which provider + model a `complete()` call would actually use,
+ * without making the call. Callers that want to *report* the target before a
+ * long request (the Conductor's `calling_llm` phase) need this; `complete()`
+ * itself uses it so the two can never drift.
+ *
+ * @returns {{ provider: string|null, model: string|null }}
+ */
+function resolveTarget({ provider, model } = {}) {
+  const effectiveProvider = provider || DEFAULT_PROVIDER || null;
+  if (!effectiveProvider) return { provider: null, model: null };
+  // Default model per provider — overridable via {PROVIDER}_MODEL env vars.
+  const effectiveModel = model || {
+    anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+    openai: process.env.OPENAI_MODEL || 'gpt-4o',
+    google: process.env.GOOGLE_MODEL || 'gemini-2.5-flash',
+  }[effectiveProvider] || null;
+  return { provider: effectiveProvider, model: effectiveModel };
+}
+
 async function complete({
   provider,
   model,
@@ -329,17 +349,10 @@ async function complete({
   temperature,
   cache = true,
 }) {
-  const effectiveProvider = provider || DEFAULT_PROVIDER;
+  const { provider: effectiveProvider, model: effectiveModel } = resolveTarget({ provider, model });
   if (!effectiveProvider) {
     throw new Error('No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.');
   }
-
-  // Default model per provider — overridable via {PROVIDER}_MODEL env vars.
-  const effectiveModel = model || {
-    anthropic: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
-    openai: process.env.OPENAI_MODEL || 'gpt-4o',
-    google: process.env.GOOGLE_MODEL || 'gemini-2.5-flash',
-  }[effectiveProvider];
 
   // Caching — skip when temperature > 0 and no explicit opt-in
   const shouldCache = cache && (temperature === undefined || temperature === 0);
@@ -419,6 +432,7 @@ async function embed(input, opts = {}) {
 
 module.exports = {
   complete,
+  resolveTarget,
   embed,
   isConfigured,
   getStats,

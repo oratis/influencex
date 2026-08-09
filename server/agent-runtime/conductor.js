@@ -97,14 +97,32 @@ const createPlanTool = {
 /**
  * Build a plan for a goal using the LLM.
  *
+ * Progress reporting (roadmap B3): planning is ONE blocking `llm.complete()`
+ * call, and the provider layer has no token streaming, so there is no honest
+ * way to report "40% done". What `onPhase` reports instead are the coarse
+ * phases this function genuinely passes through — collecting the agent
+ * registry, dispatching to a named provider+model, parsing the tool-use
+ * response. They are server-side checkpoints, not model introspection, and
+ * the UI labels them as such. No synthetic percentages.
+ *
+ * @param {object}   args
+ * @param {string}   args.goal
+ * @param {function} [args.onPhase]  (phase: string, data: object) => void
  * @returns {Promise<{ plan, rawResponse, cost }>}
  */
-async function buildPlan({ goal, workspaceId, userId }) {
+async function buildPlan({ goal, workspaceId, userId, onPhase }) {
   if (!goal || typeof goal !== 'string') throw new Error('Goal is required');
+
+  // A misbehaving reporter must never break planning.
+  const phase = (name, data) => {
+    if (typeof onPhase !== 'function') return;
+    try { onPhase(name, data || {}); } catch { /* reporting is best-effort */ }
+  };
 
   const availableAgents = runtime.listAgents().map(a => ({
     id: a.id, name: a.name, description: a.description, capabilities: a.capabilities,
   }));
+  phase('collecting_agents', { agentCount: availableAgents.length });
 
   const userMessage = `Goal: ${goal}
 
@@ -113,12 +131,23 @@ ${availableAgents.map(a => `- ${a.id}: ${a.description}`).join('\n')}
 
 Produce a plan that achieves the goal using these agents. Call create_plan with the result.`;
 
+  // Report the real target before the call so the user knows who is thinking.
+  const target = typeof llm.resolveTarget === 'function' ? llm.resolveTarget({}) : {};
+  phase('calling_llm', { provider: target.provider || null, model: target.model || null });
+
   const res = await llm.complete({
     messages: [{ role: 'user', content: userMessage }],
     system: CONDUCTOR_SYSTEM_PROMPT,
     tools: [createPlanTool],
     maxTokens: 2048,
     temperature: 0.3,
+  });
+
+  phase('parsing_plan', {
+    provider: res.provider || target.provider || null,
+    model: res.model || target.model || null,
+    outputTokens: res.usage?.outputTokens ?? null,
+    fromCache: res.fromCache === true,
   });
 
   // Find the tool use response
@@ -131,13 +160,17 @@ Produce a plan that achieves the goal using these agents. Call create_plan with 
       const match = res.text.match(/\{[\s\S]*\}/);
       if (match) {
         const parsed = JSON.parse(match[0]);
-        if (Array.isArray(parsed.steps)) return { plan: parsed, rawResponse: res, cost: res.usage };
+        if (Array.isArray(parsed.steps)) {
+          phase('plan_ready', { steps: parsed.steps.length, viaTextFallback: true });
+          return { plan: parsed, rawResponse: res, cost: res.usage };
+        }
       }
     } catch {}
     throw new Error('Conductor did not produce a structured plan. Model output: ' + res.text.slice(0, 300));
   }
 
   const plan = toolUse.input;
+  phase('plan_ready', { steps: Array.isArray(plan.steps) ? plan.steps.length : 0 });
   return { plan, rawResponse: res, cost: res.usage };
 }
 
