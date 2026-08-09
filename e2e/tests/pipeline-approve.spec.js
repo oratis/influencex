@@ -12,16 +12,16 @@
  *     → enqueues email.send on the in-process queue
  *   the email.send worker (server/email-jobs.js) finds no mail provider
  *   (RESEND_API_KEY / SMTP_* / Gmail OAuth all blank, no mailbox_accounts row)
- *   and takes its documented dev fallback at email-jobs.js:154-160:
+ *   and takes its dev fallback: it skips the provider call and nothing else.
  *     → contacts.status: 'pending' → 'sent', sent_at set, send_attempts = 1
- *     → returns { dryRun: true } *before* the provider-success block, so
- *       pipeline_jobs.stage stays 'send' (never reaches 'monitor'),
- *       email_sent_at / smtp_message_id stay NULL, and no email_replies or
- *       email_events rows are written.
+ *     → pipeline_jobs.stage: 'send' → 'monitor', email_sent_at set
+ *     → an outbound email_replies row and a 'sent' email_event (labelled
+ *       dryRun) are written; provider ids stay NULL because nothing was sent.
  *
- * That last point is a real quirk of the no-provider path, so it is asserted
- * explicitly rather than papered over — if the dry-run branch ever learns to
- * sync the pipeline row, this spec fails loudly and should be updated.
+ * This spec previously asserted the opposite and said it should be updated if
+ * the dry-run branch ever learned to sync the pipeline row. It has: the early
+ * return used to strand every approved job at 'send' on any provider-less
+ * deployment — which is what CI is, and what a fresh self-host is.
  */
 
 const { test, expect } = require('@playwright/test');
@@ -107,14 +107,14 @@ test('approving a review-stage job moves it out of review and marks the contact 
   expect(job.email_approved).toBe(1);
   expect(job.email_to).toBe(fixture.emailTo);
   expect(job.error).toBeNull();
-  // Canary for the dry-run early-return described in the file header: with no
-  // mail provider the worker never reaches the pipeline_jobs sync, so the job
-  // stops at 'send' instead of advancing to 'monitor'.
-  expect(job.stage).toBe('send');
-  expect(job.email_sent_at).toBeNull();
+  // The no-provider path runs the same bookkeeping as a real send, minus the
+  // send: the job advances out of 'send', and the thread row and event exist
+  // so the UI isn't blank. Provider ids stay NULL because nothing was sent.
+  expect(job.stage).toBe('monitor');
+  expect(job.email_sent_at).toBeTruthy();
   expect(job.smtp_message_id).toBeNull();
-  expect(countRows('email_replies', 'contact_id = ?', [fixture.contactId])).toBe(0);
-  expect(countRows('email_events', 'contact_id = ?', [fixture.contactId])).toBe(0);
+  expect(countRows('email_replies', 'contact_id = ?', [fixture.contactId])).toBe(1);
+  expect(countRows('email_events', 'contact_id = ?', [fixture.contactId])).toBe(1);
 });
 
 test('approve is stage-gated: the action disappears and a second approve is rejected', async ({ page }) => {
@@ -137,5 +137,8 @@ test('approve is stage-gated: the action disappears and a second approve is reje
 
   const second = await approveOnce();
   expect(second.status()).toBe(400);
-  expect((await second.json()).error).toBe('Job is in stage "send", not "review"');
+  // Match the gate, not the stage the job happens to have moved on to — the
+  // worker races this assertion ('send' while queued, 'monitor' once the
+  // handler finishes), and which side wins is timing, not behavior.
+  expect((await second.json()).error).toMatch(/^Job is in stage "(send|monitor)", not "review"$/);
 });

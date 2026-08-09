@@ -336,10 +336,13 @@ test('approve → send: contact reaches sent and the pipeline job advances to mo
   assert.equal(queue.getStats().failed, 0);
 });
 
-test('no mail provider configured: the dry-run branch marks the contact sent but leaves the job at send', async () => {
-  // Pins the behavior the Playwright suite observes in CI, where no
-  // RESEND_API_KEY exists: email-jobs.js:154-160 returns { dryRun: true }
-  // *before* the pipeline_jobs sync, so the job never reaches 'monitor'.
+test('no mail provider configured: dry-run completes the whole flow without calling out', async () => {
+  // This test used to pin the opposite: the dry-run branch returned early,
+  // *before* the pipeline_jobs sync, so a provider-less deployment (which is
+  // what CI is, and what a fresh self-host is) left every approved job
+  // stranded at stage='send' — the contact said "sent" while the Pipeline
+  // page showed it stuck mid-flight forever. The branch now skips only the
+  // provider call; all bookkeeping below it runs.
   const f = await driveToReview('dryrun');
   const mailAgent = makeMailAgent({ configured: false });
   const queue = makeQueue(mailAgent);
@@ -350,16 +353,29 @@ test('no mail provider configured: the dry-run branch marks the contact sent but
   const contact = await getContact(contactId);
   assert.equal(contact.status, 'sent');
   assert.ok(contact.sent_at);
-  assert.equal(contact.provider_message_id, null);
+  assert.equal(contact.provider_message_id, null, 'nothing was sent, so there is no provider id');
 
   const job = await getJob(f.pipelineJobId);
-  assert.equal(job.stage, 'send');
-  assert.equal(job.email_sent_at, null);
+  assert.equal(job.stage, 'monitor', 'the job must not be stranded at send');
+  assert.ok(job.email_sent_at, 'pipeline row records when the flow completed');
   assert.equal(job.smtp_message_id, null);
 
   assert.equal(mailAgent.sent.length, 0, 'no provider call may happen in dry-run mode');
-  const events = await query('SELECT event_type FROM email_events WHERE contact_id = ?', [contactId]);
-  assert.equal(events.rows.length, 0);
+
+  // The thread row and the event exist so the UI isn't blank, and the event
+  // is labelled so nobody mistakes a dry run for a real delivery.
+  const thread = await query(
+    "SELECT direction, to_email FROM email_replies WHERE contact_id = ?", [contactId]
+  );
+  assert.equal(thread.rows.length, 1);
+  assert.equal(thread.rows[0].direction, 'outbound');
+
+  const events = await query(
+    'SELECT event_type, payload FROM email_events WHERE contact_id = ?', [contactId]
+  );
+  assert.equal(events.rows.length, 1);
+  assert.equal(events.rows[0].event_type, 'sent');
+  assert.equal(JSON.parse(events.rows[0].payload || '{}').dryRun, true);
 });
 
 test('terminal provider failure: contact fails and the pipeline job bounces back to review', async () => {
