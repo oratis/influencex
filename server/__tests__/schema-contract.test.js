@@ -14,15 +14,39 @@
  * workspace-scoped read).
  */
 
-const { test, before } = require('node:test');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { v4: uuidv4 } = require('uuid');
+
+// This is the only test that writes rows to a file-backed database. Point it
+// at a throwaway file (server/database.js reads SQLITE_DB_PATH at require
+// time, defaulting to the repo-root influencex.db) so `npm test` never
+// mutates the developer's working database and the parallel test runner has
+// nothing to contend over. The schema is still the *real* one: it comes from
+// initializeDatabase() + the real migration list, just on a fresh file.
+const TMP_DB = path.join(
+  os.tmpdir(),
+  `influencex-schema-contract-${process.pid}-${crypto.randomBytes(4).toString('hex')}.db`
+);
+process.env.SQLITE_DB_PATH = TMP_DB;
+process.env.DATABASE_URL = '';
+
 const { query, queryOne, exec, initializeDatabase } = require('../database');
 const { runPendingMigrations } = require('../migrations');
 
 before(async () => {
   await initializeDatabase();
   await runPendingMigrations({ query, queryOne, exec });
+});
+
+after(() => {
+  for (const suffix of ['', '-wal', '-shm']) {
+    fs.rmSync(TMP_DB + suffix, { force: true });
+  }
 });
 
 test('approve-endpoint contact UPDATE uses only real contacts columns', async () => {

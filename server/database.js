@@ -53,8 +53,19 @@ if (usePostgres) {
   });
 } else {
   const Database = require('better-sqlite3');
-  db = new Database(path.join(__dirname, '..', 'influencex.db'));
+  // SQLITE_DB_PATH lets a harness (e2e runner, integration tests) point the
+  // process at a throwaway file instead of the developer's working database.
+  // Unset — the overwhelmingly common case — it resolves to the historical
+  // repo-root path, so nothing changes for local dev, Docker, or prod.
+  db = new Database(process.env.SQLITE_DB_PATH || path.join(__dirname, '..', 'influencex.db'));
   db.pragma('journal_mode = WAL');
+  // WAL keeps readers from blocking writers, but two *writers* (the parallel
+  // `node --test` workers all opening the same file) still collide. Without a
+  // busy timeout better-sqlite3 throws SQLITE_BUSY immediately instead of
+  // waiting for the lock — the intermittent first-run test failures in
+  // docs/E2E_REVIEW_2026-08.md (DX-3). 5s is far longer than any statement
+  // we run and costs nothing when there is no contention.
+  db.pragma(`busy_timeout = ${parseInt(process.env.SQLITE_BUSY_TIMEOUT_MS, 10) || 5000}`);
 }
 
 // ==================== Schema ====================

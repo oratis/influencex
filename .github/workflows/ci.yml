@@ -37,6 +37,29 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+  client-test:
+    name: Client unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: client
+        # Mirrors the Dockerfile; see client/.npmrc for why.
+        run: npm ci --legacy-peer-deps
+
+      - name: Run Vitest component tests
+        working-directory: client
+        # Vitest auto-detects client/vitest.config.js (jsdom + setup file).
+        run: npx vitest run
+
   build:
     name: Build client
     runs-on: ubuntu-latest
@@ -64,6 +87,54 @@ jobs:
         with:
           name: client-dist
           path: client/dist
+          retention-days: 7
+
+  e2e:
+    name: Playwright smoke
+    runs-on: ubuntu-latest
+    # A red e2e job is a red build — this suite covers login, the invite-only
+    # signup loop and pipeline approve, i.e. the three flows that must never
+    # silently break. No continue-on-error on purpose.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install server dependencies
+        # Same ERESOLVE workaround as the unit-test job.
+        run: npm ci --legacy-peer-deps
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci --legacy-peer-deps
+
+      - name: Build client
+        # The Express server serves client/dist; the Playwright config
+        # deliberately builds nothing itself.
+        working-directory: client
+        run: npx vite build
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright smoke suite
+        # The config boots `node server/index.js` against a throwaway SQLite
+        # file in the runner's tmpdir (SQLITE_DB_PATH) and seeds it with
+        # server/seed-demo.js — no external services are contacted.
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
           retention-days: 7
 
   lint:

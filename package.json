@@ -10,6 +10,8 @@
     "dev:client": "cd client && npx vite",
     "test": "node --test server/__tests__/*.test.js",
     "test:watch": "node --test --watch server/__tests__/*.test.js",
+    "test:e2e": "playwright test --config e2e/playwright.config.js",
+    "test:e2e:ui": "playwright test --config e2e/playwright.config.js --ui",
     "seed": "node server/seed-demo.js",
     "rotate-mailbox-key": "node server/scripts/rotate-mailbox-key.js"
   },
@@ -54,5 +56,8 @@
     "stripe": "^22.0.2",
     "undici": "^8.0.0",
     "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
   }
 }
