@@ -13,6 +13,7 @@ import CampaignList from './pages/CampaignList';
 import CampaignDetail from './pages/CampaignDetail';
 import ContactModule from './pages/ContactModule';
 import KolDatabase from './pages/KolDatabase';
+import MarketplacePage from './pages/MarketplacePage';
 import PipelinePage from './pages/PipelinePage';
 import UsersPage from './pages/UsersPage';
 import AgentsPage from './pages/AgentsPage';
@@ -66,6 +67,7 @@ function useNavItems(user) {
     { path: '/roi', label: t('nav.roi'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg> },
     { path: '/contacts', label: t('nav.contacts'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg> },
     { path: '/kol-database', label: t('nav.kol_database'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> },
+    { path: '/marketplace', label: t('nav.marketplace'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l1.5-5h15L21 9"/><path d="M3 9h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9z"/><path d="M9 13h6"/></svg> },
     { path: '/discovery', label: t('nav.discovery'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> },
     { path: '/reviews', label: t('nav.reviews'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg> },
     { path: '/users', label: t('nav.users'), icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="8" r="4"/><path d="M20 21v-2a7 7 0 0 0-14 0v2"/></svg> },
@@ -313,6 +315,7 @@ function AppContent() {
               <Route path="/roi" element={<Suspense fallback={<PageFallback />}><RoiDashboard /></Suspense>} />
               <Route path="/contacts" element={<ContactModule />} />
               <Route path="/kol-database" element={<KolDatabase />} />
+              <Route path="/marketplace" element={<MarketplacePage />} />
               <Route path="/discovery" element={<DiscoveryPage />} />
               <Route path="/reviews" element={<ReviewsPage />} />
               <Route path="/changelog" element={<ChangelogPage />} />

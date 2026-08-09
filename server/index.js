@@ -69,6 +69,7 @@ const { rateLimit, consume: consumeRateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
 const usageLedger = require('./usage-ledger');
+const marketplace = require('./marketplace');
 const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
 const agentRuntime = require('./agent-runtime');
 const conductor = require('./agent-runtime/conductor');
@@ -5215,6 +5216,169 @@ app.post(`${BASE_PATH}/api/kol-database/import-campaign/:campaignId`, rbac.requi
       imported++;
     }
     res.json({ imported, skipped, total: campaignKols.length });
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
+});
+
+// ==================== Creator Marketplace (roadmap D2) ====================
+//
+// !! THIS IS THE ONE CROSS-WORKSPACE TABLE IN THE SCHEMA. READ THIS BEFORE
+// !! TOUCHING ANY /api/marketplace ROUTE.
+//
+// `creators_public` is deliberately NOT workspace-scoped, and the reads below
+// deliberately use the bare `query()` rather than `scoped()`. A marketplace
+// only one tenant can see is not a marketplace: the point of the catalog is
+// that workspace A's discovery work is browsable by workspace B.
+//
+// The isolation guarantee is therefore moved from "who can see the row" to
+// "what is in the row". `creators_public` holds public-profile fields only —
+// handle, display name, avatar, follower count, engagement, category, profile
+// URL — all of which the creator's own public page already shows to anyone.
+// Emails, contact notes, outreach drafts, AI fit scores, campaign linkage and
+// the contributing workspace's identity never enter it. server/marketplace.js
+// owns both allowlists (`CATALOG_FIELDS_FROM_KOL` on the way in,
+// `toPublicCreator()` on the way out); this file only wires them up.
+//
+// The two workspace-scoped halves of the feature — reading a workspace's own
+// scraped KOLs to contribute, and writing a `kols` row on add-to-campaign —
+// go through `scoped()` exactly like every other handler.
+
+// Browse / search the shared catalog. Read-only, so viewers get it.
+app.get(`${BASE_PATH}/api/marketplace/creators`, rbac.requirePermission('kol.read'), async (req, res) => {
+  try {
+    const { sql, params, countSql, countParams, limit, offset } = marketplace.buildListQuery(req.query);
+    // Bare query(), not scoped(): see the section comment above. The
+    // projection in buildListQuery names its columns; there is no SELECT *.
+    const [page, countRow, categories, sampleRow] = await Promise.all([
+      query(sql, params),
+      queryOne(countSql, countParams),
+      query(marketplace.CATEGORIES_SQL, []),
+      queryOne('SELECT 1 as present FROM creators_public WHERE is_sample = 1 LIMIT 1', []),
+    ]);
+
+    res.json({
+      // Every row goes through the allowlist mapper — a column added by a
+      // future migration cannot ride along into the response.
+      items: (page.rows || []).map(marketplace.toPublicCreator),
+      total: parseInt(countRow?.count, 10) || 0,
+      limit,
+      offset,
+      categories: (categories.rows || []).map(r => r.category).filter(Boolean),
+      // Drives the "this catalog contains sample data" banner in the UI.
+      has_sample: !!sampleRow,
+    });
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
+});
+
+// Copy a catalog listing into one of the caller's own campaigns.
+// Workspace-scoped WRITE: the campaign must belong to the caller's workspace
+// and the new kols row carries workspace_id (P0-3, docs/E2E_REVIEW_2026-08.md).
+app.post(`${BASE_PATH}/api/marketplace/creators/:id/add-to-campaign`, rbac.requirePermission('kol.create'), async (req, res) => {
+  try {
+    const campaignId = req.body?.campaign_id;
+    if (!campaignId) return res.status(400).json({ error: 'campaign_id is required' });
+
+    const creatorRow = await queryOne(
+      'SELECT id, platform, username, display_name, avatar_url, profile_url, followers, ' +
+      'engagement_rate, category, source, contributed_at, is_sample FROM creators_public WHERE id = ?',
+      [req.params.id]
+    );
+    if (!creatorRow) return res.status(404).json({ error: 'Creator not found in the marketplace' });
+    // Mapped, not spread — the row never reaches the INSERT with extra fields.
+    const creator = marketplace.toPublicCreator(creatorRow);
+
+    // Sample rows are demo scaffolding, not people. The marketplace page
+    // labels them; a `kols` row has nowhere to carry that label, so copying
+    // one out would strand invented data in a campaign list that presents
+    // every row as a real, bookable creator. Refuse at the boundary.
+    if (creator.is_sample) {
+      return res.status(400).json({
+        error: 'Sample creators are demo data and cannot be added to a campaign',
+        code: 'SAMPLE_NOT_ADDABLE',
+      });
+    }
+
+    const s = scoped(req.workspace.id);
+    const campaign = await s.queryOne(
+      'SELECT id FROM campaigns WHERE id = ? AND workspace_id = ?',
+      [campaignId, req.workspace.id]
+    );
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    const existing = await s.queryOne(
+      'SELECT id FROM kols WHERE workspace_id = ? AND campaign_id = ? AND platform = ? AND username = ?',
+      [req.workspace.id, campaignId, creator.platform, creator.username]
+    );
+    if (existing) {
+      return res.status(409).json({
+        error: 'This creator is already in the campaign',
+        code: 'ALREADY_IN_CAMPAIGN',
+        id: existing.id,
+      });
+    }
+
+    const kolId = uuidv4();
+    await s.exec(
+      marketplace.ADD_TO_CAMPAIGN_SQL,
+      marketplace.addToCampaignParams(creator, {
+        workspaceId: req.workspace.id,
+        campaignId,
+        kolId,
+      })
+    );
+    res.json({ id: kolId, campaign_id: campaignId, platform: creator.platform, username: creator.username, status: 'pending' });
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
+});
+
+// Promote this workspace's own scraped KOLs into the shared catalog.
+//
+// Platform-admin, not rbac.requirePermission('...'): this writes into a table
+// every other tenant reads, and any user can create a workspace in which they
+// are admin — so a workspace-role check here would be self-granting (the same
+// reasoning as POST /api/data/seed-demo; see server/__tests__/rbac-routes.test.js).
+//
+// Only public profile fields are read out of kol_database (the column list
+// lives in marketplace.CATALOG_FIELDS_FROM_KOL) and only rows whose scrape
+// completed are eligible. A listing another workspace contributed is never
+// overwritten — the refresh statement is scoped to this workspace's own rows.
+app.post(`${BASE_PATH}/api/marketplace/contribute`, requirePlatformAdmin, async (req, res) => {
+  try {
+    const wsId = req.workspace.id;
+    const s = scoped(wsId);
+    const source = marketplace.buildContributeSourceQuery(wsId, { limit: req.body?.limit });
+    const scraped = await s.query(source.sql, source.params);
+    const rows = scraped.rows || [];
+
+    let contributed = 0, refreshed = 0, skipped = 0;
+    for (const kol of rows) {
+      const row = marketplace.toCatalogRow(kol, wsId);
+      if (!row) { skipped++; continue; }
+
+      // Refresh first: the UPDATE only matches a non-sample listing this same
+      // workspace contributed, so a hit means "ours, update it".
+      const r = await exec(marketplace.CATALOG_REFRESH_SQL, marketplace.catalogRefreshParams(row));
+      if (r.rowCount > 0) { refreshed++; continue; }
+
+      try {
+        await exec(marketplace.CATALOG_INSERT_SQL, marketplace.catalogInsertParams(row));
+        contributed++;
+      } catch (insertErr) {
+        // The (platform, username) slot is taken by another workspace's
+        // listing or by a sample row. Leave it alone — one tenant must never
+        // rewrite another's (audit S-1). Also covers the race where two
+        // admins contribute the same creator concurrently.
+        if (!/unique|constraint|duplicate/i.test(insertErr.message)) throw insertErr;
+        skipped++;
+      }
+    }
+
+    log.info(`[marketplace] workspace ${wsId} contributed ${contributed}, refreshed ${refreshed}, skipped ${skipped} of ${rows.length} scraped KOLs`);
+    res.json({ contributed, refreshed, skipped, total: rows.length });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
   }

@@ -178,6 +178,19 @@ export const api = {
   retryKolDatabaseAll: () => request('/kol-database/retry-all', { method: 'POST' }),
   importCampaignKols: (campaignId) => request(`/kol-database/import-campaign/${campaignId}`, { method: 'POST' }),
 
+  // Creator Marketplace (roadmap D2) — shared, cross-workspace catalog of
+  // public creator profiles. Contains no email / contact data by design.
+  getMarketplaceCreators: (params = {}) => {
+    const clean = Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v !== '' && v !== null && v !== undefined)
+    );
+    const q = new URLSearchParams(clean).toString();
+    return request(`/marketplace/creators${q ? '?' + q : ''}`);
+  },
+  addMarketplaceCreatorToCampaign: (id, campaignId) =>
+    request(`/marketplace/creators/${id}/add-to-campaign`, { method: 'POST', body: { campaign_id: campaignId } }),
+  contributeToMarketplace: () => request('/marketplace/contribute', { method: 'POST', body: {} }),
+
   // Pipeline (Task 1)
   startPipeline: (data) => request('/pipeline/start', { method: 'POST', body: data }),
   getPipelineJobs: () => request('/pipeline/jobs'),
