@@ -72,6 +72,7 @@ const usageLedger = require('./usage-ledger');
 const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
 const agentRuntime = require('./agent-runtime');
 const conductor = require('./agent-runtime/conductor');
+const conductorStream = require('./conductor-stream');
 const agentsV2 = require('./agents-v2');
 const llm = require('./llm');
 const { createQueue } = require('./job-queue');
@@ -1094,6 +1095,7 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   if (req.path.startsWith('/webhooks/')) return next();
   // SSE streams authenticate via query-string (EventSource can't set headers)
   if (/^\/agents\/runs\/[^/]+\/stream$/.test(req.path)) return next();
+  if (/^\/conductor\/plans\/[^/]+\/stream$/.test(req.path)) return next();
   // OAuth callbacks — the provider redirects here without auth; the state
   // table acts as the authenticity check.
   if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
@@ -1124,9 +1126,10 @@ app.use(`${BASE_PATH}/api`, (req, res, next) => {
   // The /init endpoint, in contrast, IS authenticated and requires workspace context.
   if (/^\/publish\/oauth\/[^/]+\/callback$/.test(req.path)) return next();
   // SSE streams authenticate via query-string token; the handler resolves the
-  // workspace from the run row itself and checks membership — never from
-  // caller-supplied context.
+  // workspace from the run / plan row itself and checks membership — never
+  // from caller-supplied context.
   if (/^\/agents\/runs\/[^/]+\/stream$/.test(req.path)) return next();
+  if (/^\/conductor\/plans\/[^/]+\/stream$/.test(req.path)) return next();
   if (WORKSPACE_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
     return next();
   }
@@ -3773,6 +3776,65 @@ app.post(`${BASE_PATH}/api/translate`, rbac.requirePermission('agent.run'), asyn
   }
 });
 
+// Conductor — build a plan from a goal, streaming progress (roadmap B3).
+//
+// Returns { planId } immediately and does the LLM call in the background,
+// reporting coarse phases on the plan's SSE channel. The blocking
+// POST /api/conductor/plan below is kept as the fallback for clients without
+// EventSource (and for scripted callers that want the plan in one response).
+app.post(`${BASE_PATH}/api/conductor/plan/start`, rbac.requirePermission('agent.run'), async (req, res) => {
+  try {
+    const { goal } = req.body;
+    if (!goal) return res.status(400).json({ error: 'goal is required' });
+    if (!llm.isConfigured()) return res.status(400).json({ error: 'LLM provider not configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)' });
+
+    const planId = uuidv4();
+    const workspaceId = req.workspace.id;
+    const userId = req.user.id;
+
+    // The row exists before the plan does: it is what the SSE endpoint
+    // authorizes against (workspace membership) and what a reconnecting
+    // client replays from.
+    await exec(
+      'INSERT INTO conductor_plans (id, workspace_id, goal, plan, status, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+      [planId, workspaceId, goal, JSON.stringify({ steps: [] }), 'building', userId]
+    );
+
+    // Open the channel before responding so a client that connects the
+    // instant it has the planId finds a live stream (and its backfill).
+    conductorStream.openPlanStream(planId);
+    res.json({ planId, status: 'building' });
+
+    (async () => {
+      try {
+        const { plan, cost } = await conductor.buildPlan({
+          goal, workspaceId, userId,
+          onPhase: (phase, data) => conductorStream.emitPlanEvent(planId, 'build_phase', { phase, ...data }),
+        });
+        const estimate = conductor.estimatePlanCost(plan);
+        await exec(
+          "UPDATE conductor_plans SET plan=?, status='pending_approval' WHERE id=?",
+          [JSON.stringify(plan), planId]
+        );
+        conductorStream.emitPlanEvent(planId, 'build_phase', { phase: 'saved' });
+        conductorStream.emitPlanEvent(planId, 'plan_built', { planId, plan, cost, estimate });
+      } catch (e) {
+        const message = safeError(e);
+        log.error('[conductor plan/start]', message);
+        await exec(
+          "UPDATE conductor_plans SET status='error', plan=? WHERE id=?",
+          [JSON.stringify({ steps: [], error: message }), planId]
+        ).catch(() => {});
+        conductorStream.emitPlanEvent(planId, 'plan_error', { message });
+      } finally {
+        conductorStream.closePlanStream(planId);
+      }
+    })();
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
+});
+
 // Conductor — build a plan from a goal
 app.post(`${BASE_PATH}/api/conductor/plan`, rbac.requirePermission('agent.run'), async (req, res) => {
   try {
@@ -3826,6 +3888,13 @@ app.get(`${BASE_PATH}/api/conductor/plans`, rbac.requirePermission('data.read'),
   }
 });
 
+// Conductor — SSE stream of plan build + execution progress (roadmap B3).
+// Auth mirrors the agent-run stream: query-string token (EventSource can't set
+// headers) + membership of the plan's OWN workspace. Never trusts a
+// caller-supplied workspace. Registered before the generic /plans/:id route
+// for readability; Express matches on segment count so order is not load-bearing.
+app.get(`${BASE_PATH}/api/conductor/plans/:id/stream`, conductorStream.createPlanStreamHandler({ getSession, findMembership, queryOne, log }));
+
 // Conductor — get a single plan with step status
 app.get(`${BASE_PATH}/api/conductor/plans/:id`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
@@ -3836,6 +3905,9 @@ app.get(`${BASE_PATH}/api/conductor/plans/:id`, rbac.requirePermission('data.rea
     );
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
     plan.plan = JSON.parse(plan.plan || '{}');
+    // Cost estimate travels with the row so the polling fallback renders the
+    // same header as the streamed plan_built payload.
+    plan.estimate = conductor.estimatePlanCost(plan.plan);
     res.json(plan);
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -3863,9 +3935,15 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
       [req.params.id, req.workspace.id]
     );
 
+    // Open the SSE channel before responding, so a client that connects the
+    // moment this POST resolves finds a live stream (roadmap B3). Clients
+    // without EventSource keep polling /plans/:id.
+    const planId = req.params.id;
+    conductorStream.openPlanStream(planId);
+
     // Kick off steps in sequence. Respond right away with the planId;
-    // client polls /plans/:id for step progress.
-    res.json({ success: true, planId: req.params.id, steps: planObj.steps.length });
+    // the client streams /plans/:id/stream (or polls /plans/:id).
+    res.json({ success: true, planId, steps: planObj.steps.length });
 
     // Run in background. Strategy:
     //   - Build a dependency graph from step.dependsOn.
@@ -3885,6 +3963,9 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
         const agent = agentRuntime.getAgent(step.agent);
         if (!agent) {
           const r = { id: step.id, agent: step.agent, status: 'skipped', error: 'Agent not found', stage: step.stage };
+          conductorStream.emitPlanEvent(planId, 'step_skipped', {
+            stepId: step.id, agent: step.agent, stage: step.stage || null, reason: 'Agent not found',
+          });
           resultById[step.id] = r; return r;
         }
         const { runId, stream } = agentRuntime.createRun(step.agent, step.input, {
@@ -3893,6 +3974,10 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
           db: { query, queryOne, exec },
           uuidv4,
         });
+        // Translate this run's private events onto the plan channel. Attached
+        // synchronously (createRun defers the first emit by one tick) and
+        // separate from the persistence listener below.
+        conductorStream.bridgeStepEvents(planId, step, runId, stream);
         return await new Promise((resolve) => {
           let finalOutput = null;
           let finalError = null;
@@ -3939,6 +4024,11 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
 
       try {
         let guard = 0;
+        let wave = 0;
+        conductorStream.emitPlanEvent(planId, 'plan_started', {
+          planId, totalSteps: steps.length,
+          steps: steps.map(s => ({ stepId: s.id, agent: s.agent, stage: s.stage || null })),
+        });
         while (done.size + errored.size < steps.length && guard++ < 50) {
           // Find ready steps: all deps done + not errored upstream.
           const ready = steps.filter(s => {
@@ -3947,6 +4037,9 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
             if (deps.some(d => errored.has(d))) {
               errored.add(s.id);
               stepResults.push({ id: s.id, agent: s.agent, status: 'skipped', error: 'upstream failed', stage: s.stage });
+              conductorStream.emitPlanEvent(planId, 'step_skipped', {
+                stepId: s.id, agent: s.agent, stage: s.stage || null, reason: 'upstream failed',
+              });
               return false;
             }
             return deps.every(d => done.has(d));
@@ -3956,12 +4049,19 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
             for (const s of steps) {
               if (!done.has(s.id) && !errored.has(s.id)) {
                 stepResults.push({ id: s.id, agent: s.agent, status: 'skipped', error: 'unreachable', stage: s.stage });
+                conductorStream.emitPlanEvent(planId, 'step_skipped', {
+                  stepId: s.id, agent: s.agent, stage: s.stage || null, reason: 'unreachable',
+                });
                 errored.add(s.id);
               }
             }
             break;
           }
           // Run this wave in parallel.
+          wave += 1;
+          conductorStream.emitPlanEvent(planId, 'wave_started', {
+            wave, stepIds: ready.map(s => s.id), agents: ready.map(s => s.agent),
+          });
           const waveResults = await Promise.all(ready.map(runStep));
           for (const r of waveResults) {
             stepResults.push(r);
@@ -3975,14 +4075,29 @@ app.post(`${BASE_PATH}/api/conductor/plans/:id/run`, rbac.requirePermission('age
         const updatedPlan = { ...planObj, stepResults };
         await exec(
           `UPDATE conductor_plans SET status=?, plan=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
-          [allOk ? 'complete' : 'error', JSON.stringify(updatedPlan), req.params.id]
+          [allOk ? 'complete' : 'error', JSON.stringify(updatedPlan), planId]
         );
+        // DB first, then the terminal event: a client that reconnects right
+        // after plan_complete replays the same state it just watched.
+        conductorStream.emitPlanEvent(planId, 'plan_complete', {
+          status: allOk ? 'complete' : 'error',
+          completed: stepResults.filter(r => r.status === 'complete').length,
+          failed: stepResults.filter(r => r.status === 'error').length,
+          skipped: stepResults.filter(r => r.status === 'skipped').length,
+          firstError: (stepResults.find(r => r.status === 'error' || r.status === 'skipped') || {}).error || null,
+        });
       } catch (e) {
-        console.error('[conductor run]', e);
+        const message = safeError(e);
+        log.error('[conductor run]', message);
         await exec(
           `UPDATE conductor_plans SET status='error' WHERE id=?`,
-          [req.params.id]
+          [planId]
         ).catch(() => {});
+        conductorStream.emitPlanEvent(planId, 'plan_complete', {
+          status: 'error', completed: 0, failed: 0, skipped: 0, firstError: message,
+        });
+      } finally {
+        conductorStream.closePlanStream(planId);
       }
     })();
   } catch (e) {

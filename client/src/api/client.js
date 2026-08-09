@@ -283,6 +283,13 @@ export const api = {
   getAgentRun: (id) => request(`/agents/runs/${id}`),
   getAgentCostSummary: () => request('/agents/cost'),
   // SSE stream for a running agent — returns EventSource (caller manages lifecycle)
+  //
+  // KNOWN FOLLOW-UP (review P2): EventSource cannot set an Authorization
+  // header, so the bearer token rides in the query string, where it can land
+  // in access logs and browser history. The fix is a short-lived single-use
+  // stream ticket endpoint, which is its own PR (server-side ticket store +
+  // TTL + revocation, applied to both stream endpoints). Until then both SSE
+  // endpoints below follow the same existing pattern rather than half-solving it.
   streamAgentRun: (runId) => {
     const token = getToken();
     const wsId = window.__influencex_workspace_id;
@@ -292,9 +299,19 @@ export const api = {
 
   // Conductor
   conductorPlan: (goal, opts = {}) => request('/conductor/plan', { method: 'POST', body: { goal }, ...opts }),
+  // Streaming variant: returns { planId } right away; progress arrives on the
+  // plan's SSE channel. Falls back to conductorPlan when EventSource is absent.
+  conductorPlanStart: (goal, opts = {}) => request('/conductor/plan/start', { method: 'POST', body: { goal }, ...opts }),
   listConductorPlans: () => request('/conductor/plans'),
   getConductorPlan: (id) => request(`/conductor/plans/${id}`),
   conductorRun: (planId) => request(`/conductor/plans/${planId}/run`, { method: 'POST' }),
+  // SSE stream of a plan's build + execution progress. The server resolves the
+  // workspace from the plan row, so no workspace param is sent (or trusted).
+  streamConductorPlan: (planId) => {
+    const token = getToken();
+    const url = `${BASE}/conductor/plans/${encodeURIComponent(planId)}/stream?token=${encodeURIComponent(token || '')}`;
+    return new EventSource(url);
+  },
 
   // Content pieces (saved agent outputs)
   listContentPieces: (params = {}) => {

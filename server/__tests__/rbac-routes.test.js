@@ -191,6 +191,8 @@ const UNGATED_ALLOWLIST = new Set([
   'GET /api/publish/oauth/:provider/callback', 'GET /api/mailboxes/oauth/gmail/callback',
   // SSE stream: query-string token, resolves workspace from the run row itself
   'GET /api/agents/runs/:runId/stream',
+  // SSE stream: same contract, resolved from the conductor_plans row
+  'GET /api/conductor/plans/:id/stream',
   // Platform-level ops counters — outside workspace context, so a permission
   // check here would fall back to the global users.role rather than the
   // workspace role and read as a stricter guarantee than it is.
