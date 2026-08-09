@@ -929,10 +929,12 @@ app.delete(`${BASE_PATH}/api/invite-codes/:id`, authMiddleware, requirePlatformA
 // thousand RPS. 20/min per IP puts a full sweep out of reach while leaving
 // plenty of headroom for someone re-typing a code off a chat message.
 //
-// Its own key prefix (not the bare IP) keeps it out of the shared bucket
-// authLimiter/exportLimiter draw from, so a signup attempt can't burn a
-// login attempt and vice versa.
+// Named like every other limiter so its bucket is explicit rather than
+// positional: the Redis backend shares buckets across replicas, and a
+// positional name only agrees between replicas while limiter construction
+// order is identical. The keyFn prefix is belt-and-braces on top of that.
 const inviteLookupLimiter = rateLimit({
+  name: 'invite-lookup',
   max: 20,
   windowMs: 60 * 1000,
   keyFn: (req) => `invite-lookup:${req.ip || req.headers['x-forwarded-for'] || 'anonymous'}`,
