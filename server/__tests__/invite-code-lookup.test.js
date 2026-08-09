@@ -84,15 +84,12 @@ test('separate IPs get separate budgets', () => {
   assert.equal(run(limiter, '203.0.113.13').passed, true, 'a different client must not inherit the block');
 });
 
-test('the limiter key is namespaced away from the auth limiter bucket', () => {
-  // rate-limit.js keys its bucket map on the key string alone — two limiters
-  // with the default IP keyFn share one sliding window. If the invite lookup
-  // used the bare IP, 20 signup-page lookups would eat the 10/min login
-  // budget for that IP and lock the user out of logging in.
-  const inviteLimiter = rateLimit({
-    max: MAX, windowMs: WINDOW_MS,
-    keyFn: (req) => `invite-lookup-test-b:${req.ip}`,
-  });
+test('exhausting the invite lookup budget does not lock the same IP out of login', () => {
+  // Both limiters use the DEFAULT keyFn here on purpose: rate-limit.js gives
+  // every instance its own namespace, so 20 signup-page lookups must not eat
+  // the 10/min login budget for that IP. (Before that fix they shared one
+  // window and this scenario locked the user out.)
+  const inviteLimiter = rateLimit({ max: MAX, windowMs: WINDOW_MS });
   const authLimiter = rateLimit({ max: 10, windowMs: WINDOW_MS });
   const ip = '203.0.113.20';
   for (let i = 0; i < MAX; i++) run(inviteLimiter, ip);

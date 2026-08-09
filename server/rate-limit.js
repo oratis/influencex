@@ -28,12 +28,25 @@ function prune(key, windowMs) {
  * @param {Function} [opts.keyFn] - Extract key from request (default: IP).
  * @param {string} [opts.message] - Error message when rate-limited.
  */
-function rateLimit({ max, windowMs, keyFn, message } = {}) {
+// Each rateLimit() call gets its own namespace so limiters never share a
+// bucket. Before this, every limiter using the default IP keyFn — auth
+// (10/min), discovery (5/min), export (10/min), sendEmail (20/min) — hashed
+// to the same key, so they drew from one window: five discovery calls
+// consumed half the auth budget, and the tightest max effectively governed
+// all of them. Callers that deliberately want to SHARE a window (batch-send
+// reserving tickets from the per-send limiter) pass an explicit `name`.
+let limiterSeq = 0;
+function namespaced(name, key) {
+  return `${name}|${key}`;
+}
+
+function rateLimit({ max, windowMs, keyFn, message, name } = {}) {
   const getKey = keyFn || ((req) => req.ip || req.headers['x-forwarded-for'] || 'anonymous');
   const errorMsg = message || 'Too many requests, please slow down';
+  const ns = name || `rl${++limiterSeq}`;
 
   return (req, res, next) => {
-    const key = getKey(req);
+    const key = namespaced(ns, getKey(req));
     prune(key, windowMs);
     const list = buckets.get(key) || [];
     if (list.length >= max) {
@@ -62,9 +75,12 @@ function rateLimit({ max, windowMs, keyFn, message } = {}) {
  *
  * Returns { allowed, remaining, retryAfterSec? }.
  */
-function consume({ key, n = 1, max, windowMs }) {
-  prune(key, windowMs);
-  const list = buckets.get(key) || [];
+function consume({ key, n = 1, max, windowMs, name }) {
+  // Must land in the same namespaced bucket as the middleware it shares a
+  // window with, so callers pass the same `name` that limiter was built with.
+  const bucketKey = namespaced(name || 'shared', key);
+  prune(bucketKey, windowMs);
+  const list = buckets.get(bucketKey) || [];
   if (list.length + n > max) {
     const oldestAgeMs = list.length ? Date.now() - list[0] : 0;
     return {
@@ -75,7 +91,7 @@ function consume({ key, n = 1, max, windowMs }) {
   }
   const now = Date.now();
   for (let i = 0; i < n; i++) list.push(now);
-  buckets.set(key, list);
+  buckets.set(bucketKey, list);
   return { allowed: true, remaining: max - list.length };
 }
 

@@ -246,13 +246,13 @@ test('GET /api/invite-codes/lookup/:code carries a rate limiter', () => {
   assert.match(r.raw, /inviteLookupLimiter/, 'lookup route must be rate limited');
 });
 
-test('the invite lookup limiter uses its own bucket key, not the bare IP', () => {
-  // rate-limit.js keys the shared bucket map on the key string alone, so two
-  // limiters using the default keyFn share one window. Signing up must not
-  // consume login attempts.
+test('the invite lookup limiter declares a finite budget', () => {
   const decl = SRC.match(/const inviteLookupLimiter = rateLimit\(\{[\s\S]*?\}\);/);
   assert.ok(decl, 'inviteLookupLimiter declaration not found');
-  assert.match(decl[0], /keyFn:/, 'must supply its own keyFn');
-  assert.match(decl[0], /invite-lookup:/, 'key should be namespaced');
   assert.match(decl[0], /max:\s*\d+/);
+  // Bucket isolation is no longer this limiter's problem: rate-limit.js
+  // namespaces every rateLimit() instance, and rate-limit.test.js proves two
+  // default-keyFn limiters can't drain each other. This used to assert a
+  // hand-rolled `invite-lookup:` key prefix, which tested the workaround
+  // rather than the property.
 });

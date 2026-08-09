@@ -261,15 +261,19 @@ function requirePlatformAdmin(req, res, next) {
 }
 
 // Rate limiters — applied per-endpoint below
-const authLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many auth attempts' });
-const discoveryLimiter = rateLimit({ max: 5, windowMs: 60 * 1000, message: 'Discovery rate limit reached' });
-const exportLimiter = rateLimit({ max: 10, windowMs: 60 * 1000, message: 'Too many exports' });
-const sendEmailLimiter = rateLimit({ max: 20, windowMs: 60 * 1000, message: 'Email send rate limit reached' });
+const authLimiter = rateLimit({ name: 'auth', max: 10, windowMs: 60 * 1000, message: 'Too many auth attempts' });
+const discoveryLimiter = rateLimit({ name: 'discovery', max: 5, windowMs: 60 * 1000, message: 'Discovery rate limit reached' });
+const exportLimiter = rateLimit({ name: 'export', max: 10, windowMs: 60 * 1000, message: 'Too many exports' });
+const sendEmailLimiter = rateLimit({ name: 'send-email', max: 20, windowMs: 60 * 1000, message: 'Email send rate limit reached' });
 // Per-workspace cap on outbound sends. Uses a sliding 1-minute window; batch
 // sends cost 1 "ticket" per contact enqueued. Tunable via env — default
 // EMAIL_SEND_WORKSPACE_RPM=120 (i.e. 2 sends/sec sustained).
 const EMAIL_SEND_WORKSPACE_RPM = parseInt(process.env.EMAIL_SEND_WORKSPACE_RPM) || 120;
+// Shared by the middleware and batch-send's consume() call — both must name
+// the same bucket or the batch reservation lands somewhere nobody checks.
+const SEND_EMAIL_WS_LIMITER = 'send-email-workspace';
 const sendEmailWorkspaceLimiter = rateLimit({
+  name: SEND_EMAIL_WS_LIMITER,
   max: EMAIL_SEND_WORKSPACE_RPM,
   windowMs: 60 * 1000,
   keyFn: (req) => `ws:${req.workspace?.id || 'anon'}`,
@@ -1651,6 +1655,7 @@ app.post(`${BASE_PATH}/api/campaigns/:campaignId/contacts/batch-send`, rbac.requ
     // batch sends can't sidestep the per-workspace RPM cap. All-or-nothing:
     // an over-cap batch is rejected before any row is marked pending.
     const reservation = await consumeRateLimit({
+      name: SEND_EMAIL_WS_LIMITER,
       key: `ws:${req.workspace?.id || 'anon'}`,
       n: eligible.length,
       max: EMAIL_SEND_WORKSPACE_RPM,
@@ -5964,7 +5969,7 @@ app.post(`${BASE_PATH}/api/discovery/batch-email`, rbac.requirePermission('email
 
             // Get channel details in batch
             const statsRes = await fetch(
-              `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,contentDetails&id=${channelIds.join(',')}&key=${YOUTUBE_API_KEY}`
+              `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,contentDetails&id=${channelIds.map(encodeURIComponent).join(',')}&key=${YOUTUBE_API_KEY}`
             );
             const statsData = await statsRes.json();
 
