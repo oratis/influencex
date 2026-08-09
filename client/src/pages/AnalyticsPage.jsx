@@ -1,7 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
 import { api } from '../api/client';
 import { useI18n } from '../i18n';
 import ErrorCard from '../components/ErrorCard';
+
+// recharts is heavy and this page is imported eagerly in App.jsx, so the chart
+// lives behind a lazy boundary (same reason RoiDashboard is lazy).
+const UsageChart = lazy(() => import('../components/UsageChart'));
+
+const MONTH_WINDOWS = [3, 6, 12, 24];
 
 export default function AnalyticsPage() {
   const { t } = useI18n();
@@ -13,7 +19,16 @@ export default function AnalyticsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
+  // Usage ledger (roadmap D5) — its own fetch so the month/agent filters can
+  // reload it without re-fetching the whole dashboard.
+  const [usage, setUsage] = useState(null);
+  const [usageMonths, setUsageMonths] = useState(6);
+  const [usageAgent, setUsageAgent] = useState('');
+  const [usageLoading, setUsageLoading] = useState(true);
+  const [usageError, setUsageError] = useState(null);
+
   useEffect(() => { loadAll(); }, []);
+  useEffect(() => { loadUsage(); }, [usageMonths, usageAgent]);
 
   async function loadAll() {
     try {
@@ -38,11 +53,54 @@ export default function AnalyticsPage() {
     setLoading(false);
   }
 
+  async function loadUsage() {
+    setUsageLoading(true);
+    try {
+      const u = await api.getUsage({ months: usageMonths, agent: usageAgent || undefined });
+      setUsage(u);
+      setUsageError(null);
+    } catch (e) {
+      setUsageError(e);
+    }
+    setUsageLoading(false);
+  }
+
   function money(cents) {
     if (cents == null) return '—';
     if (cents < 100) return `${cents}¢`;
     return `$${(cents / 100).toFixed(2)}`;
   }
+
+  // design.md §12: show "—" rather than 0, so "nothing recorded" doesn't read
+  // as a measured zero.
+  function count(n) {
+    return n ? Number(n).toLocaleString() : '—';
+  }
+
+  // Months newest-first, each with its agent cells. Only months that actually
+  // have runs make the table (the chart keeps every month so its axis stays
+  // continuous).
+  const usageGroups = useMemo(() => {
+    if (!usage) return [];
+    const byMonth = new Map(usage.byMonth.map(m => [m.month, m]));
+    const grouped = new Map();
+    for (const cell of usage.rows) {
+      if (!grouped.has(cell.month)) grouped.set(cell.month, []);
+      grouped.get(cell.month).push(cell);
+    }
+    return [...grouped.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([month, cells]) => ({ month, cells, total: byMonth.get(month) || { runs: 0, input_tokens: 0, output_tokens: 0, usd_cents: 0 } }));
+  }, [usage]);
+
+  // The dropdown has to keep every option after a filter is applied, so it
+  // reads the lifetime agent list rather than the (already filtered) window.
+  const usageAgentOptions = useMemo(() => {
+    const ids = new Set(agents.map(a => a.agent_id).filter(Boolean));
+    for (const a of usage?.byAgent || []) if (a.agent_id) ids.add(a.agent_id);
+    if (usageAgent) ids.add(usageAgent);
+    return [...ids].sort();
+  }, [agents, usage, usageAgent]);
 
   return (
     <div className="page-container fade-in">
@@ -77,6 +135,124 @@ export default function AnalyticsPage() {
           </div>
         </div>
       )}
+
+      {/* ==================== Usage ledger (month × agent) ==================== */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div>
+            <h3 style={{ marginBottom: 4 }}>{t('usage.title')}</h3>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>{t('usage.subtitle')}</p>
+          </div>
+          {/* One filter row above everything it scopes — chart and table read
+              the same slice. */}
+          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label className="form-label" htmlFor="usage-months">{t('usage.filter_window')}</label>
+              <select
+                id="usage-months"
+                className="form-input"
+                value={usageMonths}
+                onChange={e => setUsageMonths(Number(e.target.value))}
+                style={{ minWidth: 130 }}
+              >
+                {MONTH_WINDOWS.map(m => (
+                  <option key={m} value={m}>{t('usage.window_months', { n: m })}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label className="form-label" htmlFor="usage-agent">{t('usage.filter_agent')}</label>
+              <select
+                id="usage-agent"
+                className="form-input"
+                value={usageAgent}
+                onChange={e => setUsageAgent(e.target.value)}
+                style={{ minWidth: 160 }}
+              >
+                <option value="">{t('usage.all_agents')}</option>
+                {usageAgentOptions.map(id => <option key={id} value={id}>{id}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* A refetch that fails must say so rather than silently leaving stale
+            numbers on screen, so the error renders above whatever we already
+            have instead of replacing it. */}
+        {usageError && usage && <ErrorCard error={usageError} onRetry={loadUsage} compact />}
+
+        {usageError && !usage ? <ErrorCard error={usageError} onRetry={loadUsage} /> :
+          usageLoading && !usage ? <div className="empty-state"><p>{t('analytics.loading')}</p></div> :
+          !usage ? null :
+          usage.total.runs === 0 ? (
+            <div className="empty-state">
+              <p>{t('usage.empty')}</p>
+              <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('usage.empty_hint')}</p>
+            </div>
+          ) : (
+            // Hold the previous render at reduced opacity on refetch instead of
+            // flashing a skeleton and jumping the layout.
+            <div style={{ opacity: usageLoading ? 0.55 : 1, transition: 'opacity 0.15s' }}>
+              <Suspense fallback={<div style={{ height: 260 }} />}>
+                <UsageChart report={usage} />
+              </Suspense>
+
+              <div className="table-container" style={{ marginTop: 16 }}>
+                {/* Equal-width digits so the token/cost columns line up down
+                    the rows. */}
+                <table style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  <thead><tr>
+                    <th>{t('usage.col_month')}</th>
+                    <th>{t('usage.col_agent')}</th>
+                    <th>{t('usage.col_calls')}</th>
+                    <th>{t('usage.col_input_tokens')}</th>
+                    <th>{t('usage.col_output_tokens')}</th>
+                    <th>{t('usage.col_cost')}</th>
+                  </tr></thead>
+                  <tbody>
+                    {usageGroups.map(g => (
+                      <React.Fragment key={g.month}>
+                        <tr style={{ background: 'var(--bg-card-hover)' }}>
+                          <td style={{ fontWeight: 600 }}>{g.month}</td>
+                          <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{t('usage.month_subtotal')}</td>
+                          <td style={{ fontWeight: 600 }}>{count(g.total.runs)}</td>
+                          <td style={{ fontWeight: 600 }}>{count(g.total.input_tokens)}</td>
+                          <td style={{ fontWeight: 600 }}>{count(g.total.output_tokens)}</td>
+                          <td style={{ fontWeight: 600 }}>{money(g.total.usd_cents)}</td>
+                        </tr>
+                        {g.cells.map(c => (
+                          <tr key={`${g.month}-${c.agent_id}`}>
+                            <td />
+                            <td><code style={{ fontSize: 12 }}>{c.agent_id}</code></td>
+                            <td>{count(c.runs)}</td>
+                            <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{count(c.input_tokens)}</td>
+                            <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{count(c.output_tokens)}</td>
+                            <td>{money(c.usd_cents)}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    ))}
+                    <tr style={{ borderTop: '2px solid var(--border)' }}>
+                      <td style={{ fontWeight: 700 }}>{t('usage.total')}</td>
+                      <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                        {t('usage.total_agents', { n: usage.byAgent.length })}
+                      </td>
+                      <td style={{ fontWeight: 700 }}>{count(usage.total.runs)}</td>
+                      <td style={{ fontWeight: 700 }}>{count(usage.total.input_tokens)}</td>
+                      <td style={{ fontWeight: 700 }}>{count(usage.total.output_tokens)}</td>
+                      <td style={{ fontWeight: 700 }}>{money(usage.total.usd_cents)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {usage.truncated && (
+                <p style={{ fontSize: 12, color: 'var(--warning)', marginTop: 8 }}>{t('usage.truncated')}</p>
+              )}
+            </div>
+          )
+        }
+      </div>
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 14 }}>{t('analytics.agent_performance')}</h3>

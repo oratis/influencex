@@ -68,6 +68,7 @@ const inboxSync = require('./inbox-sync');
 const { rateLimit, consume: consumeRateLimit } = require('./rate-limit');
 const { registerHealthRoutes } = require('./health');
 const { getCampaignRoi } = require('./roi-dashboard');
+const usageLedger = require('./usage-ledger');
 const { buildOpenApiSpec, swaggerUiHtml } = require('./openapi');
 const agentRuntime = require('./agent-runtime');
 const conductor = require('./agent-runtime/conductor');
@@ -880,6 +881,25 @@ app.post(`${BASE_PATH}/api/admin/inbox-sync/tick`, authMiddleware, requirePlatfo
   try {
     const r = await inboxSync.tick({ exec, query, queryOne, uuidv4 });
     res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
+});
+
+// Admin-only: token/cost usage across every workspace, for capacity and cost
+// planning (roadmap D5). Deliberately requirePlatformAdmin rather than
+// rbac.requirePermission('system.manage'): the latter prefers the *workspace*
+// role, and any user can create a workspace where they are admin, so it would
+// be self-granting for a route that reads across tenant boundaries.
+// Registered here, above the workspace-context middleware, so it doesn't
+// resolve a meaningless "current workspace" it would only ignore.
+app.get(`${BASE_PATH}/api/admin/usage`, authMiddleware, requirePlatformAdmin, async (req, res) => {
+  try {
+    const report = await usageLedger.getPlatformUsage(
+      { months: req.query.months, agentId: req.query.agent || null },
+      { query }
+    );
+    res.json(report);
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
   }
@@ -2548,6 +2568,30 @@ app.get(`${BASE_PATH}/api/agents/cost`, rbac.requirePermission('data.read'), asy
   }
 });
 
+// Usage ledger — persisted token/cost accounting by month × agent for the
+// current workspace (roadmap D5). Distinct from /api/agents/cost above: that
+// one reports lifetime + today and folds in `llm.getStats()`, which is
+// in-memory and resets with the process. This reads agent_runs only, so it
+// survives restarts and can answer "what did this workspace spend in June".
+// data.read — a viewer sees their own workspace's spend, same as every other
+// read on the Analytics page.
+app.get(`${BASE_PATH}/api/usage`, rbac.requirePermission('data.read'), async (req, res) => {
+  try {
+    const s = scoped(req.workspace.id);
+    const report = await usageLedger.getWorkspaceUsage(
+      {
+        workspaceId: req.workspace.id,
+        months: req.query.months,
+        agentId: req.query.agent || null,
+      },
+      { query: s.query }
+    );
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
+});
+
 // List agent runs (fixed path before /:id)
 app.get(`${BASE_PATH}/api/agents/runs`, rbac.requirePermission('data.read'), async (req, res) => {
   try {
@@ -3745,6 +3789,22 @@ app.post(`${BASE_PATH}/api/conductor/plan`, rbac.requirePermission('agent.run'),
       'INSERT INTO conductor_plans (id, workspace_id, goal, plan, status, created_by) VALUES (?, ?, ?, ?, ?, ?)',
       [planId, req.workspace.id, goal, JSON.stringify(plan), 'pending_approval', req.user.id]
     );
+    // Plan-building is a real LLM call and buildPlan hands the usage straight
+    // back, but until now it was echoed to the client and dropped on the floor
+    // — invisible to /api/usage and /api/agents/cost alike. Record it as a
+    // completed run so the ledger accounts for it (roadmap D5). Best-effort:
+    // the plan itself is already saved, so a bookkeeping failure must not turn
+    // a successful request into a 500.
+    try {
+      await scoped(req.workspace.id).exec(
+        `INSERT INTO agent_runs (id, workspace_id, agent_id, user_id, input, status, cost_usd_cents, input_tokens, output_tokens, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [uuidv4(), req.workspace.id, 'conductor', req.user.id, JSON.stringify({ goal }), 'complete',
+          cost?.usdCents || 0, cost?.inputTokens || 0, cost?.outputTokens || 0]
+      );
+    } catch (e) {
+      log.warn('[conductor] failed to record plan-build usage:', e.message);
+    }
     const estimate = conductor.estimatePlanCost(plan);
     res.json({ planId, plan, cost, estimate });
   } catch (e) {
