@@ -57,7 +57,7 @@ const xDiscovery = require('./x-discovery');
 const redditDiscovery = require('./reddit-discovery');
 const apifyQuota = require('./apify-quota');
 const youtubeQuota = require('./youtube-quota');
-const { runPendingMigrations } = require('./migrations');
+const { runPendingMigrations, MULTITENANT_TABLES: ORPHAN_AUDIT_TABLES } = require('./migrations');
 const emailTemplates = require('./email-templates');
 const csvExport = require('./csv-export');
 const rbac = require('./rbac');
@@ -2243,10 +2243,12 @@ app.post(`${BASE_PATH}/api/data/registrations`, async (req, res) => {
   }
 });
 
-// Seed demo data
-app.post(`${BASE_PATH}/api/data/seed-demo`, async (req, res) => {
+// Seed demo data into the caller's workspace. Platform-admin only: it
+// rewrites a fixed-id campaign, so any member could otherwise clobber the
+// row (and, before workspace scoping, other tenants' copy of it).
+app.post(`${BASE_PATH}/api/data/seed-demo`, requirePlatformAdmin, async (req, res) => {
   try {
-    await seedDemoData();
+    await seedDemoData(req.workspace.id);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: safeError(e) });
@@ -3884,6 +3886,30 @@ app.get(`${BASE_PATH}/api/cache/stats`, (req, res) => {
 // Database query stats (slow query log + averages)
 app.get(`${BASE_PATH}/api/query/stats`, authMiddleware, rbac.requirePermission('system.manage'), (req, res) => {
   res.json(getQueryStats());
+});
+
+// Orphan-row audit: rows with NULL workspace_id are invisible to every
+// workspace-scoped read, so they never surface as user-facing bugs — they
+// just silently accumulate (this is how the pipeline's kol_database writes
+// went unnoticed). The NOT NULL migration skips any table that still has
+// them, so this endpoint is how an operator finds what to clean up.
+app.get(`${BASE_PATH}/api/admin/orphan-rows`, authMiddleware, requirePlatformAdmin, async (req, res) => {
+  try {
+    const counts = {};
+    let total = 0;
+    for (const table of ORPHAN_AUDIT_TABLES) {
+      try {
+        const r = await queryOne(`SELECT COUNT(*) AS n FROM ${table} WHERE workspace_id IS NULL`);
+        const n = parseInt((r && r.n) || 0, 10);
+        if (n > 0) { counts[table] = n; total += n; }
+      } catch (e) {
+        if (!/no such table|does not exist/i.test(e.message)) throw e;
+      }
+    }
+    res.json({ total, tables: counts, clean: total === 0 });
+  } catch (e) {
+    res.status(500).json({ error: safeError(e) });
+  }
 });
 
 // Apify integration status
@@ -6162,6 +6188,7 @@ async function ensureUserHasWorkspace(userId, displayName) {
 }
 
 async function initializeDefaultData() {
+  let bootstrapWorkspaceId = null;
   // Create default admin account from env vars (skip if not configured).
   // Promotes the user to role='admin' so they can manage invite codes and
   // perform other platform-admin actions. If the user already exists but
@@ -6190,15 +6217,21 @@ async function initializeDefaultData() {
     // this, the first login lands in "no workspace" limbo and every page
     // breaks with `Workspace context required`.
     if (userId) {
-      await ensureUserHasWorkspace(userId, adminName);
+      bootstrapWorkspaceId = await ensureUserHasWorkspace(userId, adminName);
     }
   }
 
-  // Seed demo campaign if no campaigns exist
+  // Seed the demo campaign if no campaigns exist. Needs a workspace to live
+  // in — without one it would be invisible to every tenant, so skip when
+  // there is no bootstrap admin (e.g. invite-code-only deployments).
   const campaignCount = await queryOne('SELECT COUNT(*) as count FROM campaigns');
   if (parseInt(campaignCount.count) === 0) {
-    await seedDemoData();
-    console.log('Demo data seeded: HakkoAI_Q1_All campaign');
+    if (bootstrapWorkspaceId) {
+      await seedDemoData(bootstrapWorkspaceId);
+      log.info('Demo data seeded: HakkoAI_Q1_All campaign');
+    } else {
+      log.info('Skipping demo seed — no bootstrap admin workspace to own it');
+    }
   }
 }
 
@@ -6206,7 +6239,7 @@ async function initializeDefaultData() {
 (async () => {
   try {
     await initializeDatabase();
-    const migrationResult = await runPendingMigrations({ query, queryOne, exec });
+    const migrationResult = await runPendingMigrations({ query, queryOne, exec, usePostgres });
     if (migrationResult.applied > 0) {
       console.log(`[migrations] Applied ${migrationResult.applied} migration(s), total ${migrationResult.total}`);
     }
@@ -6531,39 +6564,37 @@ async function scrapeAndEnrichKol(id, profileUrl, platform, username, workspaceI
   }
 }
 
-async function seedDemoData() {
+// Seed the demo campaign into a specific workspace. A campaign without a
+// workspace_id is invisible to every tenant (all reads are scoped), so the
+// caller must supply one — boot passes the bootstrap admin's workspace.
+async function seedDemoData(workspaceId) {
+  if (!workspaceId) throw new Error('seedDemoData requires a workspaceId');
   const CAMPAIGN_ID = 'hakko-q1-all';
+  const params = [
+    CAMPAIGN_ID,
+    workspaceId,
+    'HakkoAI_Q1_All',
+    'Hakko AI Q1 2026 全平台达人推广 - Gaming & Tech KOL outreach campaign for hakko.ai product launch',
+    JSON.stringify(['tiktok', 'youtube', 'instagram', 'twitch', 'x']),
+    15,
+    JSON.stringify({ min_followers: 10000, min_engagement: 2, categories: 'Gaming, Tech, Entertainment, AI' }),
+    50000,
+    'active'
+  ];
 
   if (usePostgres) {
     await exec(
-      `INSERT INTO campaigns (id, name, description, platforms, daily_target, filter_criteria, budget, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, platforms=EXCLUDED.platforms, daily_target=EXCLUDED.daily_target, filter_criteria=EXCLUDED.filter_criteria, budget=EXCLUDED.budget, status=EXCLUDED.status`,
-      [
-        CAMPAIGN_ID,
-        'HakkoAI_Q1_All',
-        'Hakko AI Q1 2026 全平台达人推广 - Gaming & Tech KOL outreach campaign for hakko.ai product launch',
-        JSON.stringify(['tiktok', 'youtube', 'instagram', 'twitch', 'x']),
-        15,
-        JSON.stringify({ min_followers: 10000, min_engagement: 2, categories: 'Gaming, Tech, Entertainment, AI' }),
-        50000,
-        'active'
-      ]
+      `INSERT INTO campaigns (id, workspace_id, name, description, platforms, daily_target, filter_criteria, budget, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description, platforms=EXCLUDED.platforms, daily_target=EXCLUDED.daily_target, filter_criteria=EXCLUDED.filter_criteria, budget=EXCLUDED.budget, status=EXCLUDED.status
+      WHERE campaigns.workspace_id = EXCLUDED.workspace_id`,
+      params
     );
   } else {
     await exec(
-      `INSERT OR REPLACE INTO campaigns (id, name, description, platforms, daily_target, filter_criteria, budget, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        CAMPAIGN_ID,
-        'HakkoAI_Q1_All',
-        'Hakko AI Q1 2026 全平台达人推广 - Gaming & Tech KOL outreach campaign for hakko.ai product launch',
-        JSON.stringify(['tiktok', 'youtube', 'instagram', 'twitch', 'x']),
-        15,
-        JSON.stringify({ min_followers: 10000, min_engagement: 2, categories: 'Gaming, Tech, Entertainment, AI' }),
-        50000,
-        'active'
-      ]
+      `INSERT OR REPLACE INTO campaigns (id, workspace_id, name, description, platforms, daily_target, filter_criteria, budget, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      params
     );
   }
 }
