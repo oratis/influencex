@@ -151,6 +151,15 @@ i18next、react-intl 等成熟框架对当前规模（2 语言、~500 keys）过
 
 migration `2026-04-22-brand-voice-embeddings` 已建索引，`brand_voices.embedding` 列可写，`llm.embed()` 可调，但**目前没有 agent 实际用它做相似度检索**。Sprint 2 task D3 会接通到 content-text agent。
 
+### 3.8 Why the social-ops capability layer is a credential-free sub-package（2026-09-08）
+
+Cuddler（私有仓）和本仓联合建社媒运营能力，分工是：**Cuddler 存连接密钥并执行，能力沉淀在本仓**。落点是 `packages/social-ops`（`@influencex/social-ops`，零依赖，CJS）：所有凭据是函数入参，包内**不读 `process.env`**（有测试扫源码守着），不开浏览器。宿主把它装进自己进程调用——**不走 HTTP**，走 HTTP 就得让 token 经过能力层进程。
+
+三条别再讨论的裁决：
+- `server/publish/oauth.js` 的 X / IG / YouTube / TikTok / Reddit `publish*` 已是委托 stub，**只有一份实现**；改平台发布逻辑改 `packages/social-ops/connectors/`，不要在 oauth.js 里复活旧函数。
+- **Dockerfile 必须 `COPY packages/`**（在 `COPY server/` 之前）；漏了镜像第一次发帖就 `MODULE_NOT_FOUND`，本地 `npm test` 看不出来。
+- 明确不做的能力（bot 号矩阵 / 批量注册邮箱 / 冷 DM 群发 / 无头浏览器登录 / 自动点赞关注）写在 `packages/social-ops/refusals.js` 并随 `manifest()` 对外暴露；替代能力分别是 `matrix/policy`、`edm/*`、`community` agent 的入站草拟、`manual_package` 模式。详见 `docs/SOCIAL_OPS_CAPABILITY_LAYER.md`。
+
 ---
 
 ## 4. 配置陷阱

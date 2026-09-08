@@ -5,6 +5,7 @@ All notable changes to InfluenceX. Format: [Keep a Changelog](https://keepachang
 ## [Unreleased]
 
 ### Added
+- **Social-ops capability layer:** `packages/social-ops` (`@influencex/social-ops`) — credential-free 12-platform matrix (X, Instagram, Discord, Reddit, YouTube, TikTok, 小红书, 微信视频号, 微信公众号, B站, 抖音, 快手), connectors with one contract, pure OAuth helpers, brief→copy→adapt→vocabulary-gate content pipeline, consent-based EDM engine (compliance floor, suppression, warm-up, complaint breaker, resumable runner), community playbook (7:1 contribution ledger, subreddit rules, disclosure), owned-account matrix policy, and an explicit refusals list. `server/publish/oauth.js` now delegates X/IG/YouTube/TikTok/Reddit publishing to it; Dockerfile copies `packages/`. 54 new tests.
 - **Phase 8:** gzip compression middleware (skips CSV exports)
 - **Phase 8:** Long-term cache headers for hashed Vite assets (`max-age=31536000, immutable`)
 - **Phase 8:** DB query timing instrumentation with slow-query log

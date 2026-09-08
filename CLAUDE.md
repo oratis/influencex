@@ -10,6 +10,7 @@
 - `docs/PLATFORM_AUDIT_2026-04.md` — 用户视角 UX 审计（修复进度见 ROADMAP_2026-Q2 §1）
 - `docs/KOL_FLOW_TEST_2026-04.md` — KOL 链路 E2E 测试报告（11/12 已修，剩 Hunter 扩展）
 - `docs/MULTITENANCY.md` — 多租户架构契约。新增 API 端点必读
+- `docs/SOCIAL_OPS_CAPABILITY_LAYER.md` — 社媒运营能力层（`packages/social-ops`，12 平台矩阵 / connector 合同 / pipeline / EDM / 社群纪律 / 拒绝清单）。改任何平台发布逻辑先读
 - `docs/USER_GUIDE.md` — 终端用户操作手册
 
 > This file provides context for Claude Code sessions working on this project.
@@ -28,6 +29,7 @@ InfluenceX (https://influencexes.com) is an **invite-only AI marketing platform*
 - `server/agents-v2/` — 18 LLM agents (strategy, research, content-text/visual/voice/video, kol-outreach, publisher, ads, community, etc.)
 - `server/agent-runtime/` — agent registry + Conductor (goal → plan → run)
 - `server/llm/` — Anthropic + OpenAI + Gemini + 火山方舟 routing layer with cache + cost stats
+- `packages/social-ops/` — `@influencex/social-ops`, the credential-free social-ops capability layer (12-platform matrix, connectors, oauth helpers, content pipeline, EDM engine, community playbook, account-matrix policy). Zero deps, never reads `process.env`; `server/publish/oauth.js` delegates X/IG/YouTube/TikTok/Reddit publishing to it and the Dockerfile must `COPY packages/`
 - `server/__tests__/` — Node test runner unit tests, one file per module (~680 tests / 71 files as of `c7c7d5b`; run `npm test` for the live number rather than trusting this one); frontend has Vitest files under `client/src/{components,pages,utils}/` plus Playwright specs in `e2e/tests/`
 - `client/` — Vite + React 18 SPA (HashRouter); `client/src/pages/*.jsx` is one page per route
 - `docs/` — see file links above

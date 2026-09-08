@@ -486,22 +486,41 @@ async function publishDirect(providerName, credentials, payload) {
   return { success: false, error: `Direct publishing not implemented for ${providerName}` };
 }
 
+// --- Shared connectors (packages/social-ops) -----------------------------
+// X / Instagram / YouTube / TikTok / Reddit are implemented ONCE in
+// packages/social-ops (the credential-free capability layer other hosts
+// consume) and re-used here with this module's proxy-aware fetch. The legacy
+// { success, platform_post_id, url, error } result shape is preserved for the
+// publisher agent, scheduled-publish and the /api/publish/direct route.
+
+const socialOps = require('../../packages/social-ops');
+const SOCIAL_OPS_DEPS = { fetch, userAgent: 'influencex/1.0' };
+
+function legacyResult(r) {
+  if (!r) return { success: false, error: 'no result from connector' };
+  if (!r.success) return { success: false, error: r.error, retryable: r.retryable === true };
+  return { success: true, platform_post_id: r.externalId || null, url: r.url || null, status: r.status || 'published' };
+}
+
 async function publishTwitter(accessToken, { text }) {
-  const res = await fetch('https://api.twitter.com/2/tweets', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-    body: JSON.stringify({ text }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    return { success: false, error: `Twitter API ${res.status}: ${errText.slice(0, 300)}` };
-  }
-  const data = await res.json();
-  return {
-    success: true,
-    platform_post_id: data.data?.id,
-    url: data.data?.id ? `https://twitter.com/i/status/${data.data.id}` : null,
-  };
+  return legacyResult(await socialOps.connectors.getConnector('x').publish({ accessToken }, { text }, SOCIAL_OPS_DEPS));
+}
+
+async function publishInstagram(accessToken, { text, imageUrl, igUserId }) {
+  // resolveUrl:false keeps the legacy two-call container→publish flow.
+  return legacyResult(await socialOps.connectors.getConnector('instagram').publish({ accessToken, igUserId }, { text, imageUrl, resolveUrl: false }, SOCIAL_OPS_DEPS));
+}
+
+async function publishYouTube(accessToken, { title, text, videoUrl, tags, privacyStatus }) {
+  return legacyResult(await socialOps.connectors.getConnector('youtube').publish({ accessToken }, { title, text, videoUrl, tags, privacyStatus }, SOCIAL_OPS_DEPS));
+}
+
+async function publishTikTok(accessToken, { text, videoUrl }) {
+  return legacyResult(await socialOps.connectors.getConnector('tiktok').publish({ accessToken }, { text, videoUrl }, SOCIAL_OPS_DEPS));
+}
+
+async function publishReddit(accessToken, { text, title, subreddit }) {
+  return legacyResult(await socialOps.connectors.getConnector('reddit').publish({ accessToken }, { text, title, subreddit }, SOCIAL_OPS_DEPS));
 }
 
 async function publishLinkedIn(accessToken, { text }) {
@@ -541,149 +560,6 @@ async function publishLinkedIn(accessToken, { text }) {
   return {
     success: true,
     platform_post_id: data.id,
-  };
-}
-
-// --- Instagram (Meta Graph API) -----------------------------------------
-
-/**
- * Instagram Business publishing via Meta Graph API. Two-step flow:
- *   1) POST /{ig-user-id}/media with image_url + caption → returns creation_id
- *   2) POST /{ig-user-id}/media_publish with creation_id  → returns post id
- *
- * Notes:
- *   - Requires a public `imageUrl` (Meta fetches it server-side). Captions-only
- *     (no image) are not supported by Instagram's Content Publishing API.
- *   - `accessToken` is the Page access token stored at connection time.
- *   - `igUserId` is the IG Business user id stored in platform_connections.account_id.
- */
-async function publishInstagram(accessToken, { text, imageUrl, igUserId }) {
-  if (!igUserId) return { success: false, error: 'Instagram connection missing ig_user_id (reconnect account)' };
-  if (!imageUrl) return { success: false, error: 'Instagram requires a public image_url — text-only posts are not supported' };
-
-  // Step 1: create media container
-  const createParams = new URLSearchParams({
-    image_url: imageUrl,
-    caption: text || '',
-    access_token: accessToken,
-  });
-  const createRes = await fetch(
-    `https://graph.facebook.com/v18.0/${encodeURIComponent(igUserId)}/media`,
-    { method: 'POST', body: createParams }
-  );
-  if (!createRes.ok) {
-    const errText = await createRes.text().catch(() => '');
-    return { success: false, error: `Instagram create ${createRes.status}: ${errText.slice(0, 300)}` };
-  }
-  const createData = await createRes.json();
-  const creationId = createData.id;
-  if (!creationId) return { success: false, error: 'Instagram create returned no id' };
-
-  // Step 2: publish the container
-  const publishParams = new URLSearchParams({
-    creation_id: creationId,
-    access_token: accessToken,
-  });
-  const pubRes = await fetch(
-    `https://graph.facebook.com/v18.0/${encodeURIComponent(igUserId)}/media_publish`,
-    { method: 'POST', body: publishParams }
-  );
-  if (!pubRes.ok) {
-    const errText = await pubRes.text().catch(() => '');
-    return { success: false, error: `Instagram publish ${pubRes.status}: ${errText.slice(0, 300)}` };
-  }
-  const pubData = await pubRes.json();
-  return {
-    success: true,
-    platform_post_id: pubData.id,
-    url: pubData.id ? `https://www.instagram.com/p/${pubData.id}/` : null,
-  };
-}
-
-// --- YouTube (Data API v3 resumable upload) -----------------------------
-
-/**
- * YouTube video publish via resumable upload.
- *
- *   1. Fetch the video from the caller-provided public URL (a Cloud Storage
- *      signed URL, S3, etc). The agent-runtime deliverables all resolve to
- *      an HTTP URL so we keep the upload path URL-based for symmetry.
- *   2. Initiate a resumable session: POST /upload/youtube/v3/videos?uploadType=resumable
- *      with the snippet+status JSON and Content-Length hints. Google returns
- *      a Location header (the upload URL).
- *   3. PUT the video bytes to the upload URL. On 200/201 we parse the body
- *      for the video id.
- *
- * Scopes required on the stored token: https://www.googleapis.com/auth/youtube.upload
- * Privacy defaults to `private` so the user can verify before going public.
- */
-async function publishYouTube(accessToken, { title, text, videoUrl, tags, privacyStatus }) {
-  if (!videoUrl) {
-    return {
-      success: false,
-      error: 'YouTube publishing requires a public video_url (direct MP4 / WebM). Text-only posts are not supported.',
-    };
-  }
-
-  // 1. Fetch the video file to upload.
-  const videoRes = await fetch(videoUrl);
-  if (!videoRes.ok) {
-    return { success: false, error: `Failed to fetch video_url (${videoRes.status})` };
-  }
-  const contentType = videoRes.headers.get('content-type') || 'video/*';
-  const contentLength = videoRes.headers.get('content-length');
-  const videoBuf = Buffer.from(await videoRes.arrayBuffer());
-
-  const metadata = {
-    snippet: {
-      title: (title || (text || '').split('\n')[0] || 'Untitled').slice(0, 100),
-      description: text || '',
-      tags: Array.isArray(tags) ? tags.slice(0, 15) : undefined,
-      categoryId: '22', // "People & Blogs" — safe default
-    },
-    status: {
-      privacyStatus: privacyStatus || 'private',
-      selfDeclaredMadeForKids: false,
-    },
-  };
-
-  // 2. Initiate resumable upload session.
-  const initRes = await fetch(
-    'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json; charset=UTF-8',
-        'X-Upload-Content-Type': contentType,
-        ...(contentLength ? { 'X-Upload-Content-Length': contentLength } : {}),
-      },
-      body: JSON.stringify(metadata),
-    }
-  );
-  if (!initRes.ok) {
-    const errText = await initRes.text().catch(() => '');
-    return { success: false, error: `YouTube init ${initRes.status}: ${errText.slice(0, 300)}` };
-  }
-  const uploadUrl = initRes.headers.get('location');
-  if (!uploadUrl) return { success: false, error: 'YouTube did not return an upload Location header' };
-
-  // 3. PUT the video bytes.
-  const uploadRes = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: { 'Content-Type': contentType, 'Content-Length': String(videoBuf.length) },
-    body: videoBuf,
-  });
-  if (!uploadRes.ok) {
-    const errText = await uploadRes.text().catch(() => '');
-    return { success: false, error: `YouTube upload ${uploadRes.status}: ${errText.slice(0, 300)}` };
-  }
-  const data = await uploadRes.json().catch(() => ({}));
-  const videoId = data.id;
-  return {
-    success: true,
-    platform_post_id: videoId || null,
-    url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
   };
 }
 
@@ -773,60 +649,6 @@ async function publishThreads(accessToken, { text, imageUrl, threadsUserId }) {
   };
 }
 
-// --- TikTok (Content Posting API) ---------------------------------------
-
-/**
- * TikTok video publishing via Content Posting API PULL_FROM_URL mode. The
- * agent produces a public video URL (signed Cloud Storage or similar) and
- * TikTok's servers fetch it. The alternative FILE_UPLOAD mode requires a
- * chunked upload session; PULL_FROM_URL is simpler and matches our agent
- * deliverables pattern.
- *
- * Scopes required: video.upload + video.publish.
- */
-async function publishTikTok(accessToken, { text, videoUrl }) {
-  if (!videoUrl) {
-    return {
-      success: false,
-      error: 'TikTok publishing requires a public video_url (MP4). Text-only posts are not supported.',
-    };
-  }
-  const body = {
-    post_info: {
-      title: (text || '').slice(0, 2200),
-      privacy_level: 'SELF_ONLY', // draft — user confirms in TikTok app before going public
-      disable_duet: false,
-      disable_stitch: false,
-      disable_comment: false,
-    },
-    source_info: {
-      source: 'PULL_FROM_URL',
-      video_url: videoUrl,
-    },
-  };
-  const res = await fetch('https://open.tiktokapis.com/v2/post/publish/video/init/', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json; charset=UTF-8',
-      'Authorization': `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    return { success: false, error: `TikTok init ${res.status}: ${t.slice(0, 300)}` };
-  }
-  const data = await res.json();
-  const publishId = data.data?.publish_id;
-  return {
-    success: true,
-    platform_post_id: publishId || null,
-    // TikTok doesn't expose a public URL until upload + moderation complete.
-    // Caller can poll /v2/post/publish/status/fetch/ with publish_id.
-    url: null,
-  };
-}
-
 // --- Pinterest (v5 API) -------------------------------------------------
 
 /**
@@ -859,48 +681,6 @@ async function publishPinterest(accessToken, { text, title, imageUrl, boardId })
     success: true,
     platform_post_id: data.id || null,
     url: data.id ? `https://www.pinterest.com/pin/${data.id}/` : null,
-  };
-}
-
-// --- Reddit -------------------------------------------------------------
-
-/**
- * Self-post (text) submission to a subreddit. Reddit requires a descriptive
- * User-Agent and Bearer auth for all authenticated endpoints.
- */
-async function publishReddit(accessToken, { text, title, subreddit }) {
-  if (!subreddit) return { success: false, error: 'Reddit requires a subreddit (e.g. "test")' };
-  if (!title) return { success: false, error: 'Reddit submissions require a title' };
-  const body = new URLSearchParams({
-    sr: subreddit.replace(/^r\//, ''),
-    kind: 'self',
-    title: title.slice(0, 300),
-    text: text || '',
-    api_type: 'json',
-  });
-  const res = await fetch('https://oauth.reddit.com/api/submit', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': `Bearer ${accessToken}`,
-      'User-Agent': 'influencex/1.0',
-    },
-    body: body.toString(),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    return { success: false, error: `Reddit API ${res.status}: ${t.slice(0, 300)}` };
-  }
-  const data = await res.json();
-  const submission = data.json?.data;
-  const errors = data.json?.errors;
-  if (errors && errors.length) {
-    return { success: false, error: `Reddit: ${errors.map(e => e.join(':')).join('; ')}` };
-  }
-  return {
-    success: true,
-    platform_post_id: submission?.id || submission?.name || null,
-    url: submission?.url || null,
   };
 }
 

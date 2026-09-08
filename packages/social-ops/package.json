@@ -1,0 +1,28 @@
+{
+  "name": "@influencex/social-ops",
+  "version": "0.1.0",
+  "description": "InfluenceX social operations capability layer: platform matrix, publish connectors, content pipeline, EDM engine, community playbook. Holds NO credentials — every call takes them as arguments.",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "index.js",
+    "*.js",
+    "connectors/",
+    "pipeline/",
+    "edm/",
+    "community/",
+    "matrix/",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oratis/influencex.git",
+    "directory": "packages/social-ops"
+  },
+  "dependencies": {}
+}
