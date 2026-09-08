@@ -17,6 +17,12 @@ RUN cd client && npm ci --legacy-peer-deps
 COPY client/ client/
 RUN cd client && npx vite build
 
+# Copy the credential-free capability layer BEFORE server code:
+# server/publish/oauth.js requires ../../packages/social-ops, so an image
+# without this directory fails the first X / IG / YouTube / TikTok / Reddit
+# publish with MODULE_NOT_FOUND.
+COPY packages/ packages/
+
 # Copy server code
 COPY server/ server/
 
