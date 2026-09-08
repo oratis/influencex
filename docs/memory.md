@@ -160,6 +160,15 @@ Cuddler（私有仓）和本仓联合建社媒运营能力，分工是：**Cuddl
 - **Dockerfile 必须 `COPY packages/`**（在 `COPY server/` 之前）；漏了镜像第一次发帖就 `MODULE_NOT_FOUND`，本地 `npm test` 看不出来。
 - 明确不做的能力（bot 号矩阵 / 批量注册邮箱 / 冷 DM 群发 / 无头浏览器登录 / 自动点赞关注）写在 `packages/social-ops/refusals.js` 并随 `manifest()` 对外暴露；替代能力分别是 `matrix/policy`、`edm/*`、`community` agent 的入站草拟、`manual_package` 模式。详见 `docs/SOCIAL_OPS_CAPABILITY_LAYER.md`。
 
+**2026-09-08 补记——第一个宿主已接入（Cuddler，`LuddiAI/Cuddler#3482`），带回两条其它宿主也会踩的事实**：
+- 宿主用 `pnpm add "github:oratis/influencex#path:/packages/social-ops"`，锁文件钉的是
+  **codeload tarball + 固定 commit**，不是 git 协议 URL —— 所以宿主的容器镜像**不需要装 git**
+  （alpine 基镜像本来就没有）。升级 = 重跑 `pnpm add` 换 commit。
+- **本包在 Next.js `output: "standalone"` 下必须追踪两处**：`.pnpm` 里的真文件，
+  **以及**宿主 `node_modules/@influencex/social-ops` 那个 pnpm link。只写前者的结果是
+  「30 个文件全在、一个都解析不到」，而本地 vitest / tsc / next build 全绿，
+  只在生产以「每次调用 503」出现。宿主那边为此单加了一条 CI 策略闸。
+
 ---
 
 ## 4. 配置陷阱

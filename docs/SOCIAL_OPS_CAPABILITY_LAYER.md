@@ -151,8 +151,27 @@ if (check.ok) await ops.edm.runEdmCampaign({ recipients: eligible, render, send:
 
 ## 8. 下一步（按优先级）
 
-1. **Cuddler 侧接入**（姊妹文档）：`SocialAccount` 加密列 + 后台 OAuth 连接 + `POST /api/admin/social-ops/publish` 走本层。
-2. **B 站 / 抖音 / 快手实测**：各拿一个测试号跑通一次，翻 `endpointsVerified`。
-3. **服务端 OAuth 也委托**：`server/publish/oauth.js` 的 `buildAuthorizeUrl / exchangeCodeForToken` 仍是自己的一份（读 env）；下一步改成调 `packages/social-ops/oauth.js` 并把 env 读取留在服务端。
-4. **community agent 接 playbook**：现有 `agents-v2/community.js` 的 fetch/classify/draft 保持，`promoteOnReddit` 作为它的第四个 action 暴露给 Conductor。
-5. **发布到 npm**：`@influencex/social-ops` 0.1.0；发布前把 `endpointsVerified:false` 的三家在 README 里再标一次。
+> **状态更新 2026-09-08**：本层已被第一个宿主消费。Cuddler 通过
+> `pnpm add "github:oratis/influencex#path:/packages/social-ops"` 装入，
+> 锁文件钉的是 **codeload tarball + 固定 commit**（不是 git 协议 URL），
+> 所以宿主镜像不需要 git 二进制。宿主侧 PR：`LuddiAI/Cuddler#3482`。
+
+1. ~~**Cuddler 侧接入**~~ ✅ 已完成：宿主落了 `SocialAccount` / `SocialPost` /
+   `SocialPostMetric` 三张表、AES-256-GCM 凭据保管库、5 条 admin 路由，
+   并有一个只 stub 网络与数据库的集成套件打通本层真包。
+2. **宿主接入时踩到的一个坑，其它宿主也会踩**：本包是 CJS + 运行时 `require`，
+   在 Next.js `output: "standalone"` 下**必须同时**追踪两处——
+   `node_modules/.pnpm/@influencex+social-ops@*/…`（真文件）与宿主自己的
+   `node_modules/@influencex/social-ops`（让它可解析的 pnpm link）。
+   只写前者的结果是**文件全在、一个都解析不到**，而本地 vitest / tsc / build 全绿，
+   只在生产以「每次调用 503」的形式出现。如果以后本包给出接入模板，把这条写进去。
+3. **B 站 / 抖音 / 快手实测**：三家 connector 仍是 `endpointsVerified: false`。
+   Cuddler 侧已拍板**暂缓**申请开发者 App（企业资质 + 逐能力审核，周期以周计），
+   所以这三家的实测短期内不会有人做——保持标记，别偷偷翻成 `true`。
+4. **服务端 OAuth 也委托**：`server/publish/oauth.js` 的
+   `buildAuthorizeUrl` / `exchangeCodeForToken` 仍是本仓自己的一份（读 env）。
+   改成调 `packages/social-ops/oauth.js` 并把 env 读取留在服务端。
+5. **community agent 接 playbook**：`agents-v2/community.js` 的 fetch/classify/draft 保持，
+   把 `promoteOnReddit` 作为第四个 action 暴露给 Conductor。
+6. **发布到 npm**：**暂不做**。git tarball 依赖已经能给宿主确定性的解析，
+   而 npm 发布是不可逆的（72 小时后不能 unpublish）。等有第二个外部宿主再说。
