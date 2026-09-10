@@ -15,7 +15,7 @@
 | MX | **飞书**（mx1/mx2/mx3.feishu.cn，prio 1/5/10） |
 | SPF | ✅ `v=spf1 +include:_netblocks.m.feishu.cn -all`（硬失败） |
 | DMARC | ✅ `p=none`（2026-09-10 新增，监控期） |
-| **DKIM** | ❌ **未发布** — 唯一剩下的硬缺口 |
+| **DKIM** | ✅ selector `feishu2609101452`（2026-09-10 发布，RSA） |
 | 邮箱 | ✅ 10 个角色公共邮箱已建 |
 
 ---
@@ -30,15 +30,26 @@ SPF 同时从 `~all`（软失败）收紧到了 `-all`（硬失败）。这是�
 
 ---
 
-## 2. DKIM 是唯一的硬缺口
+## 2. DKIM
 
-实测：`feishu` / `s1` / `s2` / `default` / `mail` / `larksuite` / `lark` / `selector1` 七个常见 selector 在 `gogameclaw.com` 上**全部无记录**。
+**已发布**（2026-09-10）：
 
-对照组同样为空——`luddi.ai` / `doudou.ai` / `huoban.ai` 这三个已在用飞书邮箱的域，同样查不到 DKIM。**所以这不是 gogameclaw 一个域的问题，是整个租户都没配 DKIM。**
+```
+feishu2609101452._domainkey.gogameclaw.com  TXT  "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0..."
+```
 
-**影响**：没有 DKIM，DMARC 就只能靠 SPF 单腿对齐。任何转发场景（邮件列表、`.forward`、Gmail 的"从其他账号收信"）都会打断 SPF，导致 DMARC 失败。等 DMARC 升到 `p=quarantine` 以上时，这些邮件会被直接扔进垃圾箱。
+公网解析已验证（1.1.1.1 与 8.8.8.8 均返回 415 字节）。
 
-**怎么补**：飞书管理后台 → 邮箱 → 域名管理 → 选中域名 → 开启 DKIM，它会给出 selector 和公钥。**这一步没有 OpenAPI**，必须人工在后台点。拿到记录值给我，我用 CF API 写进去。
+⚠️ **selector 是飞书按时间戳生成的**（`feishu` + `YYMMDDHHMM`），不是固定值。猜不出来——要查现有 selector 直接列 zone 里的 `_domainkey` 记录，别去试常见名：
+
+```bash
+CF=$(gcloud secrets versions access latest --secret=CLOUDFLARE_API_TOKEN --project=cuddler-500909)
+curl -s -H "Authorization: Bearer $CF" \
+  "https://api.cloudflare.com/client/v4/zones/0f283f6b1638d845f6bdb555f03d3292/dns_records?per_page=100" \
+  | grep -o '[a-z0-9]*\._domainkey[^"]*'
+```
+
+⚠️ **其余域仍然没有 DKIM**：`luddi.ai` / `doudou.ai` / `huoban.ai` 三个同样在用飞书邮箱的域实测查无记录。gogameclaw.com 现在是这个租户里**唯一**邮件认证完整的域。那三个域一旦要发正式邮件，会遇到同样的问题。
 
 ---
 
@@ -91,7 +102,7 @@ _dmarc.gogameclaw.com  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@gogameclaw.com;
 | 阶段 | 条件 | 动作 |
 |---|---|---|
 | 现在 | — | `p=none`，收 2 周聚合报告 |
-| 第 3 周 | DKIM 已发布 **且** 报告里无合法来源失败 | `p=quarantine; pct=25` |
+| 第 3 周 | ~~DKIM 已发布~~ ✅ **且** 报告里无合法来源失败 | `p=quarantine; pct=25` |
 | 第 5 周 | quarantine 无误伤 | `pct=100` |
 | 第 7 周 | 稳定 | `p=reject` |
 
@@ -101,8 +112,9 @@ _dmarc.gogameclaw.com  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@gogameclaw.com;
 
 ## 5. 待办
 
-- [ ] **飞书后台开 DKIM**，把 selector + 公钥给我（人工，无 API）
-- [ ] 两周后看 `dmarc@gogameclaw.com` 的聚合报告，决定是否升 `p=quarantine`
+- [x] ~~飞书后台开 DKIM~~ —— 已完成 2026-09-10，selector `feishu2609101452`
+- [ ] 两周后（**2026-09-24 起**）看 `dmarc@gogameclaw.com` 的聚合报告，决定是否升 `p=quarantine`（DKIM 已就位，这一步不再有前置阻塞）
+- [ ] 考虑给 `luddi.ai` / `doudou.ai` / `huoban.ai` 补 DKIM（同一租户，同样缺）
 - [ ] 若要用 Resend 发营销邮件：先把 Resend include 加进 SPF，否则 `-all` 会全拒
 - [ ] 真人邮箱：给花名册 + 开 `mail:user_mailbox` 与 `contact:*` scope
 
