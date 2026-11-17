@@ -50,7 +50,16 @@ function manifest() {
       media: p.media,
       metrics: p.metrics,
       limits: p.limits,
+      // null when the platform charges nothing for API use.
+      pricing: p.pricing || null,
+      // Token lifetimes the host must plan refreshes around (null = see the OAuth docs).
+      tokens: p.tokens || null,
+      // The payload field the connector maps `aiGenerated` to (null = disclose in the text).
+      aiLabel: p.aiLabel || null,
+      apiVersion: p.apiVersion || null,
       requiresPlatformAudit: !!p.requiresPlatformAudit,
+      // What publishMode effectively is until the platform audit passes.
+      publishModeBeforeAudit: p.publishModeBeforeAudit || null,
       auditNote: p.auditNote || null,
       endpointsVerified: !!p.endpointsVerified,
       docs: p.docs,

@@ -9,7 +9,7 @@
 ## 0. TL;DR
 
 1. **能力沉淀在一个零依赖的子包里**：`packages/social-ops`（npm 名 `@influencex/social-ops`）。它**不读 `process.env`、不读库、不开浏览器**——所有凭据都是函数入参，所有平台拒绝都是返回值而非异常。这一条有测试守着（`social-ops-capabilities.test.js` 扫描全包源码）。
-2. **12 个平台一张矩阵**：X · Instagram · Discord · Reddit · YouTube · TikTok · 小红书 · 微信视频号 · 微信公众号 · B 站 · 抖音 · 快手。每个平台有一个 `publishMode`：`api_direct`（能直接发）/ `api_draft`（只能落草稿箱，人来点发布：公众号）/ `manual_package`（无第三方发布 API，产出可粘贴的校验过的物料包：小红书、视频号）。
+2. **12 个平台一张矩阵**：X · Instagram · Discord · Reddit · YouTube · TikTok · 小红书 · 微信视频号 · 微信公众号 · B 站 · 抖音 · 快手。每个平台有一个 `publishMode`：`api_direct`（能直接发）/ `api_draft`（只能落草稿箱，人来点发布：公众号）/ `manual_package`（无第三方发布 API，产出可粘贴的校验过的物料包：小红书、视频号；Reddit 自 2026-11 起也是，因为接口只剩获批应用能用）。
 3. **服务端只保留一份实现**：`server/publish/oauth.js` 里 X / IG / YouTube / TikTok / Reddit 的 `publish*` 已改成薄委托（`legacyResult()` 保旧返回形状），既有 679 个测试 + 新增 54 个全绿。
 4. **四项目标能力的裁决**（详见 §2）：官方号自动化 ✅ · 社群发帖 ✅（贡献优先 7:1 + 明示身份 + 尊重版规）· EDM ✅（自有域名 + 合规 ESP + 同意制名单）· **bot 号矩阵 / 批量注册邮箱 / 冷 DM 群发 ✗**，用 `REFUSALS` 表在 manifest 里对外声明并给出替代能力。
 5. **宿主（Cuddler）负责**：凭据加密存储、OAuth 同意页由账号持有人本人点、帖子状态机与幂等、Cloud Scheduler 调度与限速、发布前人审。`manifest().hostResponsibilities` 把这五条写死。
@@ -46,14 +46,16 @@
 
 ## 3. 平台矩阵（撰写时公开信息，实施前逐条复核官方文档）
 
+> **2026-11-17 复核**：X / Instagram / YouTube / TikTok / Reddit 五行按各家官方开发者文档重新核对过（Cuddler #8108 限额表更新）；其余平台仍是 2026-09 的数字。只有第三方说法支撑的，代码里就近标 `UNVERIFIED`。
+
 | 平台 | 模式 | 授权 | 文案上限 | 媒体 | 读自己指标 | 日上限（能力层默认） | 需平台审核 | 端点已实测 |
 |---|---|---|---|---|---|---|---|---|
-| X | api_direct | OAuth2 PKCE | 280，支持线程 | 图 ≤4 / 视频 ≤140s（v2 分片上传） | 付费档才有 | 50 | 否 | ✅ |
-| Instagram | api_direct | Meta Graph（需 Business + FB Page） | 2200，≤30 话题 | 图 / Reels，**必须有媒体** | ✅ Insights | 25 | 否 | ✅ |
+| X | api_direct | OAuth2 PKCE | 280，支持线程 | 图 ≤4 / 视频 0.5 秒–20 分钟、≤8 GB（Premium 账号 125 分钟 / 16 GB）；媒体走 v2 专用端点 initialize → append → finalize → STATUS | **按次计费**：读自己的帖 $0.001/条 | 50（宿主上限；平台每用户 15 分钟 100 帖）；**按次计费**：发帖 $0.015、带链接 $0.20 | 否 | ✅（媒体 v2 新端点按文档实现，待实测） |
+| Instagram | api_direct | Meta Graph v26.0（Facebook Login，需 Business + FB Page） | 2200，≤30 话题 | 图 / Reels（3 秒–15 分钟、≤300 MB），**必须有媒体**；`aiGenerated` → `is_ai_generated` | ✅ Insights | 50（静态下限；官方文档 100 / 50 两说，发前用 `fetchPublishingLimit()` 读 `content_publishing_limit`） | 否 | ✅ |
 | Discord | api_direct | Bot token 或 Webhook | 2000（embed 4096） | 附件 ≤10 | Bot 能读反应 | 200 | 否 | ✅ |
-| Reddit | api_direct | OAuth2 | 标题 300 / 正文 40000 | 图 / 视频 / 链接 | ✅ | 3（社群纪律另计） | 否 | ✅ |
-| YouTube | api_direct | Google OAuth | 标题 100 / 描述 5000 | 视频 only | ✅ | 6（配额 10000 单位 / 上传 1600） | 否 | ✅ |
-| TikTok | api_direct | OAuth2 PKCE | 2200 | 视频 / 图文 | 需 `video.list` | 15 | **是**（未过审只能 SELF_ONLY 草稿） | ✅ |
+| Reddit | **manual_package** | 不需要（`submit()` / 读接口仍用 OAuth2，仅限已获批应用） | 标题 300 / 正文 40000 | 图 / 视频 / 链接 | 仅已获批应用 | 3（社群纪律另计） | 否 | ✅（API 辅助函数） |
+| YouTube | api_direct | Google OAuth | 标题 100 / 描述 5000 | 视频 only；`aiGenerated` → `status.containsSyntheticMedia` | ✅ | 100（上传独立配额桶，按项目算，每次 1 单位；其余调用共用 10000 单位） | 否 | ✅ |
+| TikTok | api_direct（过审前实际是 api_draft） | OAuth2 PKCE；access 2 小时，refresh 180 天、**每次刷新都换新** | 2200 | 视频 / 图文；`aiGenerated` → `post_info.is_aigc` | 需 `video.list` | 15（每个创作者所有应用合计）；每令牌每分钟 6 次 | **是**（过审前：帖子只能 SELF_ONLY、发帖账号须设私密、24 小时最多 5 个用户） | ✅ |
 | 小红书 | manual_package | — | 标题 20 / 正文 1000 / ≤10 话题 | 图 ≤18（3:4）/ 视频 | 无 | 3 | — | — |
 | 微信视频号 | manual_package | — | 1000 | 视频 + 封面 1080×1260 | 无 | 3 | — | — |
 | 微信公众号 | **api_draft** | AppID/AppSecret + IP 白名单 | 标题 64 / 摘要 120 / 作者 8 | 封面 2.35:1，正文图必须先上传 | 日报（datacube） | 订阅号 1 次/天 | 认证号才能 freepublish | ✅ |
@@ -98,7 +100,7 @@ fetchMetrics(credentials, externalId, deps)  // { available, metrics?: {impressi
 
 ## 5. 服务端接线
 
-- `server/publish/oauth.js`：`publishTwitter / publishInstagram / publishYouTube / publishTikTok / publishReddit` 现在是委托 stub（`legacyResult()` 把 `externalId` 映回 `platform_post_id`）。`publishDirect` 的分派、`platform_connections` 的加密与 OAuth 回调**没动**——那是宿主职责，留在服务端。
+- `server/publish/oauth.js`：`publishTwitter / publishInstagram / publishYouTube / publishTikTok / publishReddit` 现在是委托 stub（`legacyResult()` 把 `externalId` 映回 `platform_post_id`）。Reddit 自 2026-11 起 connector 的 `publish()` 只出物料包，`publishReddit` 改调 `submit()`（直连 `/api/submit`），只在已连的应用还有接口权限时可用。`publishDirect` 的分派、`platform_connections` 的加密与 OAuth 回调**没动**——那是宿主职责，留在服务端。
 - `Dockerfile` 新增 `COPY packages/ packages/`（在 `COPY server/` 之前）——漏掉它，镜像里第一次发帖就 `MODULE_NOT_FOUND`。
 - `publisher` agent、`scheduled-publish`、`/api/publish/direct/:platform` 三个调用方零改动。
 
@@ -142,7 +144,7 @@ if (check.ok) await ops.edm.runEdmCampaign({ recipients: eligible, render, send:
 |---|---|
 | `social-ops-capabilities` | 12 平台矩阵不变量、manual/draft 模式归属、未实测标记、别名、connector 合同、manifest 可序列化、**全包无 `process.env` 读取** |
 | `social-ops-adapt` | X 线程拆分不丢内容、小红书 20 字标题与 18 图、公众号 64/120 与 HTML 转义、YouTube 视频 only、IG 30 话题、B 站封面、Discord 2000 |
-| `social-ops-connectors` | 12 个 connector 缺凭据零网络失败、每平台请求整形（脚本化 fetch）、429/403 分类、IG Reels 轮询、YouTube 定时强制 private、TikTok SELF_ONLY 草稿、Reddit RATELIMIT 可重试、公众号 40164 提示、B 站签名头、OAuth URL 与换码 |
+| `social-ops-connectors` | 12 个 connector 缺凭据零网络失败、每平台请求整形（脚本化 fetch）、429/403 分类、X 媒体走 v2 专用端点（initialize / append / finalize / STATUS）、IG Reels 轮询与 v26 URL、IG `content_publishing_limit` 解析、YouTube 定时强制 private 与上传配额桶、IG / YouTube / TikTok 的 AI 标识字段、TikTok SELF_ONLY 草稿与 refresh 轮换、Reddit 物料包与 `submit()` RATELIMIT 可重试、公众号 40164 提示、B 站签名头、OAuth URL 与换码 |
 | `social-ops-pipeline` | plan→write→adapt 全链、词表闸拦截 + 一次重写 + 残留上报、imageGen 补图、输入校验 |
 | `social-ops-edm` | 合规地板正反例、退订头、抑制名单事件映射、同意制过滤 11 种排除理由、预热/熔断、发送循环的限速/抑制/日上限/预算/游标 |
 | `social-ops-community-matrix` | 7:1 账本 + 冷却、版规判读、明示身份幂等、拒绝后不调 submit、允许后带 disclosure 发并记账、账号形状拒绝 bot/代理池、错峰排期 |

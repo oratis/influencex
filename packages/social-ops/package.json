@@ -1,6 +1,6 @@
 {
   "name": "@influencex/social-ops",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "InfluenceX social operations capability layer: platform matrix, publish connectors, content pipeline, EDM engine, community playbook. Holds NO credentials — every call takes them as arguments.",
   "main": "index.js",
   "type": "commonjs",

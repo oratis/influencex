@@ -1,17 +1,30 @@
 'use strict';
 
 /**
- * Reddit connector — self / link posts, comments, subreddit rules.
+ * Reddit connector — manual package by default; API submit / comment / rules
+ * / metrics kept for hosts that hold an approved Reddit app.
  *
- * credentials: { accessToken }
- * payload:     { subreddit, title, text? | link?, flairId?, flairText?, nsfw?, spoiler?, sendReplies? }
+ * payload: { subreddit, title, text? | link?, flairId?, flairText?, nsfw?, spoiler?, sendReplies? }
  *
- * Reddit is community-governed: the connector will post, but whether it
- * SHOULD is decided by community/playbook (contribution ratio, subreddit rules,
- * disclosure). Every request carries a descriptive User-Agent — Reddit blocks
- * the default one.
+ * publish(_credentials, payload) — NO network, NO credentials. Reddit's Data
+ * API is closing to apps without an approval or a written agreement: new
+ * OAuth access needs approval since the 2025-11 Responsible Builder Policy,
+ * unregistered apps lose access from 2027-01-12 and the remaining public
+ * access ends March 2027 (r/redditdev announcement). So, like 小红书 / 视频号,
+ * publish() returns a paste-ready package (status 'packaged') with a
+ * deterministic id the host reconciles against the URL the operator pastes
+ * back.
+ *
+ * submit(credentials, payload, deps) — the direct POST /api/submit, only for
+ * hosts that still hold an approved app (credentials: { accessToken }).
+ *
+ * Reddit is community-governed either way: whether a post SHOULD go out is
+ * decided by community/playbook (contribution ratio, subreddit rules,
+ * disclosure). Every API request carries a descriptive User-Agent — Reddit
+ * blocks the default one.
  */
 
+const crypto = require('crypto');
 const { PLATFORMS } = require('../capabilities');
 const { ok, fail, httpFailure, readJson, resolveDeps } = require('../result');
 
@@ -35,7 +48,52 @@ function validate(payload = {}) {
   return errors;
 }
 
-async function publish(credentials, payload = {}, depsIn) {
+/** Deterministic package id: the same post to the same subreddit always gets the same id. */
+function packageId(payload = {}) {
+  const h = crypto.createHash('sha256').update(JSON.stringify({
+    platform: 'reddit',
+    sr: normalizeSubreddit(payload.subreddit).toLowerCase(),
+    t: payload.title || '',
+    b: payload.link ? '' : (payload.text || ''),
+    l: payload.link || '',
+  })).digest('hex');
+  return `reddit:${h.slice(0, 16)}`;
+}
+
+/** manual_package publish: validate, then hand the operator a paste-ready package. */
+async function publish(_credentials, payload = {}) {
+  const errors = validate(payload);
+  if (errors.length) return fail(errors.join('; '), { kind: 'client' });
+  const sr = normalizeSubreddit(payload.subreddit);
+  const isLink = !!payload.link;
+  return ok({
+    externalId: packageId(payload),
+    url: null,
+    status: 'packaged',
+    requiresHumanFinalStep: true,
+    package: {
+      platform: 'reddit',
+      subreddit: sr,
+      submitUrl: `https://www.reddit.com/r/${encodeURIComponent(sr)}/submit`,
+      kind: isLink ? 'link' : 'self',
+      title: String(payload.title).slice(0, PLATFORMS.reddit.text.titleMaxLength),
+      body: isLink ? null : (payload.text || ''),
+      link: payload.link || null,
+      flairText: payload.flairText || null,
+      nsfw: payload.nsfw === true,
+      spoiler: payload.spoiler === true,
+      steps: [
+        `Read the r/${sr} rules and confirm this post is allowed there`,
+        'Check the contribution ledger: promotional posts need a 7:1 contribution ratio (community/playbook)',
+        'Post from the disclosed official account only, with the disclosure line kept in the body',
+        'Paste the post URL back so the package can be reconciled',
+      ],
+    },
+  });
+}
+
+/** Direct API submit — hosts with an approved Reddit app only. */
+async function submit(credentials, payload = {}, depsIn) {
   const deps = resolveDeps(depsIn);
   const accessToken = credentials && credentials.accessToken;
   if (!accessToken) return fail('reddit: accessToken is required', { kind: 'auth' });
@@ -125,4 +183,4 @@ async function fetchMetrics(credentials, externalId, depsIn) {
   };
 }
 
-module.exports = { platform: 'reddit', capabilities: PLATFORMS.reddit, validate, publish, comment, fetchSubredditRules, fetchMetrics, normalizeSubreddit };
+module.exports = { platform: 'reddit', capabilities: PLATFORMS.reddit, validate, publish, submit, comment, fetchSubredditRules, fetchMetrics, normalizeSubreddit, packageId };

@@ -4,8 +4,11 @@
  * The platform capability matrix — the single place that answers "what can we
  * do on platform P, through which door, under which limits".
  *
- * Every number here is PUBLIC information as of 2026-09 and platforms change
- * these often. `endpointsVerified` records whether the connector's request
+ * Every number here is PUBLIC information and platforms change these often.
+ * X, Instagram, YouTube, TikTok and Reddit were re-checked against the
+ * official developer docs on 2026-11-17; the other platforms still carry the
+ * 2026-09 figures. Anything only third-party sources support is marked
+ * UNVERIFIED in a comment next to it. `endpointsVerified` records whether the connector's request
  * shapes were exercised against the live API by this repo's maintainers;
  * `false` means "implemented from published docs, verify before issuing
  * credentials". `requiresPlatformAudit` means the platform reviews the app
@@ -35,11 +38,22 @@ const PLATFORMS = Object.freeze({
     publishMode: PUBLISH_MODES.API_DIRECT,
     auth: { kind: 'oauth2_pkce', scopes: ['tweet.read', 'tweet.write', 'users.read', 'offline.access', 'media.write'] },
     text: { maxLength: 280, titleMaxLength: null, supportsThread: true, hashtagsInText: true },
-    media: { image: true, video: true, maxImages: 4, maxVideoSeconds: 140, videoUploadMode: 'chunked' },
-    metrics: { readsOwn: 'paid_tier', note: 'Free tier is write-only; public_metrics needs Basic+' },
-    limits: { perDay: 50, perHour: 10, note: 'Free tier ≈ 1,500 posts/month app-wide; keep daily cap well under' },
+    // tweet_video limits follow the POSTING account, not the API plan:
+    // 20 min / 8 GB by default, 125 min / 16 GB for X Premium accounts.
+    // (140 s is the dm_video limit.) POST /2/tweets re-checks and answers 403.
+    media: { image: true, video: true, maxImages: 4, minVideoSeconds: 0.5, maxVideoSeconds: 1200, maxVideoBytes: 8 * 1024 ** 3, premiumMaxVideoSeconds: 7500, premiumMaxVideoBytes: 16 * 1024 ** 3, videoUploadMode: 'chunked' },
+    metrics: { readsOwn: 'pay_per_use', note: 'Reading your own posts is billed per resource (see pricing.perOwnedRead)' },
+    limits: { perDay: 50, perHour: 10, note: 'Host cap, kept far under the platform rate limit (POST /2/tweets: 100 per 15 min per user, 10,000 per 24 h per app) because every post is billed' },
+    // Pay-per-use (docs.x.com pricing, 2026-11-17). Whether the legacy Free
+    // tier is still open to NEW developers is UNVERIFIED (third-party reports
+    // only); this layer assumes every request is billed.
+    pricing: { model: 'pay_per_use', currency: 'USD', perPost: 0.015, perPostWithUrl: 0.2, perOwnedRead: 0.001, docs: 'https://docs.x.com/x-api/getting-started/pricing' },
     requiresPlatformAudit: false,
+    // POST /2/tweets is live-verified; the dedicated v2 media endpoints
+    // (initialize / append / finalize) were adopted from the docs on
+    // 2026-11-17 and have not been exercised against the live API yet.
     endpointsVerified: true,
+    notes: ['Media upload uses the dedicated v2 endpoints (docs, 2026-11-17); not yet exercised live'],
     docs: 'https://docs.x.com/x-api/posts/creation-of-a-post',
     credentialShape: ['accessToken'],
   },
@@ -50,10 +64,17 @@ const PLATFORMS = Object.freeze({
     region: 'global',
     publishMode: PUBLISH_MODES.API_DIRECT,
     auth: { kind: 'oauth2', scopes: ['instagram_basic', 'instagram_content_publish', 'pages_show_list', 'pages_read_engagement', 'instagram_manage_insights'] },
+    // The Graph version every Instagram call (OAuth + connector) uses.
+    apiVersion: 'v26.0',
     text: { maxLength: 2200, titleMaxLength: null, supportsThread: false, hashtagsInText: true, maxHashtags: 30 },
-    media: { image: true, video: true, requiresMedia: true, maxImages: 10, maxVideoSeconds: 900, videoKind: 'reels' },
+    media: { image: true, video: true, requiresMedia: true, maxImages: 10, minVideoSeconds: 3, maxVideoSeconds: 900, maxVideoBytes: 300 * 1024 * 1024, videoKind: 'reels' },
     metrics: { readsOwn: 'yes', note: 'Insights API on published media' },
-    limits: { perDay: 25, perHour: 10, note: 'Content Publishing API: 25 API-published posts per 24h' },
+    // Meta's own pages disagree on the 24 h cap: the content-publishing guide
+    // says 100, the content_publishing_limit reference says quota_total is 50.
+    // 50 is the static floor; read the live quota with
+    // connectors.instagram.fetchPublishingLimit() before each publish.
+    limits: { perDay: 50, perHour: 10, runtimeLimit: 'content_publishing_limit', note: 'Docs say both 100 and 50 API-published posts per 24 h; read content_publishing_limit at runtime' },
+    aiLabel: 'is_ai_generated',
     requiresPlatformAudit: false,
     endpointsVerified: true,
     docs: 'https://developers.facebook.com/docs/instagram-platform/content-publishing',
@@ -80,16 +101,25 @@ const PLATFORMS = Object.freeze({
     label: 'Reddit',
     aliases: [],
     region: 'global',
-    publishMode: PUBLISH_MODES.API_DIRECT,
-    auth: { kind: 'oauth2', scopes: ['identity', 'submit', 'read', 'flair'] },
+    // The Data API is closing to anyone without an approved app: new OAuth
+    // tokens need approval since 2025-11 (Responsible Builder Policy), access
+    // for unregistered apps is removed from 2027-01-12 and the remaining
+    // public access ends March 2027 (r/redditdev announcement). So publish()
+    // produces a paste package and a human posts. The OAuth provider and the
+    // read helpers (rules, metrics) stay for hosts that still hold an approved
+    // app; connector.submit() is the direct API post for those hosts only.
+    publishMode: PUBLISH_MODES.MANUAL_PACKAGE,
+    auth: { kind: 'oauth2', scopes: ['identity', 'submit', 'read', 'flair'], note: 'Only for the read helpers and submit() on an approved app; publish() needs no credentials' },
     text: { maxLength: 40000, titleMaxLength: 300, supportsThread: false, hashtagsInText: false },
     media: { image: true, video: true, linkPosts: true },
-    metrics: { readsOwn: 'yes', note: 'score / num_comments / upvote_ratio via /api/info' },
+    metrics: { readsOwn: 'yes', note: 'score / num_comments / upvote_ratio via /api/info (approved apps only)' },
     limits: { perDay: 3, perHour: 1, note: 'Community-governed; contribution ratio and subreddit rules apply (community/playbook)' },
     requiresPlatformAudit: false,
+    // Refers to the retained API helpers (submit / rules / metrics).
     endpointsVerified: true,
-    docs: 'https://www.reddit.com/dev/api/#POST_api_submit',
-    credentialShape: ['accessToken'],
+    docs: 'https://developers.reddit.com/app-registration',
+    notes: ['No new self-serve API access; a written agreement with Reddit is the only way to keep posting through the API after March 2027'],
+    credentialShape: [],
   },
   youtube: {
     id: 'youtube',
@@ -101,7 +131,21 @@ const PLATFORMS = Object.freeze({
     text: { maxLength: 5000, titleMaxLength: 100, supportsThread: false, hashtagsInText: true, tagsTotalMaxLength: 500 },
     media: { image: false, video: true, requiresMedia: true, shortsMaxSeconds: 180 },
     metrics: { readsOwn: 'yes', note: 'videos.list statistics (1 quota unit)' },
-    limits: { perDay: 6, perHour: 2, quotaUnitsPerDay: 10000, quotaUnitsPerUpload: 1600, note: 'Default 10,000 units/day; videos.insert ≈ 1,600 units' },
+    // Since 2026-06-01 videos.insert draws on its own bucket (default 100
+    // calls per project per day, 1 unit each) instead of costing ~1,600 of the
+    // shared 10,000 units. Every other call still shares the 10,000.
+    // The bucket belongs to the Google Cloud PROJECT, not the channel: perDay
+    // is the ceiling for all channels connected through one project together.
+    limits: {
+      perDay: 100,
+      perHour: 10,
+      uploadQuotaBucket: 'video_uploads',
+      uploadsPerDay: 100,
+      quotaUnitsPerUpload: 1,
+      quotaUnitsPerDay: 10000,
+      note: 'Uploads: separate bucket, 100 videos.insert per project per day by default; other calls share 10,000 units/day',
+    },
+    aiLabel: 'status.containsSyntheticMedia',
     requiresPlatformAudit: false,
     endpointsVerified: true,
     docs: 'https://developers.google.com/youtube/v3/docs/videos/insert',
@@ -114,12 +158,22 @@ const PLATFORMS = Object.freeze({
     region: 'global',
     publishMode: PUBLISH_MODES.API_DIRECT,
     auth: { kind: 'oauth2_pkce', scopes: ['user.info.basic', 'video.upload', 'video.publish', 'video.list'] },
+    // access_token lives 2 h, refresh_token 180 days, and every refresh hands
+    // back a NEW refresh_token: the host must store it each time, or the old
+    // one stops working at its own expiry.
+    tokens: { accessTokenSeconds: 2 * 3600, refreshTokenSeconds: 180 * 86400, refreshTokenRotates: true },
     text: { maxLength: 2200, titleMaxLength: null, supportsThread: false, hashtagsInText: true },
     media: { image: true, video: true, requiresMedia: true, maxVideoSeconds: 600, photoPosts: true },
     metrics: { readsOwn: 'scoped', note: 'video.list scope → /v2/video/query' },
-    limits: { perDay: 15, perHour: 5, note: 'Content Posting API: 15 posts/24h per user' },
+    // ~15 posts per creator per day is shared across EVERY app the creator
+    // uses, not just this one; the API also caps 6 requests/min per token.
+    limits: { perDay: 15, perHour: 5, requestsPerMinutePerToken: 6, note: 'About 15 posts per creator per 24 h, shared by all apps; 6 requests/min per access token' },
+    aiLabel: 'post_info.is_aigc',
     requiresPlatformAudit: true,
-    auditNote: 'Unaudited apps can only post privacy_level=SELF_ONLY (draft in the app); audit unlocks public posting',
+    // Until the Content Posting audit passes, the connector's
+    // privacy_level=PUBLIC_TO_EVERYONE is refused by the platform.
+    publishModeBeforeAudit: PUBLISH_MODES.API_DRAFT,
+    auditNote: 'Before the Content Posting audit: every post is SELF_ONLY, the posting account itself must be set to private, and at most 5 users can post in 24 h. Audit unlocks public posting',
     endpointsVerified: true,
     docs: 'https://developers.tiktok.com/doc/content-posting-api-reference-direct-post',
     credentialShape: ['accessToken'],

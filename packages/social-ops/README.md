@@ -15,7 +15,7 @@ const so = require('@influencex/social-ops');
 const ops = so.createSocialOps({ fetch });         // deps once
 
 ops.manifest().platforms.map(p => `${p.id}:${p.publishMode}`);
-// x:api_direct instagram:api_direct discord:api_direct reddit:api_direct
+// x:api_direct instagram:api_direct discord:api_direct reddit:manual_package
 // youtube:api_direct tiktok:api_direct xiaohongshu:manual_package
 // wechat_channels:manual_package wechat_mp:api_draft bilibili:api_direct
 // douyin:api_direct kuaishou:api_direct

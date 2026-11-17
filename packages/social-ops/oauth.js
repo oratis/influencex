@@ -15,6 +15,11 @@
 
 const crypto = require('crypto');
 const { resolveDeps, readJson, readErrorText } = require('./result');
+const { PLATFORMS } = require('./capabilities');
+
+// One Graph version for every Instagram call, owned by the capability matrix.
+const GRAPH_VERSION = PLATFORMS.instagram.apiVersion;
+const GRAPH = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
 const PROVIDERS = Object.freeze({
   x: {
@@ -32,8 +37,8 @@ const PROVIDERS = Object.freeze({
     id: 'instagram',
     // Meta Graph via Facebook Login; the IG professional account must be
     // linked to a Facebook Page the user admins.
-    authUrl: 'https://www.facebook.com/v21.0/dialog/oauth',
-    tokenUrl: 'https://graph.facebook.com/v21.0/oauth/access_token',
+    authUrl: `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`,
+    tokenUrl: `${GRAPH}/oauth/access_token`,
     userInfoUrl: null,
     defaultScope: 'instagram_basic,instagram_content_publish,instagram_manage_insights,pages_show_list,pages_read_engagement',
     usesPKCE: false,
@@ -233,6 +238,8 @@ async function exchangeCode(providerName, { clientId, clientSecret, code, redire
     accessToken: data.access_token,
     refreshToken: data.refresh_token || null,
     expiresIn: data.expires_in != null ? Number(data.expires_in) : null,
+    // TikTok / 抖音 report the refresh token's own lifetime (TikTok: 180 days).
+    refreshExpiresIn: data.refresh_expires_in != null ? Number(data.refresh_expires_in) : null,
     scope: data.scope || p.defaultScope,
     tokenType: data.token_type || 'Bearer',
     account: { id: null, name: null },
@@ -260,7 +267,7 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
     if (p.id === 'instagram') {
       // short-lived user token → long-lived → Page → instagram_business_account
       const ll = await deps.fetch(
-        `https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&fb_exchange_token=${encodeURIComponent(result.accessToken)}`,
+        `${GRAPH}/oauth/access_token?grant_type=fb_exchange_token&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&fb_exchange_token=${encodeURIComponent(result.accessToken)}`,
       );
       if (ll.ok) {
         const j = await readJson(ll);
@@ -270,7 +277,7 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
         }
       }
       const pages = await deps.fetch(
-        `https://graph.facebook.com/v21.0/me/accounts?fields=id,name,access_token,instagram_business_account&access_token=${encodeURIComponent(result.accessToken)}`,
+        `${GRAPH}/me/accounts?fields=id,name,access_token,instagram_business_account&access_token=${encodeURIComponent(result.accessToken)}`,
       );
       if (pages.ok) {
         const j = await readJson(pages);
@@ -281,7 +288,7 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
           result.account.name = linked.name || null;
           result.metadata = { ...result.metadata, pageId: linked.id, pageName: linked.name, igUserId: linked.instagram_business_account.id };
           const ig = await deps.fetch(
-            `https://graph.facebook.com/v21.0/${encodeURIComponent(result.account.id)}?fields=username&access_token=${encodeURIComponent(result.accessToken)}`,
+            `${GRAPH}/${encodeURIComponent(result.account.id)}?fields=username&access_token=${encodeURIComponent(result.accessToken)}`,
           );
           if (ig.ok) {
             const u = await readJson(ig);
@@ -346,6 +353,7 @@ async function refreshAccessToken(providerName, { clientId, clientSecret, refres
     accessToken: data.access_token,
     refreshToken: data.refresh_token || refreshToken,
     expiresIn: data.expires_in != null ? Number(data.expires_in) : null,
+    refreshExpiresIn: data.refresh_expires_in != null ? Number(data.refresh_expires_in) : null,
     scope: data.scope || null,
     tokenType: data.token_type || 'Bearer',
   };

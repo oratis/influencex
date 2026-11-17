@@ -8,15 +8,21 @@
  *
  * Thread semantics: `text` is the first post; each entry of `threadParts` is
  * posted as a reply to the previous one. Media (≤4 images or 1 video) attach
- * to the FIRST post only. Free-tier tokens are write-only, so fetchMetrics
- * returns `available: false` on 402/403 instead of failing the run.
+ * to the FIRST post only.
+ *
+ * Billing: the X API is pay-per-use (capabilities.x.pricing) — every post,
+ * and every read of our own posts, is charged to the developer account. A
+ * post containing a URL costs ~13× a plain one. fetchMetrics therefore costs
+ * money too, and returns `available: false` on 402/403/429 (no credits, no
+ * access, throttled) instead of failing the run. X has no AI-content field;
+ * disclose in the text.
  */
 
 const { PLATFORMS } = require('../capabilities');
 const { ok, fail, httpFailure, readJson, resolveDeps, fetchBinary } = require('../result');
 
 const API = 'https://api.x.com/2';
-const MEDIA_CHUNK = 4 * 1024 * 1024; // 4 MiB, under the 5 MiB APPEND cap
+const MEDIA_CHUNK = 4 * 1024 * 1024; // 4 MiB, under the 5 MB per-segment guidance
 
 function validate(payload = {}) {
   const errors = [];
@@ -38,39 +44,47 @@ function mediaCategory(contentType) {
   return 'tweet_image';
 }
 
-/** v2 media upload: INIT → APPEND(chunks) → FINALIZE (→ poll STATUS for video). */
+/**
+ * v2 media upload on the dedicated endpoints:
+ *   POST /2/media/upload/initialize        (JSON)       → data.id
+ *   POST /2/media/upload/{id}/append       (multipart)  one per segment
+ *   POST /2/media/upload/{id}/finalize                  → data.processing_info
+ *   GET  /2/media/upload?command=STATUS&media_id={id}   until succeeded (video)
+ * The older single-URL form (command=INIT/APPEND/FINALIZE posted to
+ * /2/media/upload) is not used.
+ */
 async function uploadMedia(accessToken, url, deps) {
   const bin = await fetchBinary(url, deps);
   if (bin.error) return { error: bin.error };
   const auth = { Authorization: `Bearer ${accessToken}` };
 
-  const init = new URLSearchParams({
-    command: 'INIT',
-    media_type: bin.contentType,
-    total_bytes: String(bin.buffer.length),
-    media_category: mediaCategory(bin.contentType),
+  const initRes = await deps.fetch(`${API}/media/upload/initialize`, {
+    method: 'POST',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      media_type: bin.contentType,
+      total_bytes: bin.buffer.length,
+      media_category: mediaCategory(bin.contentType),
+    }),
   });
-  const initRes = await deps.fetch(`${API}/media/upload`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/x-www-form-urlencoded' }, body: init.toString() });
-  if (!initRes.ok) return { error: (await httpFailure('X media INIT', initRes)).error };
+  if (!initRes.ok) return { error: (await httpFailure('X media initialize', initRes)).error };
   const initJson = await readJson(initRes);
-  const mediaId = (initJson && (initJson.data ? initJson.data.id : initJson.media_id_string || initJson.media_id)) || null;
-  if (!mediaId) return { error: 'X media INIT returned no media id' };
+  const mediaId = (initJson && initJson.data && initJson.data.id) || null;
+  if (!mediaId) return { error: 'X media initialize returned no media id' };
+  const base = `${API}/media/upload/${encodeURIComponent(mediaId)}`;
 
   for (let offset = 0, segment = 0; offset < bin.buffer.length; offset += MEDIA_CHUNK, segment++) {
     const form = new FormData();
-    form.set('command', 'APPEND');
-    form.set('media_id', String(mediaId));
     form.set('segment_index', String(segment));
     form.set('media', new Blob([bin.buffer.subarray(offset, offset + MEDIA_CHUNK)], { type: bin.contentType }), 'chunk');
-    const appendRes = await deps.fetch(`${API}/media/upload`, { method: 'POST', headers: auth, body: form });
-    if (!appendRes.ok) return { error: (await httpFailure('X media APPEND', appendRes)).error };
+    const appendRes = await deps.fetch(`${base}/append`, { method: 'POST', headers: auth, body: form });
+    if (!appendRes.ok) return { error: (await httpFailure('X media append', appendRes)).error };
   }
 
-  const fin = new URLSearchParams({ command: 'FINALIZE', media_id: String(mediaId) });
-  const finRes = await deps.fetch(`${API}/media/upload`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/x-www-form-urlencoded' }, body: fin.toString() });
-  if (!finRes.ok) return { error: (await httpFailure('X media FINALIZE', finRes)).error };
+  const finRes = await deps.fetch(`${base}/finalize`, { method: 'POST', headers: auth });
+  if (!finRes.ok) return { error: (await httpFailure('X media finalize', finRes)).error };
   const finJson = await readJson(finRes);
-  const processing = finJson && (finJson.data ? finJson.data.processing_info : finJson.processing_info);
+  const processing = finJson && finJson.data ? finJson.data.processing_info : null;
 
   // Video is transcoded asynchronously; poll until succeeded (bounded).
   let waited = 0;
@@ -84,7 +98,7 @@ async function uploadMedia(accessToken, url, deps) {
     const st = await deps.fetch(`${API}/media/upload?command=STATUS&media_id=${encodeURIComponent(mediaId)}`, { headers: auth });
     if (!st.ok) return { error: (await httpFailure('X media STATUS', st)).error };
     const stJson = await readJson(st);
-    info = stJson && (stJson.data ? stJson.data.processing_info : stJson.processing_info);
+    info = stJson && stJson.data ? stJson.data.processing_info : null;
   }
   return { mediaId: String(mediaId) };
 }

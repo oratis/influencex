@@ -4,16 +4,23 @@
  * Instagram connector — Content Publishing API (Graph), image posts and Reels.
  *
  * credentials: { accessToken, igUserId }   (Page token + IG professional user id)
- * payload:     { text (caption), imageUrl? | videoUrl?, coverUrl?, shareToFeed? }
+ * payload:     { text (caption), imageUrl? | videoUrl?, coverUrl?, shareToFeed?, aiGenerated? }
  *
  * Two-step container → publish. Reels containers transcode asynchronously, so
  * the connector polls the container status (bounded) before publishing.
+ *
+ * `aiGenerated` (boolean) is sent as is_ai_generated on the container, Meta's
+ * AI-generated label; omitted, the field is not sent.
+ *
+ * Daily cap: Meta's docs disagree (100 vs 50 per 24 h), so hosts should call
+ * fetchPublishingLimit() before each publish instead of trusting
+ * capabilities.instagram.limits.perDay, which is only the static floor.
  */
 
 const { PLATFORMS } = require('../capabilities');
 const { ok, fail, httpFailure, readJson, resolveDeps } = require('../result');
 
-const GRAPH = 'https://graph.facebook.com/v21.0';
+const GRAPH = `https://graph.facebook.com/${PLATFORMS.instagram.apiVersion}`;
 
 function validate(payload = {}) {
   const errors = [];
@@ -59,6 +66,7 @@ async function publish(credentials, payload = {}, depsIn) {
   } else {
     createParams.set('image_url', payload.imageUrl);
   }
+  if (typeof payload.aiGenerated === 'boolean') createParams.set('is_ai_generated', String(payload.aiGenerated));
 
   const createRes = await deps.fetch(`${GRAPH}/${encodeURIComponent(igUserId)}/media`, { method: 'POST', body: createParams });
   if (!createRes.ok) return httpFailure('Instagram create', createRes);
@@ -94,6 +102,30 @@ async function publish(credentials, payload = {}, depsIn) {
   return ok({ externalId: mediaId || null, url, status: 'published' });
 }
 
+/**
+ * Read the account's live publishing quota (GET /{ig-user-id}/content_publishing_limit).
+ * Returns ok({ used, total, windowSeconds, remaining }); `total` / `remaining`
+ * are null when Meta leaves the config out. A read, never a write.
+ */
+async function fetchPublishingLimit(credentials, depsIn) {
+  const deps = resolveDeps(depsIn);
+  const accessToken = credentials && credentials.accessToken;
+  const igUserId = credentials && credentials.igUserId;
+  if (!igUserId) return fail('Instagram connection missing ig_user_id (reconnect account)', { kind: 'auth' });
+  if (!accessToken) return fail('instagram: accessToken is required', { kind: 'auth' });
+  const res = await deps.fetch(`${GRAPH}/${encodeURIComponent(igUserId)}/content_publishing_limit?fields=config,quota_usage&access_token=${encodeURIComponent(accessToken)}`);
+  if (!res.ok) return httpFailure('Instagram publishing limit', res);
+  const j = await readJson(res);
+  // The reference shows the row inside `data: [...]`; accept a bare object too.
+  const row = (j && Array.isArray(j.data) ? j.data[0] : j) || {};
+  const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const used = num(row.quota_usage);
+  const total = num(row.config && row.config.quota_total);
+  const windowSeconds = num(row.config && row.config.quota_duration);
+  if (used == null) return fail('Instagram publishing limit: response had no quota_usage', { kind: 'server' });
+  return ok({ used, total, windowSeconds, remaining: total == null ? null : Math.max(0, total - used) });
+}
+
 async function fetchMetrics(credentials, externalId, depsIn) {
   const deps = resolveDeps(depsIn);
   const accessToken = credentials && credentials.accessToken;
@@ -121,4 +153,4 @@ async function fetchMetrics(credentials, externalId, depsIn) {
   };
 }
 
-module.exports = { platform: 'instagram', capabilities: PLATFORMS.instagram, validate, publish, fetchMetrics };
+module.exports = { platform: 'instagram', capabilities: PLATFORMS.instagram, validate, publish, fetchMetrics, fetchPublishingLimit };

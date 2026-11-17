@@ -520,7 +520,10 @@ async function publishTikTok(accessToken, { text, videoUrl }) {
 }
 
 async function publishReddit(accessToken, { text, title, subreddit }) {
-  return legacyResult(await socialOps.connectors.getConnector('reddit').publish({ accessToken }, { text, title, subreddit }, SOCIAL_OPS_DEPS));
+  // The connector's publish() is now a manual package (no approved-app API
+  // access after 2027); this OAuth flow keeps posting through submit() while
+  // the connected app still has access.
+  return legacyResult(await socialOps.connectors.getConnector('reddit').submit({ accessToken }, { text, title, subreddit }, SOCIAL_OPS_DEPS));
 }
 
 async function publishLinkedIn(accessToken, { text }) {
