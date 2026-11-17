@@ -53,7 +53,7 @@ test('limits table (2026-11 re-check): X pay-per-use, IG v26 + runtime cap, YouT
 
   const yt = so.capabilities.getPlatform('youtube');
   assert.equal(yt.limits.uploadQuotaBucket, 'video_uploads');
-  assert.equal(yt.limits.uploadsPerDay, 100);
+  assert.equal(yt.limits.projectUploadsPerDay, 100);
   assert.equal(yt.limits.quotaUnitsPerUpload, 1);
   assert.equal(yt.aiLabel, 'status.containsSyntheticMedia');
 

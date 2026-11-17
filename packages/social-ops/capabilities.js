@@ -131,19 +131,22 @@ const PLATFORMS = Object.freeze({
     text: { maxLength: 5000, titleMaxLength: 100, supportsThread: false, hashtagsInText: true, tagsTotalMaxLength: 500 },
     media: { image: false, video: true, requiresMedia: true, shortsMaxSeconds: 180 },
     metrics: { readsOwn: 'yes', note: 'videos.list statistics (1 quota unit)' },
-    // Since 2026-06-01 videos.insert draws on its own bucket (default 100
-    // calls per project per day, 1 unit each) instead of costing ~1,600 of the
-    // shared 10,000 units. Every other call still shares the 10,000.
-    // The bucket belongs to the Google Cloud PROJECT, not the channel: perDay
-    // is the ceiling for all channels connected through one project together.
+    // perDay / perHour are PER CHANNEL, like every other platform's (matrix
+    // policy gives each account its own perDay), and stay at the old pacing.
+    // The platform quota is a different thing: since 2026-06-01 videos.insert
+    // draws on its own bucket — 100 calls per Google Cloud PROJECT per day by
+    // default, 1 unit each — instead of ~1,600 of the shared 10,000 units.
+    // That bucket is shared by every channel uploading through the same
+    // project, so the host counts it per project (projectUploadsPerDay), not
+    // per channel. Every other call still shares the 10,000 units.
     limits: {
-      perDay: 100,
-      perHour: 10,
+      perDay: 6,
+      perHour: 2,
       uploadQuotaBucket: 'video_uploads',
-      uploadsPerDay: 100,
+      projectUploadsPerDay: 100,
       quotaUnitsPerUpload: 1,
       quotaUnitsPerDay: 10000,
-      note: 'Uploads: separate bucket, 100 videos.insert per project per day by default; other calls share 10,000 units/day',
+      note: 'perDay is per-channel pacing. Uploads draw on a separate per-project bucket (100 videos.insert per project per day by default, shared by all channels on the project); other calls share 10,000 units/day',
     },
     aiLabel: 'status.containsSyntheticMedia',
     requiresPlatformAudit: false,

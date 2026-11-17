@@ -54,7 +54,7 @@
 | Instagram | api_direct | Meta Graph v26.0（Facebook Login，需 Business + FB Page） | 2200，≤30 话题 | 图 / Reels（3 秒–15 分钟、≤300 MB），**必须有媒体**；`aiGenerated` → `is_ai_generated` | ✅ Insights | 50（静态下限；官方文档 100 / 50 两说，发前用 `fetchPublishingLimit()` 读 `content_publishing_limit`） | 否 | ✅ |
 | Discord | api_direct | Bot token 或 Webhook | 2000（embed 4096） | 附件 ≤10 | Bot 能读反应 | 200 | 否 | ✅ |
 | Reddit | **manual_package** | 不需要（`submit()` / 读接口仍用 OAuth2，仅限已获批应用） | 标题 300 / 正文 40000 | 图 / 视频 / 链接 | 仅已获批应用 | 3（社群纪律另计） | 否 | ✅（API 辅助函数） |
-| YouTube | api_direct | Google OAuth | 标题 100 / 描述 5000 | 视频 only；`aiGenerated` → `status.containsSyntheticMedia` | ✅ | 100（上传独立配额桶，按项目算，每次 1 单位；其余调用共用 10000 单位） | 否 | ✅ |
+| YouTube | api_direct | Google OAuth | 标题 100 / 描述 5000 | 视频 only；`aiGenerated` → `status.containsSyntheticMedia` | ✅ | 6（每个频道的节奏）；平台配额另算：上传走独立配额桶，**按 Google 项目**每天 100 次、每次 1 单位，同项目所有频道共用（`limits.projectUploadsPerDay`），其余调用共用 10000 单位 | 否 | ✅ |
 | TikTok | api_direct（过审前实际是 api_draft） | OAuth2 PKCE；access 2 小时，refresh 180 天、**每次刷新都换新** | 2200 | 视频 / 图文；`aiGenerated` → `post_info.is_aigc` | 需 `video.list` | 15（每个创作者所有应用合计）；每令牌每分钟 6 次 | **是**（过审前：帖子只能 SELF_ONLY、发帖账号须设私密、24 小时最多 5 个用户） | ✅ |
 | 小红书 | manual_package | — | 标题 20 / 正文 1000 / ≤10 话题 | 图 ≤18（3:4）/ 视频 | 无 | 3 | — | — |
 | 微信视频号 | manual_package | — | 1000 | 视频 + 封面 1080×1260 | 无 | 3 | — | — |
