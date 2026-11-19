@@ -26,12 +26,43 @@ test('every platform declares a valid publish mode, auth kind, limits and docs',
   }
 });
 
-test('manual_package platforms are exactly 小红书 + 视频号, and need no credentials', () => {
+test('manual_package platforms are exactly Reddit + 小红书 + 视频号, and need no credentials', () => {
   const manual = so.capabilities.platformsByMode('manual_package').map((p) => p.id);
-  assert.deepEqual(manual, ['xiaohongshu', 'wechat_channels']);
+  assert.deepEqual(manual, ['reddit', 'xiaohongshu', 'wechat_channels']);
   for (const id of manual) assert.deepEqual(so.capabilities.getPlatform(id).credentialShape, []);
   assert.equal(so.capabilities.hasWriteApi('xiaohongshu'), false);
+  assert.equal(so.capabilities.hasWriteApi('reddit'), false);
   assert.equal(so.capabilities.hasWriteApi('x'), true);
+});
+
+test('limits table (2026-11 re-check): X pay-per-use, IG v26 + runtime cap, YouTube upload bucket, TikTok tokens', () => {
+  const x = so.capabilities.getPlatform('x');
+  assert.equal(x.pricing.model, 'pay_per_use');
+  assert.equal(x.pricing.perPost, 0.015);
+  assert.equal(x.pricing.perPostWithUrl, 0.2);
+  assert.equal(x.pricing.perOwnedRead, 0.001);
+  // tweet_video: 20 min by default, not the 140 s DM limit.
+  assert.equal(x.media.maxVideoSeconds, 1200);
+  assert.ok(x.media.premiumMaxVideoSeconds > x.media.maxVideoSeconds);
+
+  const ig = so.capabilities.getPlatform('instagram');
+  assert.equal(ig.apiVersion, 'v26.0');
+  assert.equal(ig.limits.runtimeLimit, 'content_publishing_limit');
+  assert.equal(ig.limits.perDay, 50);
+  assert.equal(ig.aiLabel, 'is_ai_generated');
+
+  const yt = so.capabilities.getPlatform('youtube');
+  assert.equal(yt.limits.uploadQuotaBucket, 'video_uploads');
+  assert.equal(yt.limits.projectUploadsPerDay, 100);
+  assert.equal(yt.limits.quotaUnitsPerUpload, 1);
+  assert.equal(yt.aiLabel, 'status.containsSyntheticMedia');
+
+  const tt = so.capabilities.getPlatform('tiktok');
+  assert.deepEqual(tt.tokens, { accessTokenSeconds: 7200, refreshTokenSeconds: 180 * 86400, refreshTokenRotates: true });
+  assert.equal(tt.aiLabel, 'post_info.is_aigc');
+  assert.equal(tt.publishModeBeforeAudit, 'api_draft');
+  assert.match(tt.auditNote, /SELF_ONLY/);
+  assert.match(tt.auditNote, /private/);
 });
 
 test('公众号 is draft-first (api_draft)', () => {
@@ -79,6 +110,18 @@ test('manifest is serialisable, holds no credentials, and lists refusals with al
   for (const must of ['bot_account_farms', 'mass_mailbox_registration', 'cold_dm_automation', 'headless_browser_login']) assert.ok(ids.includes(must), must);
   assert.deepEqual(m.capabilities.oauth, ['x', 'instagram', 'youtube', 'tiktok', 'reddit', 'douyin', 'kuaishou', 'bilibili']);
   assert.equal(typeof m.version, 'string');
+  const byId = Object.fromEntries(m.platforms.map((p) => [p.id, p]));
+  assert.equal(byId.x.pricing.model, 'pay_per_use');
+  assert.equal(byId.discord.pricing, null);
+  assert.equal(byId.tiktok.tokens.refreshTokenRotates, true);
+  assert.equal(byId.tiktok.publishModeBeforeAudit, 'api_draft');
+  assert.equal(byId.x.publishModeBeforeAudit, null);
+  assert.equal(byId.instagram.aiLabel, 'is_ai_generated');
+  assert.equal(byId.x.aiLabel, null);
+  assert.equal(byId.instagram.apiVersion, 'v26.0');
+  assert.equal(byId.reddit.publishMode, 'manual_package');
+  // Reddit stays an OAuth provider for the read helpers and submit() on an approved app.
+  assert.equal(byId.reddit.oauth, true);
 });
 
 test('createSocialOps binds deps and refuses unknown platforms as results, not throws', async () => {

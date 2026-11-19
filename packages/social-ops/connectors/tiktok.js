@@ -4,13 +4,24 @@
  * TikTok connector — Content Posting API (Direct Post, PULL_FROM_URL).
  *
  * credentials: { accessToken }
- * payload:     { text (title/caption), videoUrl, privacyLevel?, disableComment?, disableDuet?, disableStitch?, coverTimestampMs? }
+ * payload:     { text (title/caption), videoUrl, privacyLevel?, disableComment?, disableDuet?, disableStitch?, coverTimestampMs?, aiGenerated? }
  *
- * Unaudited apps may only post `SELF_ONLY`: the video lands as a private draft
- * the account holder makes public in the app. That is the default here, so a
- * host that has NOT passed audit still gets a working (draft) flow, and one
- * that has passes `privacyLevel: 'PUBLIC_TO_EVERYONE'` explicitly. The
- * `video_url` domain must be verified in the developer portal.
+ * Before the app passes the Content Posting audit, every post is `SELF_ONLY`,
+ * the posting account itself must be set to private, and at most 5 users can
+ * post through the app in 24 h. `SELF_ONLY` is the default here, so a host
+ * that has NOT passed audit still gets a working (private) flow, and one that
+ * has passes `privacyLevel: 'PUBLIC_TO_EVERYONE'` explicitly. The platform
+ * expects the privacy options to come from /v2/post/publish/creator_info/query/
+ * first; this connector does not call it yet. The `video_url` domain must be
+ * verified in the developer portal.
+ *
+ * `aiGenerated` (boolean) is sent as post_info.is_aigc, TikTok's AI-generated
+ * content label; omitted, the field is not sent.
+ *
+ * Tokens: access_token lives 2 h; the refresh_token lives 180 days and is
+ * replaced on EVERY refresh (see capabilities.tiktok.tokens). This connector
+ * only uses the access token; refreshing and storing the new pair is the
+ * host's job.
  */
 
 const { PLATFORMS } = require('../capabilities');
@@ -42,6 +53,7 @@ async function publish(credentials, payload = {}, depsIn) {
       disable_duet: payload.disableDuet === true,
       disable_stitch: payload.disableStitch === true,
       disable_comment: payload.disableComment === true,
+      ...(typeof payload.aiGenerated === 'boolean' ? { is_aigc: payload.aiGenerated } : {}),
       ...(payload.coverTimestampMs != null ? { video_cover_timestamp_ms: payload.coverTimestampMs } : {}),
     },
     source_info: { source: 'PULL_FROM_URL', video_url: payload.videoUrl },

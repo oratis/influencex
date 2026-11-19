@@ -5,12 +5,22 @@
  * vertical uploads ≤ 3 min; the platform classifies them).
  *
  * credentials: { accessToken }
- * payload:     { title, text (description), videoUrl, tags?, privacyStatus?, categoryId?, publishAt?, madeForKids? }
+ * payload:     { title, text (description), videoUrl, tags?, privacyStatus?, categoryId?, publishAt?, madeForKids?, aiGenerated? }
  *
  * Privacy defaults to `private` so a human can verify before the video is
- * public; hosts opt into 'public' explicitly. `publishAt` (ISO) uses the
- * platform's own scheduler — when set, privacyStatus is forced to private as
- * the API requires.
+ * public; hosts opt into 'public' explicitly. (Since 2026-11-02 YouTube no
+ * longer forces uploads from unverified projects to private, so this default
+ * is the only thing keeping a fresh upload private.) `publishAt` (ISO) uses
+ * the platform's own scheduler — when set, privacyStatus is forced to private
+ * as the API requires.
+ *
+ * `aiGenerated` (boolean) is sent as status.containsSyntheticMedia, YouTube's
+ * altered-or-synthetic-content disclosure; omitted, the field is not sent.
+ *
+ * Quota: since 2026-06-01 videos.insert is billed to a separate upload bucket
+ * (default 100 per project per day, 1 unit each), so publish() reports
+ * quotaBucket 'video_uploads' and the host must count it apart from the
+ * shared 10,000-unit bucket that fetchMetrics() draws on.
  */
 
 const { PLATFORMS } = require('../capabilities');
@@ -53,6 +63,7 @@ async function publish(credentials, payload = {}, depsIn) {
     status: {
       privacyStatus: scheduled ? 'private' : (payload.privacyStatus || 'private'),
       selfDeclaredMadeForKids: payload.madeForKids === true,
+      ...(typeof payload.aiGenerated === 'boolean' ? { containsSyntheticMedia: payload.aiGenerated } : {}),
       ...(scheduled ? { publishAt: payload.publishAt } : {}),
     },
   };
@@ -84,6 +95,7 @@ async function publish(credentials, payload = {}, depsIn) {
     url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
     status: metadata.status.privacyStatus === 'public' ? 'published' : (scheduled ? 'scheduled' : 'draft'),
     privacyStatus: metadata.status.privacyStatus,
+    quotaBucket: PLATFORMS.youtube.limits.uploadQuotaBucket,
     quotaUnits: PLATFORMS.youtube.limits.quotaUnitsPerUpload,
   });
 }

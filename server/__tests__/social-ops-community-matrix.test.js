@@ -96,3 +96,16 @@ test('matrix: stagger spreads posts round-robin with gaps and per-account daily 
   assert.equal(matrix.dailyCapFor('x'), 50);
   assert.equal(matrix.dailyCapFor('x', 5), 5);
 });
+
+test('matrix: YouTube perDay is per-channel pacing; the per-project upload bucket is not handed to each channel', () => {
+  const yt = require('../../packages/social-ops').capabilities.getPlatform('youtube');
+  assert.equal(matrix.dailyCapFor('youtube'), yt.limits.perDay);
+  assert.ok(yt.limits.perDay < yt.limits.projectUploadsPerDay);
+  // Three channels uploading through one project, default 30-min gap.
+  const items = Array.from({ length: 120 }, (_, i) => ({ id: `v${i}` }));
+  const accounts = ['a', 'b', 'c'].map((id) => ({ id, platform: 'youtube' }));
+  const { assignments, unscheduled } = matrix.planStagger(items, accounts, { startAt: '2026-11-17T00:00:00Z' });
+  assert.equal(assignments.length, 3 * yt.limits.perDay);
+  assert.ok(assignments.length <= yt.limits.projectUploadsPerDay);
+  assert.equal(unscheduled.length, 120 - assignments.length);
+});

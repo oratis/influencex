@@ -169,6 +169,10 @@ Cuddler（私有仓）和本仓联合建社媒运营能力，分工是：**Cuddl
   「30 个文件全在、一个都解析不到」，而本地 vitest / tsc / next build 全绿，
   只在生产以「每次调用 503」出现。宿主那边为此单加了一条 CI 策略闸。
 
+**2026-11-17 补记——限额表复核（Cuddler #8108）后两条容易踩的事**：
+- **Reddit connector 的 `publish()` 不再发帖**，只出物料包（`manual_package`，不碰网络、不要凭据）；直连 `/api/submit` 改名 `submit()`，只给手里还有获批 Reddit 应用的宿主用。本仓 `publishReddit` 与 `community.promoteOnReddit` / `contributeOnReddit` 已改调 `submit()`。宿主若按 `manifest()` 把 manual 渠道的凭据传 `null`，Reddit 也要进它的 manual 名单。
+- 限额表里的平台数字一律以官方开发者文档为准，按季度复核；只有第三方说法的标 `UNVERIFIED`。Instagram 的每日上限官方两处说法打架（100 / 50），宿主发前调 `connectors.instagram.fetchPublishingLimit()` 读实时配额，不要信静态的 `limits.perDay`。
+
 ---
 
 ## 4. 配置陷阱

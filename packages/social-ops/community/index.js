@@ -17,6 +17,8 @@ const UNSUPPORTED = Object.freeze(['dm.cold_outbound', 'accounts.bulk_create', '
 /**
  * Post a PROMOTIONAL piece to a subreddit, but only after: contribution ratio
  * ≥ 7:1, cooldown elapsed, subreddit rules do not forbid it, disclosure added.
+ * Posts through the direct API (reddit.submit), so it needs an approved Reddit
+ * app; without one, use the connector's publish() package and post by hand.
  */
 async function promoteOnReddit(credentials, { subreddit, title, text, link, flairId, ledger, brand, role, locale, playbookOpts }, depsIn) {
   const deps = resolveDeps(depsIn);
@@ -26,7 +28,7 @@ async function promoteOnReddit(credentials, { subreddit, title, text, link, flai
   const decision = playbook.canPromote(ledger, subreddit, { ...(playbookOpts || {}), rulesAssessment: assessment });
   if (!decision.allowed) return fail(decision.reason, { kind: 'policy', decision, assessment });
   const body = link ? text : playbook.buildDisclosedPost(text, { brand, role, locale });
-  const r = await reddit.publish(credentials, { subreddit, title, text: link ? undefined : body, link, flairId }, deps);
+  const r = await reddit.submit(credentials, { subreddit, title, text: link ? undefined : body, link, flairId }, deps);
   if (r.success) ledger.record(subreddit, 'promotion', deps.now().toISOString());
   return { ...r, decision, assessment };
 }
@@ -36,7 +38,7 @@ async function contributeOnReddit(credentials, { subreddit, title, text, parentF
   const deps = resolveDeps(depsIn);
   const r = parentFullname
     ? await reddit.comment(credentials, { parentFullname, text }, deps)
-    : await reddit.publish(credentials, { subreddit, title, text }, deps);
+    : await reddit.submit(credentials, { subreddit, title, text }, deps);
   if (r.success && ledger) ledger.record(subreddit, 'contribution', deps.now().toISOString());
   return r;
 }
