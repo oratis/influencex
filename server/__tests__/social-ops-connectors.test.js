@@ -451,3 +451,103 @@ test('oauth: instagram identity resolution uses the matrix Graph version on ever
   assert.equal(s.calls.length, 4);
   for (const call of s.calls) assert.ok(call.url.startsWith('https://graph.facebook.com/v26.0/'), call.url);
 });
+
+const IG_EXCHANGE = { clientId: 'cid', clientSecret: 'CLIENT-SECRET-1', code: 'AUTH-CODE-1', redirectUri: 'https://cuddler.ai/cb' };
+const igTokenSteps = () => [
+  { body: { access_token: 'SHORT-TOKEN-1', token_type: 'bearer' } },
+  { body: { access_token: 'LONG-TOKEN-1', expires_in: 5183944 } },
+];
+function assertNoSecrets(issue) {
+  const s = JSON.stringify(issue);
+  for (const bad of ['SHORT-TOKEN-1', 'LONG-TOKEN-1', 'CLIENT-SECRET-1', 'AUTH-CODE-1', 'SECRET', 'access_token', 'http']) {
+    assert.ok(!s.includes(bad), `identityIssue leaked ${bad}: ${s}`);
+  }
+}
+
+test('oauth: instagram authorize scope requests business_management alongside the existing permissions', () => {
+  const ig = new URL(so.oauth.buildAuthorizeUrl('instagram', { clientId: 'c', redirectUri: 'https://cuddler.ai/cb' }).url);
+  const scopes = ig.searchParams.get('scope').split(',');
+  for (const want of ['instagram_basic', 'instagram_content_publish', 'instagram_manage_insights', 'pages_show_list', 'pages_read_engagement', 'business_management']) {
+    assert.ok(scopes.includes(want), `missing ${want} in ${scopes}`);
+  }
+});
+
+test('oauth: instagram /me/accounts failure surfaces a graphError identityIssue', async () => {
+  const longMsg = `(#200) ${'x'.repeat(400)}`;
+  const s = scriptedFetch([
+    ...igTokenSteps(),
+    { ok: false, status: 400, body: { error: { message: longMsg, type: 'OAuthException', code: 200, error_subcode: 123 } } },
+  ]);
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.equal(ex.account.id, null);
+  assert.deepEqual(ex.identityIssue, {
+    reason: 'pages_request_failed',
+    httpStatus: 400,
+    graphError: { code: 200, subcode: 123, type: 'OAuthException', message: longMsg.slice(0, 300) },
+    pageCount: null,
+    errorName: null,
+  });
+  assert.equal(ex.identityIssue.graphError.message.length, 300);
+  assertNoSecrets(ex.identityIssue);
+});
+
+test('oauth: instagram /me/accounts failure with a non-Graph body has graphError null and missing fields null', async () => {
+  const html = scriptedFetch([...igTokenSteps(), { ok: false, status: 502, body: '<html>bad gateway</html>' }]);
+  const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, html);
+  assert.deepEqual(a.identityIssue, { reason: 'pages_request_failed', httpStatus: 502, graphError: null, pageCount: null, errorName: null });
+  const partial = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body: { error: { message: 'nope' } } }]);
+  const b = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, partial);
+  assert.deepEqual(b.identityIssue.graphError, { code: null, subcode: null, type: null, message: 'nope' });
+});
+
+test('oauth: instagram with no pages reports no_pages', async () => {
+  const s = scriptedFetch([...igTokenSteps(), { body: { data: [] } }]);
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.equal(ex.account.id, null);
+  assert.deepEqual(ex.identityIssue, { reason: 'no_pages', httpStatus: 200, graphError: null, pageCount: 0, errorName: null });
+  assertNoSecrets(ex.identityIssue);
+});
+
+test('oauth: instagram pages without a linked instagram account report no_linked_instagram', async () => {
+  const s = scriptedFetch([
+    ...igTokenSteps(),
+    { body: { data: [{ id: 'pg-1', name: 'A', access_token: 'PAGE-TOKEN-1' }, { id: 'pg-2', name: 'B', access_token: 'PAGE-TOKEN-2' }] } },
+  ]);
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.equal(ex.account.id, null);
+  assert.deepEqual(ex.identityIssue, { reason: 'no_linked_instagram', httpStatus: 200, graphError: null, pageCount: 2, errorName: null });
+  assertNoSecrets(ex.identityIssue);
+});
+
+test('oauth: instagram lookup that throws reports lookup_failed with the error name only', async () => {
+  const steps = igTokenSteps();
+  let n = 0;
+  const base = scriptedFetch([...steps]);
+  const fetch = async (url, options) => {
+    n += 1;
+    if (n === 3) throw new TypeError(`fetch failed: ${url}&access_token=SECRET`);
+    return base.fetch(url, options);
+  };
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, { fetch });
+  assert.equal(ex.account.id, null);
+  assert.deepEqual(ex.identityIssue, { reason: 'lookup_failed', httpStatus: null, graphError: null, pageCount: null, errorName: 'TypeError' });
+  assertNoSecrets(ex.identityIssue);
+});
+
+test('oauth: instagram linked page resolves the account and leaves identityIssue absent', async () => {
+  const s = scriptedFetch([
+    ...igTokenSteps(),
+    { body: { data: [{ id: 'pg-1', name: 'Cuddler', access_token: 'PAGE-TOKEN-1', instagram_business_account: { id: 'ig-9' } }] } },
+    { body: { username: 'cuddlerai' } },
+  ]);
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.equal(ex.account.id, 'ig-9');
+  assert.equal(ex.accessToken, 'PAGE-TOKEN-1');
+  assert.equal('identityIssue' in ex, false);
+});
+
+test('oauth: non-instagram exchanges never carry identityIssue', async () => {
+  const s = scriptedFetch([{ body: { access_token: 'AT', refresh_token: 'RT', expires_in: 7200 } }, { body: { data: { id: 'u1', username: 'me' } } }]);
+  const ex = await so.oauth.exchangeCode('x', { clientId: 'cid', clientSecret: 'sec', code: 'c', redirectUri: 'https://cuddler.ai/cb', codeVerifier: 'v' }, s);
+  assert.equal('identityIssue' in ex, false);
+});
