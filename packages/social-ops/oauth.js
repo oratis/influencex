@@ -40,7 +40,9 @@ const PROVIDERS = Object.freeze({
     authUrl: `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`,
     tokenUrl: `${GRAPH}/oauth/access_token`,
     userInfoUrl: null,
-    defaultScope: 'instagram_basic,instagram_content_publish,instagram_manage_insights,pages_show_list,pages_read_engagement',
+    // business_management: a Page role granted through a Business Manager assignment can leave the Page,
+    // or its instagram_business_account, out of /me/accounts unless this is granted too.
+    defaultScope: 'instagram_basic,instagram_content_publish,instagram_manage_insights,pages_show_list,pages_read_engagement,business_management',
     usesPKCE: false,
     clientIdParam: 'client_id',
     tokenAuth: 'body',
@@ -215,6 +217,25 @@ async function postToken(p, body, { clientId, clientSecret }, deps) {
  * Exchange the callback `code` for tokens and resolve the connected account's
  * stable id + display handle. Returns a normalised shape; `metadata` carries
  * whatever the connector later needs (ig user id, channel id, open_id…).
+ *
+ * When Instagram resolves no account id the result also carries `identityIssue`
+ * `{ reason, httpStatus, graphError, pageCount, morePages, errorName }` (absent
+ * otherwise, and for other providers). This package is the trust boundary, so
+ * every field is a runtime-validated fact, never raw upstream text:
+ *   - `reason`: `pages_request_failed` (/me/accounts not ok with a real Graph
+ *     error body), `invalid_pages_response` (not ok without a Graph error body,
+ *     or ok but not a pages list), `no_pages` (an empty list), `no_linked_instagram`
+ *     (pages returned, none linked) or `lookup_failed` (a throw).
+ *   - `httpStatus`: integer 100-599 or null.
+ *   - `graphError`: null, or `{ code, subcode, type, message, messageWithheld }`
+ *     (only for a body with an integer `code`). `code` is a safe integer,
+ *     `subcode` a safe integer or null; `type` is an `...Exception`
+ *     class name or null; `message` is Graph's text only when it passes
+ *     `safeGraphMessage`, else null with `messageWithheld: true`.
+ *   - `pageCount`: page objects inspected, or null.
+ *   - `morePages`: true when the first page had `paging.next` (only the first
+ *     page is read, pagination is not followed); null unless the response was ok.
+ *   - `errorName`: an allowlisted error name (see ERROR_NAMES), only for `lookup_failed`.
  */
 async function exchangeCode(providerName, { clientId, clientSecret, code, redirectUri, codeVerifier } = {}, depsIn) {
   const p = getProvider(providerName);
@@ -261,11 +282,65 @@ async function exchangeCode(providerName, { clientId, clientSecret, code, redire
   return result;
 }
 
+const ERROR_NAMES = new Set(['Error', 'TypeError', 'SyntaxError', 'RangeError', 'AbortError', 'TimeoutError', 'FetchError']);
+const GRAPH_TYPE = /^[A-Z][A-Za-z]{0,40}Exception$/;
+
+const isPlainObject = (v) => {
+  if (v === null || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+};
+const safeInt = (n) => (Number.isSafeInteger(n) ? n : null);
+
+/**
+ * Keep a Graph error message only when it reads as plain prose. Graph can echo
+ * request details, and /me/accounts is called with the user's token, so a
+ * message is withheld (null) if the RAW text (before trimming, so padding and a
+ * leading/trailing newline count) is over 300 chars, has a control character,
+ * a URL/query/credential marker (`://` `?` `&` `=` `@`, bearer, access_token,
+ * client_secret), a run of 24+ alphanumerics (tokens, secrets, codes), or any
+ * of `secrets` as a substring. Returns the trimmed text or null.
+ */
+function safeGraphMessage(message, secrets) {
+  if (message.length > 300 || /[\u0000-\u001f\u007f-\u009f]/.test(message)) return null;
+  const text = message.trim();
+  if (!text) return null;
+  if (/:\/\/|[?&=@]|bearer|access_token|client_secret/i.test(text)) return null;
+  if (/[A-Za-z0-9]{24,}/.test(text)) return null;
+  for (const secret of secrets) if (secret && text.includes(secret)) return null;
+  return text;
+}
+
+/**
+ * `{ code, subcode, type, message, messageWithheld }` from a non-ok body, or null
+ * when it is not a Graph error. Only an integer `code` marks a real Graph error:
+ * a proxy or gateway can answer `{"error":{"message":"Forbidden"}}` too.
+ */
+function parseGraphError(body, secrets) {
+  const e = isPlainObject(body) && isPlainObject(body.error) ? body.error : null;
+  if (!e || !Number.isSafeInteger(e.code)) return null;
+  const raw = e.message;
+  const hasMessage = raw !== undefined && raw !== null && raw !== '';
+  const message = typeof raw === 'string' && raw ? safeGraphMessage(raw, secrets) : null;
+  return {
+    code: safeInt(e.code),
+    subcode: safeInt(e.error_subcode),
+    type: typeof e.type === 'string' && GRAPH_TYPE.test(e.type) ? e.type : null,
+    message,
+    messageWithheld: hasMessage && message === null,
+  };
+}
+
+function identityIssue(reason, fields) {
+  return { reason, httpStatus: null, graphError: null, pageCount: null, morePages: null, errorName: null, ...fields };
+}
+
 /** Best-effort identity resolution; a failure here never fails the exchange. */
 async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
   try {
     if (p.id === 'instagram') {
       // short-lived user token → long-lived → Page → instagram_business_account
+      const secrets = [clientSecret, result.accessToken];
       const ll = await deps.fetch(
         `${GRAPH}/oauth/access_token?grant_type=fb_exchange_token&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&fb_exchange_token=${encodeURIComponent(result.accessToken)}`,
       );
@@ -273,28 +348,47 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
         const j = await readJson(ll);
         if (j && j.access_token) {
           result.accessToken = j.access_token;
+          secrets.push(j.access_token);
           if (j.expires_in) result.expiresIn = Number(j.expires_in);
         }
       }
       const pages = await deps.fetch(
         `${GRAPH}/me/accounts?fields=id,name,access_token,instagram_business_account&access_token=${encodeURIComponent(result.accessToken)}`,
       );
-      if (pages.ok) {
-        const j = await readJson(pages);
-        const linked = ((j && j.data) || []).find((pg) => pg.instagram_business_account && pg.instagram_business_account.id);
-        if (linked) {
-          result.accessToken = linked.access_token || result.accessToken;
-          result.account.id = linked.instagram_business_account.id;
-          result.account.name = linked.name || null;
-          result.metadata = { ...result.metadata, pageId: linked.id, pageName: linked.name, igUserId: linked.instagram_business_account.id };
-          const ig = await deps.fetch(
-            `${GRAPH}/${encodeURIComponent(result.account.id)}?fields=username&access_token=${encodeURIComponent(result.accessToken)}`,
-          );
-          if (ig.ok) {
-            const u = await readJson(ig);
-            if (u && u.username) result.account.name = `@${u.username}`;
-          }
+      const httpStatus = Number.isInteger(pages.status) && pages.status >= 100 && pages.status <= 599 ? pages.status : null;
+      const j = await readJson(pages);
+      if (!pages.ok) {
+        const graphError = parseGraphError(j, secrets);
+        result.identityIssue = graphError
+          ? identityIssue('pages_request_failed', { httpStatus, graphError })
+          : identityIssue('invalid_pages_response', { httpStatus });
+        return;
+      }
+      const list = isPlainObject(j) && Array.isArray(j.data) ? j.data : null;
+      const pageObjects = list ? list.filter(isPlainObject) : [];
+      if (!list || (list.length > 0 && pageObjects.length === 0)) {
+        result.identityIssue = identityIssue('invalid_pages_response', { httpStatus });
+        return;
+      }
+      const linked = pageObjects.find((pg) => pg.instagram_business_account && pg.instagram_business_account.id);
+      if (linked) {
+        result.accessToken = linked.access_token || result.accessToken;
+        result.account.id = linked.instagram_business_account.id;
+        result.account.name = linked.name || null;
+        result.metadata = { ...result.metadata, pageId: linked.id, pageName: linked.name, igUserId: linked.instagram_business_account.id };
+        const ig = await deps.fetch(
+          `${GRAPH}/${encodeURIComponent(result.account.id)}?fields=username&access_token=${encodeURIComponent(result.accessToken)}`,
+        );
+        if (ig.ok) {
+          const u = await readJson(ig);
+          if (u && u.username) result.account.name = `@${u.username}`;
         }
+      } else {
+        result.identityIssue = identityIssue(list.length === 0 ? 'no_pages' : 'no_linked_instagram', {
+          httpStatus,
+          pageCount: pageObjects.length,
+          morePages: isPlainObject(j.paging) && typeof j.paging.next === 'string' && j.paging.next.length > 0,
+        });
       }
       return;
     }
@@ -324,8 +418,12 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
       result.account.id = u.id || null;
       result.account.name = u.name ? `u/${u.name}` : null;
     }
-  } catch {
+  } catch (err) {
     /* identity is a convenience; the tokens are what matter */
+    if (p.id === 'instagram' && !result.account.id) {
+      // name only: a thrown fetch/URL error message can carry the request URL (token + secret)
+      result.identityIssue = identityIssue('lookup_failed', { errorName: err && ERROR_NAMES.has(err.name) ? err.name : 'Error' });
+    }
   }
 }
 
