@@ -75,6 +75,27 @@ test('normalizeAppStoreReview: extracts rating', () => {
   assert.equal(out.platform, 'app-store');
 });
 
+test('normalizeAppStoreReview: reads live Actor review_text fields', () => {
+  const m = loadModule();
+  const out = m.normalizeAppStoreReview({
+    review_id: 'r9',
+    review_text: 'great app',
+    rating: 5,
+    author_name: 'tester',
+    review_date: '2021-06-02',
+  });
+  assert.equal(out.rating, 5);
+  assert.equal(out.body, 'great app');
+  assert.equal(out.review_id, 'r9');
+  assert.equal(out.author_name, 'tester');
+  assert.equal(out.platform, 'app-store');
+});
+
+test('APPSTORE_ACTOR default is a live reviews Actor', () => {
+  const m = loadModule();
+  assert.equal(m.APPSTORE_ACTOR, 'johnvc/apple-app-store-reviews-api');
+});
+
 test('normalizePlayStoreReview: extracts thumbsUpCount', () => {
   const m = loadModule();
   const out = m.normalizePlayStoreReview({

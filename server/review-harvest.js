@@ -15,7 +15,7 @@ const apify = require('./apify-client');
 const quota = require('./apify-quota');
 
 const STEAM_ACTOR = process.env.APIFY_STEAM_REVIEWS_ACTOR_ID || 'easyapi/steam-reviews-scraper';
-const APPSTORE_ACTOR = process.env.APIFY_APPSTORE_REVIEWS_ACTOR_ID || 'apify/app-store-scraper';
+const APPSTORE_ACTOR = process.env.APIFY_APPSTORE_REVIEWS_ACTOR_ID || 'johnvc/apple-app-store-reviews-api';
 const PLAYSTORE_ACTOR = process.env.APIFY_PLAYSTORE_REVIEWS_ACTOR_ID || 'apify/google-play-scraper';
 
 // Rough rule-based sentiment classifier. English-leaning. Returns one of:
@@ -56,17 +56,23 @@ function normalizeSteamReview(item) {
 
 function normalizeAppStoreReview(item) {
   if (!item) return null;
-  const body = item.review || item.body || '';
+  const body = item.review_text || item.review || item.body || '';
   const sentiment = quickSentiment(body);
+  const rawDate = item.review_date_iso || item.review_date || item.date;
+  let createdAt = null;
+  if (rawDate) {
+    const parsed = new Date(rawDate);
+    createdAt = Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
   return {
     platform: 'app-store',
-    review_id: String(item.id || ''),
-    author_handle: item.userName || '',
-    author_name: item.userName || '',
+    review_id: String(item.review_id || item.id || ''),
+    author_handle: item.author_name || item.userName || '',
+    author_name: item.author_name || item.userName || '',
     rating: item.rating || item.score || 0,
     body,
     helpful_count: 0,
-    created_at: item.date ? new Date(item.date).toISOString() : null,
+    created_at: createdAt,
     sentiment,
   };
 }
@@ -109,9 +115,9 @@ async function harvestAppStoreReviews({ appId, country = 'us', limit = 200, work
   const check = quota.canCall(APPSTORE_ACTOR, limit, workspaceId);
   if (!check.allowed) return { success: false, error: `Apify quota exceeded (${check.reason})` };
   const r = await apify.runActor(APPSTORE_ACTOR, {
-    appIds: [appId],
-    countryCode: country,
-    maxReviews: limit,
+    product_ids: [String(appId)],
+    country,
+    max_reviews: limit,
   }, { workspaceId });
   if (!r.success) return r;
   quota.record(APPSTORE_ACTOR, r.items?.length || 0, workspaceId);
