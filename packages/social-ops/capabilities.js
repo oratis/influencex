@@ -63,7 +63,7 @@ const PLATFORMS = Object.freeze({
     aliases: ['ig'],
     region: 'global',
     publishMode: PUBLISH_MODES.API_DIRECT,
-    auth: { kind: 'oauth2', scopes: ['instagram_basic', 'instagram_content_publish', 'pages_show_list', 'pages_read_engagement', 'instagram_manage_insights'] },
+    auth: { kind: 'oauth2', scopes: ['instagram_basic', 'instagram_content_publish', 'pages_show_list', 'pages_read_engagement', 'instagram_manage_insights', 'business_management'] },
     // The Graph version every Instagram call (OAuth + connector) uses.
     apiVersion: 'v26.0',
     text: { maxLength: 2200, titleMaxLength: null, supportsThread: false, hashtagsInText: true, maxHashtags: 30 },

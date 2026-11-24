@@ -473,38 +473,38 @@ test('oauth: instagram authorize scope requests business_management alongside th
 });
 
 test('oauth: instagram /me/accounts failure surfaces a graphError identityIssue', async () => {
-  const longMsg = `(#200) ${'x'.repeat(400)}`;
+  const msg = '(#200) The permission is not granted';
   const s = scriptedFetch([
     ...igTokenSteps(),
-    { ok: false, status: 400, body: { error: { message: longMsg, type: 'OAuthException', code: 200, error_subcode: 123 } } },
+    { ok: false, status: 400, body: { error: { message: msg, type: 'OAuthException', code: 200, error_subcode: 123 } } },
   ]);
   const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
   assert.equal(ex.account.id, null);
   assert.deepEqual(ex.identityIssue, {
     reason: 'pages_request_failed',
     httpStatus: 400,
-    graphError: { code: 200, subcode: 123, type: 'OAuthException', message: longMsg.slice(0, 300) },
+    graphError: { code: 200, subcode: 123, type: 'OAuthException', message: msg, messageWithheld: false },
     pageCount: null,
+    morePages: null,
     errorName: null,
   });
-  assert.equal(ex.identityIssue.graphError.message.length, 300);
   assertNoSecrets(ex.identityIssue);
 });
 
-test('oauth: instagram /me/accounts failure with a non-Graph body has graphError null and missing fields null', async () => {
+test('oauth: instagram /me/accounts failure with a non-Graph body is invalid_pages_response, a partial Graph error keeps missing fields null', async () => {
   const html = scriptedFetch([...igTokenSteps(), { ok: false, status: 502, body: '<html>bad gateway</html>' }]);
   const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, html);
-  assert.deepEqual(a.identityIssue, { reason: 'pages_request_failed', httpStatus: 502, graphError: null, pageCount: null, errorName: null });
+  assert.deepEqual(a.identityIssue, { reason: 'invalid_pages_response', httpStatus: 502, graphError: null, pageCount: null, morePages: null, errorName: null });
   const partial = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body: { error: { message: 'nope' } } }]);
   const b = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, partial);
-  assert.deepEqual(b.identityIssue.graphError, { code: null, subcode: null, type: null, message: 'nope' });
+  assert.deepEqual(b.identityIssue.graphError, { code: null, subcode: null, type: null, message: 'nope', messageWithheld: false });
 });
 
 test('oauth: instagram with no pages reports no_pages', async () => {
   const s = scriptedFetch([...igTokenSteps(), { body: { data: [] } }]);
   const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
   assert.equal(ex.account.id, null);
-  assert.deepEqual(ex.identityIssue, { reason: 'no_pages', httpStatus: 200, graphError: null, pageCount: 0, errorName: null });
+  assert.deepEqual(ex.identityIssue, { reason: 'no_pages', httpStatus: 200, graphError: null, pageCount: 0, morePages: false, errorName: null });
   assertNoSecrets(ex.identityIssue);
 });
 
@@ -515,7 +515,7 @@ test('oauth: instagram pages without a linked instagram account report no_linked
   ]);
   const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
   assert.equal(ex.account.id, null);
-  assert.deepEqual(ex.identityIssue, { reason: 'no_linked_instagram', httpStatus: 200, graphError: null, pageCount: 2, errorName: null });
+  assert.deepEqual(ex.identityIssue, { reason: 'no_linked_instagram', httpStatus: 200, graphError: null, pageCount: 2, morePages: false, errorName: null });
   assertNoSecrets(ex.identityIssue);
 });
 
@@ -530,8 +530,130 @@ test('oauth: instagram lookup that throws reports lookup_failed with the error n
   };
   const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, { fetch });
   assert.equal(ex.account.id, null);
-  assert.deepEqual(ex.identityIssue, { reason: 'lookup_failed', httpStatus: null, graphError: null, pageCount: null, errorName: 'TypeError' });
+  assert.deepEqual(ex.identityIssue, { reason: 'lookup_failed', httpStatus: null, graphError: null, pageCount: null, morePages: null, errorName: 'TypeError' });
   assertNoSecrets(ex.identityIssue);
+});
+
+const LONG_TOKEN_LIKE = 'EAABwzLixnjYBO0ZCvYtT3kQ9ZAfXqB1m8dXyZpL0aV7sWc';
+const igGraph400 = (error) => [...igTokenSteps(), { ok: false, status: 400, body: { error } }];
+
+test('oauth: instagram graphError withholds a message that could carry a credential and keeps the numbers', async () => {
+  const leaks = [
+    `(#190) Invalid OAuth access token ${LONG_TOKEN_LIKE}`,
+    '(#190) Request failed https://graph.facebook.com/v26.0/me/accounts?access_token=abc',
+    '(#190) Bad token LONG-TOKEN-1 given',
+    '(#190) Bad secret CLIENT-SECRET-1 given',
+    '(#190) Bad token SHORT-TOKEN-1 given',
+    '(#190) Bearer abc rejected',
+    '(#190) mail me at ops@example.com',
+    '(#190) a=b',
+    `(#190) ${'x'.repeat(301)}`,
+    '(#190) line\nbreak',
+  ];
+  for (const message of leaks) {
+    const s = scriptedFetch(igGraph400({ message, type: 'OAuthException', code: 190, error_subcode: 463 }));
+    const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+    assert.equal(ex.identityIssue.reason, 'pages_request_failed', message);
+    assert.deepEqual(ex.identityIssue.graphError, { code: 190, subcode: 463, type: 'OAuthException', message: null, messageWithheld: true }, message);
+    assertNoSecrets(ex.identityIssue);
+    assert.ok(!JSON.stringify(ex.identityIssue).includes(LONG_TOKEN_LIKE));
+  }
+});
+
+test('oauth: instagram graphError keeps a benign Graph message verbatim', async () => {
+  const message = '(#200) Requires business_management permission to manage the object';
+  const s = scriptedFetch(igGraph400({ message, type: 'OAuthException', code: 200 }));
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.deepEqual(ex.identityIssue, {
+    reason: 'pages_request_failed',
+    httpStatus: 400,
+    graphError: { code: 200, subcode: null, type: 'OAuthException', message, messageWithheld: false },
+    pageCount: null,
+    morePages: null,
+    errorName: null,
+  });
+});
+
+test('oauth: instagram graphError messageWithheld is false when there is no message', async () => {
+  const s = scriptedFetch(igGraph400({ code: 4 }));
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.deepEqual(ex.identityIssue.graphError, { code: 4, subcode: null, type: null, message: null, messageWithheld: false });
+});
+
+test('oauth: instagram graphError drops non-integer codes and types that are not an Exception class name', async () => {
+  const badCodes = scriptedFetch(igGraph400({ message: 'ok text', code: LONG_TOKEN_LIKE, error_subcode: { token: LONG_TOKEN_LIKE }, type: 'Bad Type' }));
+  const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, badCodes);
+  assert.deepEqual(a.identityIssue.graphError, { code: null, subcode: null, type: null, message: 'ok text', messageWithheld: false });
+  const tokenType = scriptedFetch(igGraph400({ code: 190, error_subcode: 1.5, type: `EAAB${LONG_TOKEN_LIKE}` }));
+  const b = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, tokenType);
+  assert.deepEqual(b.identityIssue.graphError, { code: 190, subcode: null, type: null, message: null, messageWithheld: false });
+  assert.ok(!JSON.stringify(b.identityIssue).includes(LONG_TOKEN_LIKE));
+  for (const type of ['GraphMethodException', 'IGApiException', 'OAuthException']) {
+    const s = scriptedFetch(igGraph400({ code: 1, type }));
+    assert.equal((await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s)).identityIssue.graphError.type, type);
+  }
+});
+
+test('oauth: instagram non-ok bodies that are not a Graph error report invalid_pages_response', async () => {
+  const bodies = ['<html>forbidden</html>', '', {}, { error: 'denied' }, { error: {} }, { error: { code: 'x' } }, { error: [1] }, null];
+  for (const body of bodies) {
+    const s = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body }]);
+    const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+    assert.deepEqual(ex.identityIssue, { reason: 'invalid_pages_response', httpStatus: 403, graphError: null, pageCount: null, morePages: null, errorName: null }, JSON.stringify(body));
+  }
+});
+
+test('oauth: instagram httpStatus is kept only inside 100..599', async () => {
+  for (const [status, want] of [[599, 599], [100, 100]]) {
+    const s = scriptedFetch([...igTokenSteps(), { ok: false, status, body: '<html/>' }]);
+    assert.equal((await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s)).identityIssue.httpStatus, want);
+  }
+  const odd = scriptedFetch([...igTokenSteps(), { ok: false, status: LONG_TOKEN_LIKE, body: '<html/>' }]);
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, odd);
+  assert.equal(ex.identityIssue.httpStatus, null);
+});
+
+test('oauth: instagram ok responses that are not a pages list report invalid_pages_response', async () => {
+  for (const body of ['<html>ok</html>', {}, { data: 'x' }, { data: { id: '1' } }, [], null, { data: ['x', 3, null, []] }]) {
+    const s = scriptedFetch([...igTokenSteps(), { body }]);
+    const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+    assert.equal(ex.account.id, null);
+    assert.deepEqual(ex.identityIssue, { reason: 'invalid_pages_response', httpStatus: 200, graphError: null, pageCount: null, morePages: null, errorName: null }, JSON.stringify(body));
+  }
+});
+
+test('oauth: instagram reports morePages when the first page has paging.next and only counts page objects', async () => {
+  const withNext = scriptedFetch([...igTokenSteps(), { body: { data: [{ id: '1', name: 'P' }, 'junk'], paging: { next: 'https://graph.facebook.com/v26.0/me/accounts?after=x' } } }]);
+  const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, withNext);
+  assert.deepEqual(a.identityIssue, { reason: 'no_linked_instagram', httpStatus: 200, graphError: null, pageCount: 1, morePages: true, errorName: null });
+  assertNoSecrets({ ...a.identityIssue, morePages: undefined });
+  const without = scriptedFetch([...igTokenSteps(), { body: { data: [{ id: '1', name: 'P' }] } }]);
+  const b = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, without);
+  assert.deepEqual(b.identityIssue, { reason: 'no_linked_instagram', httpStatus: 200, graphError: null, pageCount: 1, morePages: false, errorName: null });
+  assert.equal(withNext.calls.length, 3, 'does not follow pagination');
+});
+
+test('oauth: instagram thrown error names are limited to an allowlist', async () => {
+  const throwing = (make) => {
+    let n = 0;
+    const base = scriptedFetch(igTokenSteps());
+    return { fetch: async (url, options) => { n += 1; if (n === 3) throw make(); return base.fetch(url, options); } };
+  };
+  const named = (name) => () => Object.assign(new Error(`failed with ${LONG_TOKEN_LIKE}`), { name });
+  const evil = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, throwing(named(LONG_TOKEN_LIKE)));
+  assert.equal(evil.identityIssue.errorName, 'Error');
+  assert.ok(!JSON.stringify(evil.identityIssue).includes(LONG_TOKEN_LIKE));
+  const notString = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, throwing(() => ({ name: { a: 1 } })));
+  assert.equal(notString.identityIssue.errorName, 'Error');
+  const type = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, throwing(() => new TypeError('x')));
+  assert.equal(type.identityIssue.errorName, 'TypeError');
+  const abort = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, throwing(named('AbortError')));
+  assert.equal(abort.identityIssue.errorName, 'AbortError');
+});
+
+test('oauth: instagram capability scopes match the scopes requested at authorize', () => {
+  const requested = new URL(so.oauth.buildAuthorizeUrl('instagram', { clientId: 'c', redirectUri: 'https://cuddler.ai/cb' }).url).searchParams.get('scope').split(',');
+  assert.deepEqual([...so.capabilities.getPlatform('instagram').auth.scopes].sort(), [...requested].sort());
 });
 
 test('oauth: instagram linked page resolves the account and leaves identityIssue absent', async () => {
