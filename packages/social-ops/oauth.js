@@ -40,7 +40,9 @@ const PROVIDERS = Object.freeze({
     authUrl: `https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`,
     tokenUrl: `${GRAPH}/oauth/access_token`,
     userInfoUrl: null,
-    defaultScope: 'instagram_basic,instagram_content_publish,instagram_manage_insights,pages_show_list,pages_read_engagement',
+    // business_management: a Page role granted through a Business Manager assignment can leave the Page,
+    // or its instagram_business_account, out of /me/accounts unless this is granted too.
+    defaultScope: 'instagram_basic,instagram_content_publish,instagram_manage_insights,pages_show_list,pages_read_engagement,business_management',
     usesPKCE: false,
     clientIdParam: 'client_id',
     tokenAuth: 'body',
@@ -215,6 +217,13 @@ async function postToken(p, body, { clientId, clientSecret }, deps) {
  * Exchange the callback `code` for tokens and resolve the connected account's
  * stable id + display handle. Returns a normalised shape; `metadata` carries
  * whatever the connector later needs (ig user id, channel id, open_id…).
+ *
+ * When Instagram resolves no account id the result also carries `identityIssue`
+ * `{ reason, httpStatus, graphError, pageCount, errorName }` (absent otherwise,
+ * and for other providers). `reason` is `pages_request_failed` (/me/accounts not
+ * ok; `graphError` = `{ code, subcode, type, message }` or null), `no_pages`,
+ * `no_linked_instagram` (`pageCount` pages, none linked) or `lookup_failed`
+ * (a throw; only `errorName`). It never contains tokens, secrets or URLs.
  */
 async function exchangeCode(providerName, { clientId, clientSecret, code, redirectUri, codeVerifier } = {}, depsIn) {
   const p = getProvider(providerName);
@@ -279,9 +288,27 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
       const pages = await deps.fetch(
         `${GRAPH}/me/accounts?fields=id,name,access_token,instagram_business_account&access_token=${encodeURIComponent(result.accessToken)}`,
       );
-      if (pages.ok) {
+      if (!pages.ok) {
         const j = await readJson(pages);
-        const linked = ((j && j.data) || []).find((pg) => pg.instagram_business_account && pg.instagram_business_account.id);
+        const e = j && typeof j === 'object' && j.error && typeof j.error === 'object' ? j.error : null;
+        result.identityIssue = {
+          reason: 'pages_request_failed',
+          httpStatus: pages.status,
+          graphError: e
+            ? {
+                code: e.code ?? null,
+                subcode: e.error_subcode ?? null,
+                type: e.type ?? null,
+                message: e.message == null ? null : String(e.message).slice(0, 300),
+              }
+            : null,
+          pageCount: null,
+          errorName: null,
+        };
+      } else {
+        const j = await readJson(pages);
+        const list = (j && Array.isArray(j.data) && j.data) || [];
+        const linked = list.find((pg) => pg.instagram_business_account && pg.instagram_business_account.id);
         if (linked) {
           result.accessToken = linked.access_token || result.accessToken;
           result.account.id = linked.instagram_business_account.id;
@@ -294,6 +321,14 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
             const u = await readJson(ig);
             if (u && u.username) result.account.name = `@${u.username}`;
           }
+        } else {
+          result.identityIssue = {
+            reason: list.length === 0 ? 'no_pages' : 'no_linked_instagram',
+            httpStatus: pages.status,
+            graphError: null,
+            pageCount: list.length,
+            errorName: null,
+          };
         }
       }
       return;
@@ -324,8 +359,12 @@ async function resolveAccount(p, result, { clientId, clientSecret }, deps) {
       result.account.id = u.id || null;
       result.account.name = u.name ? `u/${u.name}` : null;
     }
-  } catch {
+  } catch (err) {
     /* identity is a convenience; the tokens are what matter */
+    if (p.id === 'instagram' && !result.account.id) {
+      // name only: a thrown fetch/URL error message can carry the request URL (token + secret)
+      result.identityIssue = { reason: 'lookup_failed', httpStatus: null, graphError: null, pageCount: null, errorName: (err && err.name) || null };
+    }
   }
 }
 

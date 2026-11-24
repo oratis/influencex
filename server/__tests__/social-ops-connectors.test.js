@@ -459,7 +459,7 @@ const igTokenSteps = () => [
 ];
 function assertNoSecrets(issue) {
   const s = JSON.stringify(issue);
-  for (const bad of ['SHORT-TOKEN-1', 'LONG-TOKEN-1', 'CLIENT-SECRET-1', 'AUTH-CODE-1', 'SECRET', 'access_token', 'http']) {
+  for (const bad of ['SHORT-TOKEN-1', 'LONG-TOKEN-1', 'CLIENT-SECRET-1', 'AUTH-CODE-1', 'SECRET', 'access_token', '://']) {
     assert.ok(!s.includes(bad), `identityIssue leaked ${bad}: ${s}`);
   }
 }
