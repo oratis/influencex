@@ -227,8 +227,9 @@ async function postToken(p, body, { clientId, clientSecret }, deps) {
  *     or ok but not a pages list), `no_pages` (an empty list), `no_linked_instagram`
  *     (pages returned, none linked) or `lookup_failed` (a throw).
  *   - `httpStatus`: integer 100-599 or null.
- *   - `graphError`: null, or `{ code, subcode, type, message, messageWithheld }`.
- *     `code`/`subcode` are safe integers or null; `type` is an `...Exception`
+ *   - `graphError`: null, or `{ code, subcode, type, message, messageWithheld }`
+ *     (only for a body with an integer `code`). `code` is a safe integer,
+ *     `subcode` a safe integer or null; `type` is an `...Exception`
  *     class name or null; `message` is Graph's text only when it passes
  *     `safeGraphMessage`, else null with `messageWithheld: true`.
  *   - `pageCount`: page objects inspected, or null.
@@ -294,26 +295,31 @@ const safeInt = (n) => (Number.isSafeInteger(n) ? n : null);
 /**
  * Keep a Graph error message only when it reads as plain prose. Graph can echo
  * request details, and /me/accounts is called with the user's token, so a
- * message is withheld (null) if it is over 300 chars, has a control character,
+ * message is withheld (null) if the RAW text (before trimming, so padding and a
+ * leading/trailing newline count) is over 300 chars, has a control character,
  * a URL/query/credential marker (`://` `?` `&` `=` `@`, bearer, access_token,
  * client_secret), a run of 24+ alphanumerics (tokens, secrets, codes), or any
  * of `secrets` as a substring. Returns the trimmed text or null.
  */
 function safeGraphMessage(message, secrets) {
+  if (message.length > 300 || /[\u0000-\u001f\u007f-\u009f]/.test(message)) return null;
   const text = message.trim();
-  if (text.length > 300) return null;
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(text)) return null;
+  if (!text) return null;
   if (/:\/\/|[?&=@]|bearer|access_token|client_secret/i.test(text)) return null;
   if (/[A-Za-z0-9]{24,}/.test(text)) return null;
   for (const secret of secrets) if (secret && text.includes(secret)) return null;
   return text;
 }
 
-/** `{ code, subcode, type, message, messageWithheld }` from a non-ok body, or null when it is not a Graph error. */
+/**
+ * `{ code, subcode, type, message, messageWithheld }` from a non-ok body, or null
+ * when it is not a Graph error. Only an integer `code` marks a real Graph error:
+ * a proxy or gateway can answer `{"error":{"message":"Forbidden"}}` too.
+ */
 function parseGraphError(body, secrets) {
   const e = isPlainObject(body) && isPlainObject(body.error) ? body.error : null;
-  if (!e || !(Number.isSafeInteger(e.code) || typeof e.message === 'string')) return null;
-  const raw = typeof e.message === 'string' ? e.message.trim() : e.message;
+  if (!e || !Number.isSafeInteger(e.code)) return null;
+  const raw = e.message;
   const hasMessage = raw !== undefined && raw !== null && raw !== '';
   const message = typeof raw === 'string' && raw ? safeGraphMessage(raw, secrets) : null;
   return {

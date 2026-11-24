@@ -495,9 +495,9 @@ test('oauth: instagram /me/accounts failure with a non-Graph body is invalid_pag
   const html = scriptedFetch([...igTokenSteps(), { ok: false, status: 502, body: '<html>bad gateway</html>' }]);
   const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, html);
   assert.deepEqual(a.identityIssue, { reason: 'invalid_pages_response', httpStatus: 502, graphError: null, pageCount: null, morePages: null, errorName: null });
-  const partial = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body: { error: { message: 'nope' } } }]);
+  const partial = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body: { error: { code: 4, message: 'nope' } } }]);
   const b = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, partial);
-  assert.deepEqual(b.identityIssue.graphError, { code: null, subcode: null, type: null, message: 'nope', messageWithheld: false });
+  assert.deepEqual(b.identityIssue.graphError, { code: 4, subcode: null, type: null, message: 'nope', messageWithheld: false });
 });
 
 test('oauth: instagram with no pages reports no_pages', async () => {
@@ -581,9 +581,10 @@ test('oauth: instagram graphError messageWithheld is false when there is no mess
 });
 
 test('oauth: instagram graphError drops non-integer codes and types that are not an Exception class name', async () => {
-  const badCodes = scriptedFetch(igGraph400({ message: 'ok text', code: LONG_TOKEN_LIKE, error_subcode: { token: LONG_TOKEN_LIKE }, type: 'Bad Type' }));
-  const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, badCodes);
-  assert.deepEqual(a.identityIssue.graphError, { code: null, subcode: null, type: null, message: 'ok text', messageWithheld: false });
+  const badSubcode = scriptedFetch(igGraph400({ message: 'ok text', code: 1, error_subcode: { token: LONG_TOKEN_LIKE }, type: 'Bad Type' }));
+  const a = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, badSubcode);
+  assert.deepEqual(a.identityIssue.graphError, { code: 1, subcode: null, type: null, message: 'ok text', messageWithheld: false });
+  assert.ok(!JSON.stringify(a.identityIssue).includes(LONG_TOKEN_LIKE));
   const tokenType = scriptedFetch(igGraph400({ code: 190, error_subcode: 1.5, type: `EAAB${LONG_TOKEN_LIKE}` }));
   const b = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, tokenType);
   assert.deepEqual(b.identityIssue.graphError, { code: 190, subcode: null, type: null, message: null, messageWithheld: false });
@@ -595,12 +596,36 @@ test('oauth: instagram graphError drops non-integer codes and types that are not
 });
 
 test('oauth: instagram non-ok bodies that are not a Graph error report invalid_pages_response', async () => {
-  const bodies = ['<html>forbidden</html>', '', {}, { error: 'denied' }, { error: {} }, { error: { code: 'x' } }, { error: [1] }, null];
+  const bodies = ['<html>forbidden</html>', '', {}, { error: 'denied' }, { error: {} }, { error: { code: 'x' } }, { error: [1] }, null, { error: { message: 'Forbidden' } }, { error: { message: '' } }, { error: { message: LONG_TOKEN_LIKE, code: LONG_TOKEN_LIKE } }];
   for (const body of bodies) {
     const s = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body }]);
     const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
     assert.deepEqual(ex.identityIssue, { reason: 'invalid_pages_response', httpStatus: 403, graphError: null, pageCount: null, morePages: null, errorName: null }, JSON.stringify(body));
   }
+});
+
+test('oauth: instagram a generic message-only 403 body is not a Graph error', async () => {
+  const s = scriptedFetch([...igTokenSteps(), { ok: false, status: 403, body: { error: { message: 'Forbidden' } } }]);
+  const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+  assert.deepEqual(ex.identityIssue, { reason: 'invalid_pages_response', httpStatus: 403, graphError: null, pageCount: null, morePages: null, errorName: null });
+});
+
+test('oauth: instagram message length and control characters are judged before trimming', async () => {
+  const cases = [
+    '\n(#200) Requires permission',
+    '(#200) Requires permission\t',
+    ' \n ',
+    `(#200) Requires permission${' '.repeat(300)}`,
+  ];
+  for (const message of cases) {
+    const s = scriptedFetch(igGraph400({ message, type: 'OAuthException', code: 200 }));
+    const ex = await so.oauth.exchangeCode('instagram', IG_EXCHANGE, s);
+    assert.deepEqual(ex.identityIssue.graphError, { code: 200, subcode: null, type: 'OAuthException', message: null, messageWithheld: true }, JSON.stringify(message));
+  }
+  const padded = scriptedFetch(igGraph400({ message: '  (#200) Requires permission  ', code: 200 }));
+  assert.equal((await so.oauth.exchangeCode('instagram', IG_EXCHANGE, padded)).identityIssue.graphError.message, '(#200) Requires permission');
+  const empty = scriptedFetch(igGraph400({ message: '', code: 200 }));
+  assert.deepEqual((await so.oauth.exchangeCode('instagram', IG_EXCHANGE, empty)).identityIssue.graphError, { code: 200, subcode: null, type: null, message: null, messageWithheld: false });
 });
 
 test('oauth: instagram httpStatus is kept only inside 100..599', async () => {
