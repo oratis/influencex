@@ -48,8 +48,11 @@ const BRANDED_PRIVACY = new Set(['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS'])
 
 // Documented error.code values (Direct Post, Query Creator Info) -> failure kind.
 // Only these may appear in `error`; anything else is reported as unrecognized_error.
-// `policy` codes arrive as HTTP 403 but are not credential problems, so a host
-// must not mark the account needs_reauth for them.
+// `policy` codes are not credential problems, so a host must not mark the account
+// needs_reauth for them, and they are not retryable. Per TikTok's docs, init
+// returns them with HTTP 403, while creator_info returns spam_risk_too_many_posts,
+// spam_risk_user_banned_from_posting and reached_active_user_cap with HTTP 200
+// (intentional): classification depends on the code, not on the HTTP status.
 const ERROR_KIND = Object.freeze({
   invalid_param: 'client',
   access_token_invalid: 'auth',
@@ -61,6 +64,9 @@ const ERROR_KIND = Object.freeze({
   unaudited_client_can_only_post_to_private_accounts: 'policy',
   url_ownership_unverified: 'policy',
   privacy_level_option_mismatch: 'policy',
+  invalid_publish_id: 'client',
+  token_not_authorized_for_specified_publish_id: 'client',
+  internal_error: 'server',
 });
 const RETRYABLE_KINDS = new Set(['rate_limit', 'server']);
 
@@ -79,27 +85,40 @@ function errorCodeOf(json) {
 
 /**
  * The one failure builder for TikTok responses (non-2xx, or 200 with an error
- * code). Never copies error.message or body text into `error`.
+ * code). Never copies error.message or body text into `error`. `code` is the
+ * allowlisted TikTok code or 'unrecognized_error' (same value as in `error`), so
+ * a host can map quota codes to its own guidance.
  */
 function tiktokFailure(label, status, json) {
   const code = errorCodeOf(json);
   const known = typeof code === 'string' && Object.hasOwn(ERROR_KIND, code);
   const kind = kindOf(status, known ? code : undefined);
-  return fail(`TikTok ${label} ${status}: ${known ? code : 'unrecognized_error'}`, {
+  const shown = known ? code : 'unrecognized_error';
+  return fail(`TikTok ${label} ${status}: ${shown}`, {
     status,
+    code: shown,
     kind,
     retryable: RETRYABLE_KINDS.has(kind),
   });
 }
 
-/** Read the body as JSON (after an optional text rewrite); null when it is not valid JSON. */
-async function readJsonBody(res, prepare = (t) => t) {
+/**
+ * Read the body as JSON; null when it is not valid JSON. The ORIGINAL text must
+ * parse first, so a rewrite can never turn an invalid body into a valid one;
+ * only then is the optional rewrite applied and parsed again.
+ */
+async function readJsonBody(res, prepare = null) {
   try {
-    return JSON.parse(prepare(await res.text()));
+    const text = await res.text();
+    const plain = JSON.parse(text);
+    return prepare ? JSON.parse(prepare(text)) : plain;
   } catch {
     return null;
   }
 }
+
+/** A 2xx response whose error.code is present but not a string cannot be trusted. */
+const hasOddCode = (res, code) => res.ok && code !== undefined && typeof code !== 'string';
 
 const unreadable = (label) => fail(`TikTok ${label}: unreadable response`, { kind: 'server', retryable: true });
 
@@ -165,6 +184,7 @@ async function fetchCreatorInfo(credentials, depsIn) {
   });
   const j = await readJsonBody(res);
   const code = errorCodeOf(j);
+  if (hasOddCode(res, code)) return unreadable('creator_info');
   if (!res.ok || (code !== undefined && code !== 'ok')) return tiktokFailure('creator_info', res.status, j);
   const d = j && j.data;
   const usable = code === 'ok' && d && typeof d === 'object' && !Array.isArray(d)
@@ -187,8 +207,10 @@ async function fetchCreatorInfo(credentials, depsIn) {
 
 // TikTok post ids are 19-digit integers in the JSON (above 2^53), so JSON.parse
 // rounds them. Node 20 has no JSON.parse source access, so quote every integer
-// token of 16+ digits outside string literals before parsing; ids then arrive
-// as exact strings. Anything that is not valid JSON still fails JSON.parse.
+// token of 16+ digits, and every number with a fraction or exponent, outside
+// string literals before parsing (the original text is validated first, see
+// readJsonBody). In the parsed result `raw` holds those as strings; every number
+// left unquoted is an integer of at most 15 digits and therefore exact.
 const INT_TOKEN = /-?(?:0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?/y;
 
 function quoteLongIntegers(text) {
@@ -206,7 +228,7 @@ function quoteLongIntegers(text) {
       const m = INT_TOKEN.exec(text);
       const tok = m ? m[0] : ch;
       const isInt = m && m[1] === undefined && m[2] === undefined;
-      out += isInt && tok.replace('-', '').length >= 16 ? `"${tok}"` : tok;
+      out += !isInt || tok.replace('-', '').length >= 16 ? `"${tok}"` : tok;
       i += tok.length;
     } else {
       out += ch;
@@ -216,7 +238,10 @@ function quoteLongIntegers(text) {
   return out;
 }
 
-/** Post ids from `data.publicaly_available_post_id` / `data.publicly_available_post_id` only; digit strings. */
+/**
+ * Post ids from `data.publicaly_available_post_id` / `data.publicly_available_post_id`
+ * only; digit strings. Quoted fractional/exponent tokens fail the digit-only test.
+ */
 function postIdsFrom(json) {
   const d = json && json.data;
   if (!d || typeof d !== 'object' || Array.isArray(d)) return [];
@@ -238,6 +263,7 @@ async function fetchPublishStatus(credentials, publishId, depsIn) {
   });
   const j = await readJsonBody(res, quoteLongIntegers);
   const code = errorCodeOf(j);
+  if (hasOddCode(res, code)) return unreadable('status');
   if (!res.ok || (code !== undefined && code !== 'ok')) return tiktokFailure('status', res.status, j);
   if (!j || typeof j !== 'object' || Array.isArray(j)) return unreadable('status');
   const d = j.data && typeof j.data === 'object' ? j.data : {};

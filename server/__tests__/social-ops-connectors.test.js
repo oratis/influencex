@@ -241,6 +241,7 @@ test('tiktok: publish init failures use local text and classify documented codes
     assert.equal(r.retryable, false, code);
     assert.equal(r.status, 403);
     assert.equal(r.error, `TikTok init 403: ${code}`);
+    assert.equal(r.code, code);
   }
   const invalid = await init(400, { error: { code: 'invalid_param', message: 'url is bad' } });
   assert.deepEqual([invalid.kind, invalid.retryable, invalid.error], ['client', false, 'TikTok init 400: invalid_param']);
@@ -324,10 +325,18 @@ test('tiktok: fetchCreatorInfo classifies failures and never forwards upstream t
     assert.equal(r.error, `TikTok creator_info 200: ${code}`);
   }
   const policy = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ ok: false, status: 403, body: { error: { code: 'spam_risk_too_many_posts', message: 'Bearer SECRET' } } }]));
-  assert.deepEqual([policy.kind, policy.retryable, policy.error], ['policy', false, 'TikTok creator_info 403: spam_risk_too_many_posts']);
+  assert.deepEqual([policy.kind, policy.retryable, policy.error, policy.code], ['policy', false, 'TikTok creator_info 403: spam_risk_too_many_posts', 'spam_risk_too_many_posts']);
+  // documented: creator_info returns the quota codes with HTTP 200
+  const quota = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code: 'spam_risk_too_many_posts', message: 'Bearer SECRET' } } }]));
+  assert.deepEqual([quota.success, quota.kind, quota.retryable, quota.code, quota.error], [false, 'policy', false, 'spam_risk_too_many_posts', 'TikTok creator_info 200: spam_risk_too_many_posts']);
+  for (const bad of [false, 0, {}, []]) {
+    const r = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ body: { error: { code: bad } } }]));
+    assert.deepEqual([r.success, r.error, r.kind, r.retryable, r.code], [false, 'TikTok creator_info: unreadable response', 'server', true, undefined], JSON.stringify(bad));
+  }
   const odd = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code: 'Bearer SECRET', message: 'Bearer SECRET' } } }]));
   assert.equal(odd.success, false);
   assert.equal(odd.error, 'TikTok creator_info 200: unrecognized_error');
+  assert.equal(odd.code, 'unrecognized_error');
   assert.equal(odd.kind, 'client');
   const proto = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ ok: false, status: 400, body: { error: { code: 'constructor' } } }]));
   assert.equal(proto.error, 'TikTok creator_info 400: unrecognized_error');
@@ -391,6 +400,31 @@ test('tiktok: fetchPublishStatus reads post ids only from data, structurally', a
     assert.deepEqual([r.kind, r.retryable], ['server', true]);
     assert.equal(r.videoIds, undefined);
   }
+
+  // invalid JSON must stay invalid: an unquoted 16-digit key may not be repaired by the rewrite
+  const badKey = await poll('{"data":{"status":"PUBLISH_COMPLETE",1234567890123456:1,"publicaly_available_post_id":[7445813391838234123]},"error":{"code":"ok"}}');
+  assert.equal(badKey.success, false);
+  assert.equal(badKey.error, 'TikTok status: unreadable response');
+  assert.equal(badKey.videoIds, undefined);
+
+  // non-integer numbers never become ids; they stay strings in raw
+  const frac = await poll('{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[9007199254740990.5,1.0000000000000001,4.2e1,7445813391838234123]}' + tail);
+  assert.deepEqual(frac.videoIds, ['7445813391838234123']);
+  assert.deepEqual(frac.raw.data.publicaly_available_post_id, ['9007199254740990.5', '1.0000000000000001', '4.2e1', '7445813391838234123']);
+
+  // documented status/cancel codes
+  for (const [code, kind, retryable] of [['invalid_publish_id', 'client', false], ['token_not_authorized_for_specified_publish_id', 'client', false], ['internal_error', 'server', true]]) {
+    const r = await c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ ok: false, status: 400, body: { error: { code, message: 'x' } } }]));
+    assert.deepEqual([r.success, r.error, r.kind, r.retryable, r.code], [false, `TikTok status 400: ${code}`, kind, retryable, code]);
+  }
+  // a non-string error.code on HTTP 200 is an unreadable response, not a client failure
+  for (const bad of [false, 0, {}]) {
+    const r = await poll({ data: { status: 'PUBLISH_COMPLETE' }, error: { code: bad } });
+    assert.deepEqual([r.success, r.error, r.kind, r.retryable, r.code], [false, 'TikTok status: unreadable response', 'server', true, undefined], JSON.stringify(bad));
+  }
+  // an object without error.code is still read as success (compatibility)
+  const noCode = await poll({ data: { status: 'PROCESSING_UPLOAD' } });
+  assert.deepEqual([noCode.success, noCode.status], [true, 'PROCESSING_UPLOAD']);
 
   // an error envelope is a failure with local text, even on HTTP 200
   const denied = await poll({ error: { code: 'access_token_invalid', message: 'Bearer SECRET' } });
