@@ -225,7 +225,252 @@ test('tiktok: SELF_ONLY draft by default → requiresHumanFinalStep; public when
   assert.equal(JSON.parse(s2.calls[0].options.body).post_info.is_aigc, true);
   const bad = await c.publish({ accessToken: 'T' }, { text: 'cap', videoUrl: 'https://x/v.mp4' }, scriptedFetch([{ body: { error: { code: 'scope_not_authorized', message: 'no' } } }]));
   assert.equal(bad.success, false);
-  assert.match(bad.error, /scope_not_authorized/);
+  assert.equal(bad.error, 'TikTok init 200: scope_not_authorized');
+  assert.equal(bad.kind, 'auth');
+});
+
+test('tiktok: publish init failures use local text and classify documented codes', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const payload = { text: 'cap', videoUrl: 'https://x/v.mp4' };
+  const init = (status, body) => c.publish({ accessToken: 'SECRET' }, payload, scriptedFetch([{ ok: false, status, body }]));
+  const policy = ['spam_risk_too_many_posts', 'spam_risk_user_banned_from_posting', 'reached_active_user_cap',
+    'unaudited_client_can_only_post_to_private_accounts', 'url_ownership_unverified', 'privacy_level_option_mismatch'];
+  for (const code of policy) {
+    const r = await init(403, { error: { code, message: 'Bearer SECRET leaked' } });
+    assert.equal(r.kind, 'policy', code);
+    assert.equal(r.retryable, false, code);
+    assert.equal(r.status, 403);
+    assert.equal(r.error, `TikTok init 403: ${code}`);
+    assert.equal(r.code, code);
+  }
+  const invalid = await init(400, { error: { code: 'invalid_param', message: 'url is bad' } });
+  assert.deepEqual([invalid.kind, invalid.retryable, invalid.error], ['client', false, 'TikTok init 400: invalid_param']);
+  const limited = await init(429, { error: { code: 'rate_limit_exceeded', message: 'slow down' } });
+  assert.deepEqual([limited.kind, limited.retryable, limited.error], ['rate_limit', true, 'TikTok init 429: rate_limit_exceeded']);
+  const down = await init(502, '<html>Bearer SECRET bad gateway</html>');
+  assert.deepEqual([down.kind, down.retryable, down.error], ['server', true, 'TikTok init 502: unrecognized_error']);
+  const unknown403 = await init(403, { error: { code: 'something_new', message: 'Bearer SECRET' } });
+  assert.deepEqual([unknown403.kind, unknown403.retryable, unknown403.error], ['client', false, 'TikTok init 403: unrecognized_error']);
+  const http401 = await init(401, { error: { code: 'access_token_invalid', message: 'Bearer SECRET' } });
+  assert.deepEqual([http401.kind, http401.error], ['auth', 'TikTok init 401: access_token_invalid']);
+  const bare401 = await init(401, 'Bearer SECRET');
+  assert.deepEqual([bare401.kind, bare401.error], ['auth', 'TikTok init 401: unrecognized_error']);
+});
+
+test('tiktok: fetchCreatorInfo posts to creator_info/query with bearer token and maps the creator', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const s = scriptedFetch([{ body: { error: { code: 'ok' }, data: {
+    creator_nickname: 'Nick', creator_username: 'nick_u', creator_avatar_url: 'https://x/a.jpg',
+    privacy_level_options: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
+    comment_disabled: true, duet_disabled: false, stitch_disabled: true, max_video_post_duration_sec: 600,
+  } } }]);
+  const r = await c.fetchCreatorInfo({ accessToken: 'T' }, s);
+  assert.equal(s.calls[0].url, 'https://open.tiktokapis.com/v2/post/publish/creator_info/query/');
+  assert.equal(s.calls[0].options.method, 'POST');
+  assert.equal(s.calls[0].options.headers.Authorization, 'Bearer T');
+  assert.equal(s.calls[0].options.headers['Content-Type'], 'application/json; charset=UTF-8');
+  assert.equal(s.calls[0].options.body, undefined);
+  assert.deepEqual(r, { success: true, creator: {
+    nickname: 'Nick', username: 'nick_u', avatarUrl: 'https://x/a.jpg',
+    privacyLevelOptions: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
+    commentDisabled: true, duetDisabled: false, stitchDisabled: true, maxVideoPostDurationSec: 600,
+  } });
+  const settings = { privacy_level_options: ['SELF_ONLY'], comment_disabled: false, duet_disabled: false, stitch_disabled: false };
+  for (const [max, want] of [[0, null], [-5, null], ['600', null], [Infinity, null], [null, null], [90.5, 90.5]]) {
+    const m = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ body: { error: { code: 'ok' }, data: { ...settings, max_video_post_duration_sec: max } } }]));
+    assert.equal(m.creator.maxVideoPostDurationSec, want, String(max));
+  }
+});
+
+test('tiktok: fetchCreatorInfo never reports success without usable settings', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const good = { privacy_level_options: ['SELF_ONLY'], comment_disabled: false, duet_disabled: false, stitch_disabled: false };
+  const unusable = [
+    ['sparse data', { error: { code: 'ok' }, data: {} }],
+    ['no data', { error: { code: 'ok' } }],
+    ['data is an array', { error: { code: 'ok' }, data: [] }],
+    ['no error envelope', { data: good }],
+    ['privacy options not an array', { error: { code: 'ok' }, data: { ...good, privacy_level_options: 'SELF_ONLY' } }],
+    ['privacy options with a non-string', { error: { code: 'ok' }, data: { ...good, privacy_level_options: ['SELF_ONLY', 3] } }],
+    ['comment_disabled missing', { error: { code: 'ok' }, data: { ...good, comment_disabled: undefined } }],
+    ['duet_disabled not boolean', { error: { code: 'ok' }, data: { ...good, duet_disabled: 'false' } }],
+    ['stitch_disabled not boolean', { error: { code: 'ok' }, data: { ...good, stitch_disabled: 0 } }],
+    ['HTML 200', '<html>maintenance</html>'],
+  ];
+  for (const [name, body] of unusable) {
+    const r = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ body }]));
+    assert.equal(r.success, false, name);
+    assert.equal(r.error, 'TikTok creator_info: unreadable response', name);
+    assert.equal(r.kind, 'server', name);
+    assert.equal(r.retryable, true, name);
+    assert.equal(r.creator, undefined, name);
+  }
+});
+
+test('tiktok: fetchCreatorInfo classifies failures and never forwards upstream text', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const noToken = await c.fetchCreatorInfo(null, noNet);
+  assert.equal(noToken.success, false);
+  assert.equal(noToken.kind, 'auth');
+  const leak = { error: { code: 'scope_not_authorized', message: 'Bearer SECRET is not allowed', log_id: 'L1' } };
+  const http401 = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ ok: false, status: 401, body: leak }]));
+  assert.deepEqual([http401.success, http401.kind, http401.retryable, http401.status], [false, 'auth', false, 401]);
+  assert.equal(http401.error, 'TikTok creator_info 401: scope_not_authorized');
+  const plain401 = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ ok: false, status: 401, body: 'Bearer SECRET nope' }]));
+  assert.equal(plain401.error, 'TikTok creator_info 401: unrecognized_error');
+  assert.equal(plain401.kind, 'auth');
+  for (const code of ['access_token_invalid', 'scope_not_authorized']) {
+    const r = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code, message: 'Bearer SECRET' } } }]));
+    assert.equal(r.kind, 'auth', code);
+    assert.equal(r.error, `TikTok creator_info 200: ${code}`);
+  }
+  const policy = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ ok: false, status: 403, body: { error: { code: 'spam_risk_too_many_posts', message: 'Bearer SECRET' } } }]));
+  assert.deepEqual([policy.kind, policy.retryable, policy.error, policy.code], ['policy', false, 'TikTok creator_info 403: spam_risk_too_many_posts', 'spam_risk_too_many_posts']);
+  // documented: creator_info returns the quota codes with HTTP 200
+  const quota = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code: 'spam_risk_too_many_posts', message: 'Bearer SECRET' } } }]));
+  assert.deepEqual([quota.success, quota.kind, quota.retryable, quota.code, quota.error], [false, 'policy', false, 'spam_risk_too_many_posts', 'TikTok creator_info 200: spam_risk_too_many_posts']);
+  for (const bad of [false, 0, {}, []]) {
+    const r = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ body: { error: { code: bad } } }]));
+    assert.deepEqual([r.success, r.error, r.kind, r.retryable, r.code], [false, 'TikTok creator_info: unreadable response', 'server', true, undefined], JSON.stringify(bad));
+  }
+  const odd = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code: 'Bearer SECRET', message: 'Bearer SECRET' } } }]));
+  assert.equal(odd.success, false);
+  assert.equal(odd.error, 'TikTok creator_info 200: unrecognized_error');
+  assert.equal(odd.code, 'unrecognized_error');
+  assert.equal(odd.kind, 'client');
+  const proto = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ ok: false, status: 400, body: { error: { code: 'constructor' } } }]));
+  assert.equal(proto.error, 'TikTok creator_info 400: unrecognized_error');
+  const limited = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ ok: false, status: 429, body: '' }]));
+  assert.deepEqual([limited.kind, limited.retryable], ['rate_limit', true]);
+  const down = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ ok: false, status: 503, body: 'Bearer SECRET' }]));
+  assert.deepEqual([down.kind, down.retryable, down.error], ['server', true, 'TikTok creator_info 503: unrecognized_error']);
+});
+
+test('tiktok: fetchPublishStatus keeps 19-digit post ids exact (as strings)', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const raw = '{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7445813391838234123, 7445813391838234124]},"error":{"code":"ok"}}';
+  const s = scriptedFetch([{ body: raw }]);
+  const r = await c.fetchPublishStatus({ accessToken: 'T' }, 'v_pub_url~1', s);
+  assert.equal(s.calls[0].url, 'https://open.tiktokapis.com/v2/post/publish/status/fetch/');
+  assert.deepEqual(JSON.parse(s.calls[0].options.body), { publish_id: 'v_pub_url~1' });
+  assert.equal(r.success, true);
+  assert.equal(r.status, 'PUBLISH_COMPLETE');
+  assert.deepEqual(r.videoIds, ['7445813391838234123', '7445813391838234124']);
+  const none = await c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ body: { data: { status: 'PROCESSING_DOWNLOAD' }, error: { code: 'ok' } } }]));
+  assert.deepEqual(none.videoIds, []);
+});
+
+test('tiktok: fetchPublishStatus reads post ids only from data, structurally', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const poll = (body) => c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ body }]));
+  const tail = ',"error":{"code":"ok"}}';
+
+  // both documented key spellings
+  const typo = await poll('{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7445813391838234123]}' + tail);
+  assert.deepEqual(typo.videoIds, ['7445813391838234123']);
+  const proper = await poll('{"data":{"status":"PUBLISH_COMPLETE","publicly_available_post_id":[7445813391838234124]}' + tail);
+  assert.deepEqual(proper.videoIds, ['7445813391838234124']);
+
+  // the same key outside data is ignored, wherever it sits
+  const elsewhere = await poll('{"meta":{"publicaly_available_post_id":[987]},"publicly_available_post_id":[654],"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7445813391838234123]}' + tail);
+  assert.deepEqual(elsewhere.videoIds, ['7445813391838234123']);
+  const onlyElsewhere = await poll('{"extra":{"publicaly_available_post_id":[987]},"data":{"status":"PROCESSING_UPLOAD"}' + tail);
+  assert.deepEqual(onlyElsewhere.videoIds, []);
+
+  // a 19-digit run inside a string elsewhere is not a number token and not an id
+  const inString = await poll('{"data":{"status":"PROCESSING_UPLOAD","fail_reason":"see \\" 7445813391838234999 \\" ","note":"7445813391838234999"}' + tail);
+  assert.equal(inString.success, true);
+  assert.deepEqual(inString.videoIds, []);
+  assert.equal(inString.raw.data.note, '7445813391838234999');
+  assert.equal(inString.raw.data.fail_reason, 'see \" 7445813391838234999 \" ');
+
+  // mixed / invalid elements: keep digit strings and positive safe integers only
+  const mixed = await poll('{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7445813391838234123,"7445813391838234124",42,"abc","12x",-5,0,1.5,true,null,{"a":1},[2],"",9007199254740993123456789]}' + tail);
+  assert.deepEqual(mixed.videoIds, ['7445813391838234123', '7445813391838234124', '42', '9007199254740993123456789']);
+  const notList = await poll('{"data":{"publicaly_available_post_id":7445813391838234123}' + tail);
+  assert.deepEqual(notList.videoIds, []);
+  const dataIsArray = await poll('{"data":[{"publicaly_available_post_id":[7445813391838234123]}]' + tail);
+  assert.deepEqual(dataIsArray.videoIds, []);
+
+  // non-JSON or truncated bodies never yield ids
+  for (const body of ['<html>"publicaly_available_post_id":[987]</html>', '{"data":{"publicaly_available_post_id":[7445813391838234123]', '']) {
+    const r = await poll(body);
+    assert.equal(r.success, false, body);
+    assert.equal(r.error, 'TikTok status: unreadable response');
+    assert.deepEqual([r.kind, r.retryable], ['server', true]);
+    assert.equal(r.videoIds, undefined);
+  }
+
+  // invalid JSON must stay invalid: an unquoted 16-digit key may not be repaired by the rewrite
+  const badKey = await poll('{"data":{"status":"PUBLISH_COMPLETE",1234567890123456:1,"publicaly_available_post_id":[7445813391838234123]},"error":{"code":"ok"}}');
+  assert.equal(badKey.success, false);
+  assert.equal(badKey.error, 'TikTok status: unreadable response');
+  assert.equal(badKey.videoIds, undefined);
+
+  // non-integer numbers never become ids; they stay strings in raw
+  const frac = await poll('{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[9007199254740990.5,1.0000000000000001,4.2e1,7445813391838234123]}' + tail);
+  assert.deepEqual(frac.videoIds, ['7445813391838234123']);
+  assert.deepEqual(frac.raw.data.publicaly_available_post_id, ['9007199254740990.5', '1.0000000000000001', '4.2e1', '7445813391838234123']);
+
+  // documented status/cancel codes
+  for (const [code, kind, retryable] of [['invalid_publish_id', 'client', false], ['token_not_authorized_for_specified_publish_id', 'client', false], ['internal_error', 'server', true]]) {
+    const r = await c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ ok: false, status: 400, body: { error: { code, message: 'x' } } }]));
+    assert.deepEqual([r.success, r.error, r.kind, r.retryable, r.code], [false, `TikTok status 400: ${code}`, kind, retryable, code]);
+  }
+  // a non-string error.code on HTTP 200 is an unreadable response, not a client failure
+  for (const bad of [false, 0, {}]) {
+    const r = await poll({ data: { status: 'PUBLISH_COMPLETE' }, error: { code: bad } });
+    assert.deepEqual([r.success, r.error, r.kind, r.retryable, r.code], [false, 'TikTok status: unreadable response', 'server', true, undefined], JSON.stringify(bad));
+  }
+  // an object without error.code is still read as success (compatibility)
+  const noCode = await poll({ data: { status: 'PROCESSING_UPLOAD' } });
+  assert.deepEqual([noCode.success, noCode.status], [true, 'PROCESSING_UPLOAD']);
+
+  // an error envelope is a failure with local text, even on HTTP 200
+  const denied = await poll({ error: { code: 'access_token_invalid', message: 'Bearer SECRET' } });
+  assert.deepEqual([denied.success, denied.kind, denied.error], [false, 'auth', 'TikTok status 200: access_token_invalid']);
+  const http500 = await c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ ok: false, status: 500, body: '<html>boom</html>' }]));
+  assert.deepEqual([http500.kind, http500.retryable, http500.error], ['server', true, 'TikTok status 500: unrecognized_error']);
+});
+
+test('oauth: tiktok capability scopes match the scopes requested at authorize', () => {
+  const tt = new URL(so.oauth.buildAuthorizeUrl('tiktok', { clientId: 'k', redirectUri: 'https://cuddler.ai/cb' }).url);
+  assert.deepEqual([...so.capabilities.getPlatform('tiktok').auth.scopes], tt.searchParams.get('scope').split(','));
+});
+
+test('tiktok: publish always sends both brand toggles as booleans; validate allows branded only when public or friends', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const base = { text: 'cap', videoUrl: 'https://x/v.mp4' };
+  const s = scriptedFetch([{ body: { data: { publish_id: 'p1' }, error: { code: 'ok' } } }]);
+  await c.publish({ accessToken: 'T' }, base, s);
+  const info = JSON.parse(s.calls[0].options.body).post_info;
+  assert.equal(info.brand_content_toggle, false);
+  assert.equal(info.brand_organic_toggle, false);
+  const s2 = scriptedFetch([{ body: { data: { publish_id: 'p2' }, error: { code: 'ok' } } }]);
+  await c.publish({ accessToken: 'T' }, { ...base, privacyLevel: 'PUBLIC_TO_EVERYONE', brandContentToggle: true, brandOrganicToggle: true }, s2);
+  const info2 = JSON.parse(s2.calls[0].options.body).post_info;
+  assert.equal(info2.brand_content_toggle, true);
+  assert.equal(info2.brand_organic_toggle, true);
+  assert.equal(info2.privacy_level, 'PUBLIC_TO_EVERYONE');
+  // truthy non-booleans do not count as true
+  const s3 = scriptedFetch([{ body: { data: { publish_id: 'p3' }, error: { code: 'ok' } } }]);
+  await c.publish({ accessToken: 'T' }, { ...base, brandContentToggle: 'yes' }, s3);
+  assert.equal(JSON.parse(s3.calls[0].options.body).post_info.brand_content_toggle, false);
+
+  assert.match(c.validate({ ...base, brandContentToggle: true }).join(), /branded content must be public or friends-only/); // defaulted SELF_ONLY
+  for (const privacyLevel of ['SELF_ONLY', 'FOLLOWER_OF_CREATOR']) {
+    assert.match(c.validate({ ...base, brandContentToggle: true, privacyLevel }).join(), /branded content must be public or friends-only/, privacyLevel);
+  }
+  for (const privacyLevel of ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS']) {
+    assert.deepEqual(c.validate({ ...base, brandContentToggle: true, privacyLevel }), [], privacyLevel);
+  }
+  assert.deepEqual(c.validate({ ...base, brandOrganicToggle: true, privacyLevel: 'FOLLOWER_OF_CREATOR' }), [], 'Your brand has no visibility limit');
+  assert.deepEqual(c.validate({ ...base, brandOrganicToggle: true }), []);
+  const rejected = await c.publish({ accessToken: 'T' }, { ...base, brandContentToggle: true }, noNet);
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.kind, 'client');
+  const followers = await c.publish({ accessToken: 'T' }, { ...base, brandContentToggle: true, privacyLevel: 'FOLLOWER_OF_CREATOR' }, noNet);
+  assert.equal(followers.success, false);
 });
 
 test('reddit: publish() is a manual package — no network, no credentials, deterministic id', async () => {
@@ -396,6 +641,7 @@ test('oauth: authorize urls carry PKCE / provider quirks; exchange is pure and r
   const tt = new URL(so.oauth.buildAuthorizeUrl('tiktok', { clientId: 'k', redirectUri: 'https://cuddler.ai/cb' }).url);
   assert.equal(tt.searchParams.get('client_key'), 'k');
   assert.equal(tt.searchParams.get('client_id'), null);
+  assert.equal(tt.searchParams.get('scope'), 'user.info.basic,video.publish', 'only scopes the TikTok app has enabled');
   const rd = new URL(so.oauth.buildAuthorizeUrl('reddit', { clientId: 'c', redirectUri: 'https://cuddler.ai/cb' }).url);
   assert.equal(rd.searchParams.get('duration'), 'permanent');
   const yt = new URL(so.oauth.buildAuthorizeUrl('youtube', { clientId: 'c', redirectUri: 'https://cuddler.ai/cb' }).url);

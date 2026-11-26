@@ -160,8 +160,11 @@ const PLATFORMS = Object.freeze({
     aliases: [],
     region: 'global',
     publishMode: PUBLISH_MODES.API_DIRECT,
-    auth: { kind: 'oauth2_pkce', scopes: ['user.info.basic', 'video.upload', 'video.publish', 'video.list'] },
-    // access_token lives 2 h, refresh_token 180 days, and every refresh hands
+    // Same as oauth.PROVIDERS.tiktok.defaultScope. fetchMetrics additionally
+    // needs video.list, which the app must enable and the host must request.
+    auth: { kind: 'oauth2_pkce', scopes: ['user.info.basic', 'video.publish'] },
+    // Lifetimes follow expires_in / refresh_expires_in in the token response
+    // (the numbers below are the documented defaults), and every refresh hands
     // back a NEW refresh_token: the host must store it each time, or the old
     // one stops working at its own expiry.
     tokens: { accessTokenSeconds: 2 * 3600, refreshTokenSeconds: 180 * 86400, refreshTokenRotates: true },
