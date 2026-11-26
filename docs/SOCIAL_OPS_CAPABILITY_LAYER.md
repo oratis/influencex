@@ -94,6 +94,12 @@ fetchMetrics(credentials, externalId, deps)  // { available, metrics?: {impressi
 
 `status` 取值：`published` · `draft`（平台草稿箱，人来点）· `scheduled`（平台侧定时）· `pending_review`（平台审核中）· `packaged`（manual_package）。`requiresHumanFinalStep: true` 表示宿主状态机应停在「已推到平台，等人」而不是当失败。
 
+**TikTok connector 的附加合同**（`connectors/tiktok.js`）：
+- `fetchCreatorInfo(credentials, deps)` → `{ success, creator: { nickname, username, avatarUrl, privacyLevelOptions, commentDisabled, duetDisabled, stitchDisabled, maxVideoPostDurationSec } }`，发帖页渲染前必须调用。只有 `error.code === 'ok'` 且隐私选项 / 三个禁用开关齐全时才算成功；否则 `{ success: false, kind: 'server', retryable: true, error: 'TikTok creator_info: unreadable response' }`，宿主不得把缺省当作「没有限制」。
+- `fetchPublishStatus(credentials, publishId, deps)` → `{ success, status, failReason, videoIds, raw }`。`videoIds` 是**数字字符串**数组（19 位 id 超过 2^53），只取 `data.publicaly_available_post_id` / `data.publicly_available_post_id`；body 不是合法 JSON 时 `error: 'TikTok status: unreadable response'`。
+- 失败的 `error` 一律是 `TikTok <label> <HTTP 状态>: <code>`，`<code>` 只能是官方文档列出的 error code，其余记为 `unrecognized_error`；**不转发上游 message / body**。`kind`：`auth`（HTTP 401、`access_token_invalid`、`scope_not_authorized`，宿主可据此标记需重新授权）· `policy`（`spam_risk_*`、`reached_active_user_cap`、`unaudited_client_can_only_post_to_private_accounts`、`url_ownership_unverified`、`privacy_level_option_mismatch`，HTTP 403 但**不是**凭据问题，不可重试）· `rate_limit` / `server`（可重试）· `client`（其余 4xx，含未知的 403）。
+- `brandContentToggle`（TikTok 的「Branded content」，付费合作）只允许 `PUBLIC_TO_EVERYONE` / `MUTUAL_FOLLOW_FRIENDS`；`brandOrganicToggle` 是「Your brand」（推广发帖者自己的业务）。
+
 **deps 注入**：`{ fetch, logger, now, sleep, userAgent }`。服务端传 `proxy-fetch`（走 HTTPS_PROXY），测试传脚本化 fetch，Cuddler 传全局 fetch。
 
 ---
