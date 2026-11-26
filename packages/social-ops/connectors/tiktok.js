@@ -122,7 +122,16 @@ async function fetchCreatorInfo(credentials, depsIn) {
   });
 }
 
-/** Poll the publish status of a `publish_id` (post-init). */
+// TikTok post ids are 19-digit integers in the JSON (above 2^53), so
+// JSON.parse rounds them. Read them as digit strings from the raw text instead.
+const POST_ID_LIST = /"(?:publicaly|publicly)_available_post_id"\s*:\s*\[([^\]]*)\]/;
+
+function postIdsFromText(text) {
+  const m = POST_ID_LIST.exec(text || '');
+  return m ? m[1].match(/\d+/g) || [] : [];
+}
+
+/** Poll the publish status of a `publish_id` (post-init). `videoIds` are digit strings. */
 async function fetchPublishStatus(credentials, publishId, depsIn) {
   const deps = resolveDeps(depsIn);
   const res = await deps.fetch(`${API}/post/publish/status/fetch/`, {
@@ -131,9 +140,20 @@ async function fetchPublishStatus(credentials, publishId, depsIn) {
     body: JSON.stringify({ publish_id: publishId }),
   });
   if (!res.ok) return httpFailure('TikTok status', res);
-  const j = await readJson(res);
+  let text = '';
+  try {
+    text = await res.text();
+  } catch {
+    text = '';
+  }
+  let j = null;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    j = null;
+  }
   const d = (j && j.data) || {};
-  return ok({ status: d.status || null, failReason: d.fail_reason || null, videoIds: d.publicaly_available_post_id || d.publicly_available_post_id || [], raw: j });
+  return ok({ status: d.status || null, failReason: d.fail_reason || null, videoIds: postIdsFromText(text), raw: j });
 }
 
 async function fetchMetrics(credentials, externalId, depsIn) {

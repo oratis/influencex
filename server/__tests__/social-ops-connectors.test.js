@@ -270,6 +270,28 @@ test('tiktok: fetchCreatorInfo classifies failures (auth vs client) and never le
   assert.doesNotMatch(other.error, /SECRET/);
 });
 
+test('tiktok: fetchPublishStatus keeps 19-digit post ids exact (as strings)', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const raw = '{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[7445813391838234123, 7445813391838234124]},"error":{"code":"ok"}}';
+  const s = scriptedFetch([{ body: raw }]);
+  const r = await c.fetchPublishStatus({ accessToken: 'T' }, 'v_pub_url~1', s);
+  assert.equal(s.calls[0].url, 'https://open.tiktokapis.com/v2/post/publish/status/fetch/');
+  assert.deepEqual(JSON.parse(s.calls[0].options.body), { publish_id: 'v_pub_url~1' });
+  assert.equal(r.success, true);
+  assert.equal(r.status, 'PUBLISH_COMPLETE');
+  assert.deepEqual(r.videoIds, ['7445813391838234123', '7445813391838234124']);
+  const none = await c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ body: { data: { status: 'PROCESSING_DOWNLOAD' }, error: { code: 'ok' } } }]));
+  assert.deepEqual(none.videoIds, []);
+  const html = await c.fetchPublishStatus({ accessToken: 'T' }, 'p', scriptedFetch([{ body: '<html>oops</html>' }]));
+  assert.equal(html.status, null);
+  assert.deepEqual(html.videoIds, []);
+});
+
+test('oauth: tiktok capability scopes match the scopes requested at authorize', () => {
+  const tt = new URL(so.oauth.buildAuthorizeUrl('tiktok', { clientId: 'k', redirectUri: 'https://cuddler.ai/cb' }).url);
+  assert.deepEqual([...so.capabilities.getPlatform('tiktok').auth.scopes], tt.searchParams.get('scope').split(','));
+});
+
 test('tiktok: publish always sends both brand toggles as booleans; validate rejects branded + SELF_ONLY', async () => {
   const c = so.connectors.getConnector('tiktok');
   const base = { text: 'cap', videoUrl: 'https://x/v.mp4' };
