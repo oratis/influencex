@@ -66,7 +66,7 @@ const PROVIDERS = Object.freeze({
     authUrl: 'https://www.tiktok.com/v2/auth/authorize/',
     tokenUrl: 'https://open.tiktokapis.com/v2/oauth/token/',
     userInfoUrl: 'https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name,username',
-    defaultScope: 'user.info.basic,video.upload,video.publish,video.list',
+    defaultScope: 'user.info.basic,video.publish',
     usesPKCE: true,
     clientIdParam: 'client_key', // TikTok's name for client_id
     tokenAuth: 'body',

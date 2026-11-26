@@ -228,6 +228,76 @@ test('tiktok: SELF_ONLY draft by default → requiresHumanFinalStep; public when
   assert.match(bad.error, /scope_not_authorized/);
 });
 
+test('tiktok: fetchCreatorInfo posts to creator_info/query with bearer token and maps the creator', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const s = scriptedFetch([{ body: { error: { code: 'ok' }, data: {
+    creator_nickname: 'Nick', creator_username: 'nick_u', creator_avatar_url: 'https://x/a.jpg',
+    privacy_level_options: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
+    comment_disabled: true, duet_disabled: false, stitch_disabled: true, max_video_post_duration_sec: 600,
+  } } }]);
+  const r = await c.fetchCreatorInfo({ accessToken: 'T' }, s);
+  assert.equal(s.calls[0].url, 'https://open.tiktokapis.com/v2/post/publish/creator_info/query/');
+  assert.equal(s.calls[0].options.method, 'POST');
+  assert.equal(s.calls[0].options.headers.Authorization, 'Bearer T');
+  assert.equal(s.calls[0].options.headers['Content-Type'], 'application/json; charset=UTF-8');
+  assert.equal(s.calls[0].options.body, undefined);
+  assert.deepEqual(r, { success: true, creator: {
+    nickname: 'Nick', username: 'nick_u', avatarUrl: 'https://x/a.jpg',
+    privacyLevelOptions: ['PUBLIC_TO_EVERYONE', 'SELF_ONLY'],
+    commentDisabled: true, duetDisabled: false, stitchDisabled: true, maxVideoPostDurationSec: 600,
+  } });
+  const sparse = await c.fetchCreatorInfo({ accessToken: 'T' }, scriptedFetch([{ body: { error: { code: 'ok' }, data: {} } }]));
+  assert.deepEqual(sparse.creator.privacyLevelOptions, []);
+  assert.equal(sparse.creator.maxVideoPostDurationSec, null);
+});
+
+test('tiktok: fetchCreatorInfo classifies failures (auth vs client) and never leaks the token', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const noToken = await c.fetchCreatorInfo(null, noNet);
+  assert.equal(noToken.success, false);
+  assert.equal(noToken.kind, 'auth');
+  const http401 = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ ok: false, status: 401, body: 'nope' }]));
+  assert.equal(http401.success, false);
+  assert.equal(http401.kind, 'auth');
+  for (const code of ['access_token_invalid', 'scope_not_authorized']) {
+    const r = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code, message: 'Bearer SECRET' } } }]));
+    assert.equal(r.kind, 'auth', code);
+  }
+  const other = await c.fetchCreatorInfo({ accessToken: 'SECRET' }, scriptedFetch([{ body: { error: { code: 'spam_risk_too_many_posts', message: 'Bearer SECRET' } } }]));
+  assert.equal(other.success, false);
+  assert.equal(other.kind, 'client');
+  assert.match(other.error, /spam_risk_too_many_posts/);
+  assert.doesNotMatch(other.error, /SECRET/);
+});
+
+test('tiktok: publish always sends both brand toggles as booleans; validate rejects branded + SELF_ONLY', async () => {
+  const c = so.connectors.getConnector('tiktok');
+  const base = { text: 'cap', videoUrl: 'https://x/v.mp4' };
+  const s = scriptedFetch([{ body: { data: { publish_id: 'p1' }, error: { code: 'ok' } } }]);
+  await c.publish({ accessToken: 'T' }, base, s);
+  const info = JSON.parse(s.calls[0].options.body).post_info;
+  assert.equal(info.brand_content_toggle, false);
+  assert.equal(info.brand_organic_toggle, false);
+  const s2 = scriptedFetch([{ body: { data: { publish_id: 'p2' }, error: { code: 'ok' } } }]);
+  await c.publish({ accessToken: 'T' }, { ...base, privacyLevel: 'PUBLIC_TO_EVERYONE', brandContentToggle: true, brandOrganicToggle: true }, s2);
+  const info2 = JSON.parse(s2.calls[0].options.body).post_info;
+  assert.equal(info2.brand_content_toggle, true);
+  assert.equal(info2.brand_organic_toggle, true);
+  assert.equal(info2.privacy_level, 'PUBLIC_TO_EVERYONE');
+  // truthy non-booleans do not count as true
+  const s3 = scriptedFetch([{ body: { data: { publish_id: 'p3' }, error: { code: 'ok' } } }]);
+  await c.publish({ accessToken: 'T' }, { ...base, brandContentToggle: 'yes' }, s3);
+  assert.equal(JSON.parse(s3.calls[0].options.body).post_info.brand_content_toggle, false);
+
+  assert.match(c.validate({ ...base, brandContentToggle: true }).join(), /branded content cannot be private/); // defaulted SELF_ONLY
+  assert.match(c.validate({ ...base, brandContentToggle: true, privacyLevel: 'SELF_ONLY' }).join(), /branded content cannot be private/);
+  assert.deepEqual(c.validate({ ...base, brandContentToggle: true, privacyLevel: 'PUBLIC_TO_EVERYONE' }), []);
+  assert.deepEqual(c.validate({ ...base, brandOrganicToggle: true }), []);
+  const rejected = await c.publish({ accessToken: 'T' }, { ...base, brandContentToggle: true }, noNet);
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.kind, 'client');
+});
+
 test('reddit: publish() is a manual package — no network, no credentials, deterministic id', async () => {
   const c = so.connectors.getConnector('reddit');
   const payload = { subreddit: 'r/Test', title: 'Hello', text: 'body' };
@@ -396,6 +466,7 @@ test('oauth: authorize urls carry PKCE / provider quirks; exchange is pure and r
   const tt = new URL(so.oauth.buildAuthorizeUrl('tiktok', { clientId: 'k', redirectUri: 'https://cuddler.ai/cb' }).url);
   assert.equal(tt.searchParams.get('client_key'), 'k');
   assert.equal(tt.searchParams.get('client_id'), null);
+  assert.equal(tt.searchParams.get('scope'), 'user.info.basic,video.publish', 'only scopes the TikTok app has enabled');
   const rd = new URL(so.oauth.buildAuthorizeUrl('reddit', { clientId: 'c', redirectUri: 'https://cuddler.ai/cb' }).url);
   assert.equal(rd.searchParams.get('duration'), 'permanent');
   const yt = new URL(so.oauth.buildAuthorizeUrl('youtube', { clientId: 'c', redirectUri: 'https://cuddler.ai/cb' }).url);
