@@ -8,7 +8,7 @@ version: '3.9'
 # Reset DB: docker compose down -v   (deletes the postgres volume)
 #
 # Ports:
-#   http://localhost:8080/InfluenceX   - the app
+#   http://localhost:8080/             - the app
 #   localhost:5432                     - postgres (dev only — not for prod)
 #
 # First run: the app will auto-create the schema. Set ADMIN_EMAIL and
@@ -43,7 +43,9 @@ services:
     environment:
       NODE_ENV: development
       PORT: 8080
-      BASE_PATH: /InfluenceX
+      # The client is built for root-path hosting (vite base '/', API at /api),
+      # so the server must serve from the root too.
+      BASE_PATH: ""
       DATABASE_URL: postgresql://influencex:influencex_dev_password@postgres:5432/influencex
       # Optional: auto-create admin on first boot
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
